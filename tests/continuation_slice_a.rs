@@ -10,12 +10,16 @@
 //!
 //! What this does NOT prove: the full cross-provider/cross-harness live
 //! matrix of issue #155 (cloud-to-cloud, cloud-to-local escalation, …).
-//! Both workers run the same deterministic, offline, scripted fixture;
-//! the harness identities are distinct canonical Lite declarations
-//! (`lite.harness.native@v1` performs step 1, `lite.harness.protocol.bridge@v1`
-//! resumes with step 2). No model inference occurs anywhere in this
-//! file. The continuation is semantic work state, not a prompt, PTY,
-//! or process-local session.
+//! Both workers run the same deterministic, offline, scripted fixture.
+//! The harness identities are distinct canonical Lite declarations
+//! (`lite.harness.native@v1` performs step 1; the protocol-bridge
+//! declaration is used by worker B ONLY to compute its own SPEC 007
+//! compatibility decision — worker B does NOT execute any effect through
+//! the generic HarnessAdapter). No model inference occurs anywhere in
+//! this file. This is a structural cross-harness compatibility and
+//! semantic handoff test, not a completed generic-adapter execution and
+//! not a model/Foundry claim. The continuation is semantic work state,
+//! not a prompt, PTY, or process-local session.
 //!
 //! Worker B is launched as a genuinely separate OS process that receives
 //! only path/pin environment variables; it never sees worker A's memory.
@@ -28,13 +32,23 @@
 //! * "Fresh workspace" = a brand-new git worktree of the disposable source
 //!   repository at the committed step-1 revision, in a fresh directory B
 //!   requires to live under the checkpoint's allow-listed remap root.
+//! * Worker B's harness binding is used for the declaration and the
+//!   SPEC 007 decision ONLY. The resumed step executes the pinned
+//!   validator directly — this is NOT an adapter-executed step and must
+//!   not be read as completed generic-adapter execution.
 //! * The negative tests prove refusal before unauthorized filesystem
 //!   mutation; they do not exercise a live provider or any network.
+//! * Step 2 is durably idempotent: an explicit at-most-once claim in the
+//!   evaluation registry decides execution rights; a second ordinary
+//!   invocation observes the recorded completion and runs zero validators.
 
 mod common;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
+
+use anyhow::Context;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -61,6 +75,11 @@ use prometheos_lite::workflow::workspace::{
 };
 
 use common::task_execution::{git, run_validator, sha256_hex, stage_source_repository};
+
+use prometheos_lite::workflow::evaluate::{
+    LeaseConfig, ProposalRegistry, ProposalState, RegistryEntry, WorkflowFileLock,
+    is_entry_stale_at, now_iso,
+};
 
 const DESCRIPTOR_TEXT: &str =
     include_str!("fixtures/scenarios/rust-tokenbucket-bugfix/descriptor.json");
@@ -90,8 +109,7 @@ const ENV_RESULT: &str = "PROMETHEOS_CONTINUATION_RESULT";
 const ENV_B_HARNESS: &str = "PROMETHEOS_CONTINUATION_B_HARNESS";
 const ENV_REQUIRE_CAP: &str = "PROMETHEOS_CONTINUATION_REQUIRE_CAP";
 const ENV_RESUME_AUTHORITY: &str = "PROMETHEOS_CONTINUATION_RESUME_AUTHORITY_JSON";
-const ENV_REPLAY_STEP: &str = "PROMETHEOS_CONTINUATION_REPLAY_STEP";
-const ENV_REPLAY_KEY: &str = "PROMETHEOS_CONTINUATION_REPLAY_KEY";
+const ENV_CRASH_AFTER_CLAIM: &str = "PROMETHEOS_CONTINUATION_CRASH_AFTER_CLAIM";
 const ENV_TARGET_DIR: &str = "PROMETHEOS_CONTINUATION_TARGET_DIR";
 
 // ---------------------------------------------------------------------------
@@ -352,7 +370,6 @@ struct WorkerAOutcome {
     base_revision: String,
     artifact_digest: String,
     file_digest: String,
-    idempotency_key: String,
     effects: u64,
     checkpoint_path: PathBuf,
     checkpoint_digest: String,
@@ -608,7 +625,6 @@ fn run_worker_a(
         base_revision,
         artifact_digest,
         file_digest,
-        idempotency_key,
         effects,
         checkpoint_path,
         checkpoint_digest: checkpoint.checkpoint_digest,
@@ -756,6 +772,187 @@ fn build_portable_state(
 }
 
 // ---------------------------------------------------------------------------
+// Durable step-2 claim (reuses the evaluation registry lease, the same lock
+// domain as `workflow::evaluate`). The registry has no dedicated failure
+// state; the terminal outcome of an attempt is therefore bound into the
+// entry's `proposal_id` as `outcome:completed:<digest>` /
+// `outcome:failed:<exit-code>`, which is the existing field for binding an
+// entry to the identity of its outcome. No second journal or new contract
+// is introduced — the lock discipline, fencing fields and state machine are
+// the shared evaluate machinery, used as-is.
+// ---------------------------------------------------------------------------
+
+const CLAIM_LOCK: &str = "proposal_registry.lock";
+
+fn step2_claim_key(checkpoint: &ContinuationCheckpoint) -> String {
+    // Deterministic across processes: same checkpoint bytes → same claim
+    // key. A different attempt at the same step uses the same key and is
+    // therefore rejected rather than executed twice.
+    let prefix: String = checkpoint.checkpoint_digest.chars().take(16).collect();
+    format!("continuation-step2-{prefix}")
+}
+
+enum ClaimOutcome {
+    /// This process is the single winner of the claim.
+    Claimed,
+    /// A prior attempt recorded a terminal outcome `completed`.
+    AlreadyComplete,
+    /// A live-looking in-progress attempt exists; a fresh claimer cannot
+    /// distinguish it from a concurrent winner.
+    InProgress,
+    /// A stale or ambiguous in-progress attempt exists; the safe response
+    /// is to refuse, never to execute.
+    OutcomeUncertain,
+    /// A prior attempt recorded a terminal failure; automatic retry is
+    /// refused (the failure is preserved, not laundered).
+    FailedPreviously(String),
+}
+
+fn registry_path(repo: &Path) -> PathBuf {
+    repo.join(".prometheos")
+        .join("workflow")
+        .join("proposal_registry.json")
+}
+
+fn load_registry(repo: &Path) -> anyhow::Result<ProposalRegistry> {
+    let path = registry_path(repo);
+    if !path.exists() {
+        return Ok(ProposalRegistry::default());
+    }
+    let text = std::fs::read_to_string(&path).context("failed to read proposal registry")?;
+    serde_json::from_str(&text).context("corrupt proposal registry")
+}
+
+fn save_registry(repo: &Path, registry: &ProposalRegistry) -> anyhow::Result<()> {
+    atomic_write_json(&registry_path(repo), registry)
+}
+
+fn interpret_claim_entry(entry: &RegistryEntry) -> ClaimOutcome {
+    match entry.state {
+        ProposalState::ValidationComplete => ClaimOutcome::AlreadyComplete,
+        ProposalState::Reserved
+        | ProposalState::Generating
+        | ProposalState::ProposalGenerated
+        | ProposalState::Validating => {
+            if let Some(p) = &entry.proposal_id {
+                if p.starts_with("outcome:completed:") {
+                    return ClaimOutcome::AlreadyComplete;
+                }
+                if let Some(rest) = p.strip_prefix("outcome:failed:") {
+                    return ClaimOutcome::FailedPreviously(format!("exit {rest}"));
+                }
+            }
+            let lease = LeaseConfig {
+                stale_reservation_timeout: Duration::from_secs(120),
+                generation_lease_timeout: Duration::from_secs(600),
+                heartbeat_interval: Duration::from_secs(180),
+                tolerated_clock_skew: Duration::from_secs(5),
+            };
+            match is_entry_stale_at(entry, &lease, chrono::Utc::now()) {
+                Ok(true) => ClaimOutcome::OutcomeUncertain,
+                Ok(false) => ClaimOutcome::InProgress,
+                Err(_) => ClaimOutcome::OutcomeUncertain,
+            }
+        }
+    }
+}
+
+/// Atomically claim the step-2 execution right under the shared registry
+/// lock. Exactly one process can insert the Reserved entry; everyone else
+/// reads the entry and reports the recorded state without executing.
+fn try_claim_step2(
+    repo: &Path,
+    checkpoint: &ContinuationCheckpoint,
+) -> anyhow::Result<ClaimOutcome> {
+    let key = step2_claim_key(checkpoint);
+    let run_id = format!("worker-b-{}", &checkpoint.checkpoint_digest[..16]);
+    let Some(_lock) = WorkflowFileLock::try_acquire(repo, CLAIM_LOCK)? else {
+        // Another process is mutating the registry right now.
+        return Ok(ClaimOutcome::InProgress);
+    };
+    let mut registry = load_registry(repo)?;
+    match registry.entries.get(&key) {
+        None => {
+            let now = now_iso();
+            registry.entries.insert(
+                key.clone(),
+                RegistryEntry {
+                    state: ProposalState::Reserved,
+                    proposal_id: None,
+                    owner_run_id: run_id.clone(),
+                    lease_epoch: 1,
+                    reserved_at: now.clone(),
+                    updated_at: now.clone(),
+                    heartbeat_at: now,
+                    evidence_dir: None,
+                },
+            );
+            save_registry(repo, &registry)?;
+            Ok(ClaimOutcome::Claimed)
+        }
+        Some(entry) => Ok(interpret_claim_entry(entry)),
+    }
+}
+
+/// Mark the claimed entry as executing (Validating) — the durable boundary
+/// before any effect.
+fn mark_step2_executing(repo: &Path, checkpoint: &ContinuationCheckpoint) -> anyhow::Result<()> {
+    let key = step2_claim_key(checkpoint);
+    let Some(_lock) = WorkflowFileLock::try_acquire(repo, CLAIM_LOCK)? else {
+        anyhow::bail!("registry contended while marking step-2 in progress; refusing to proceed");
+    };
+    let mut registry = load_registry(repo)?;
+    let entry = registry
+        .entries
+        .get_mut(&key)
+        .ok_or_else(|| anyhow::anyhow!("claim entry vanished before execution began"))?;
+    let now = now_iso();
+    entry.state = ProposalState::Validating;
+    entry.updated_at = now.clone();
+    entry.heartbeat_at = now;
+    save_registry(repo, &registry)
+}
+
+enum Step2Outcome {
+    Completed(String),
+    Failed(String),
+}
+
+/// Record the terminal outcome of step 2. `Completed` marks the entry
+/// ValidationComplete; `Failed` records a failure binding and keeps the
+/// attempt non-reclaimable by an automatic retry.
+fn record_step2_outcome(
+    repo: &Path,
+    checkpoint: &ContinuationCheckpoint,
+    outcome: Step2Outcome,
+) -> anyhow::Result<()> {
+    let key = step2_claim_key(checkpoint);
+    let Some(_lock) = WorkflowFileLock::try_acquire(repo, CLAIM_LOCK)? else {
+        anyhow::bail!("registry contended while recording step-2 outcome; refusing to mark");
+    };
+    let mut registry = load_registry(repo)?;
+    let entry = registry
+        .entries
+        .get_mut(&key)
+        .ok_or_else(|| anyhow::anyhow!("claim entry vanished before recording outcome"))?;
+    let now = now_iso();
+    entry.updated_at = now.clone();
+    entry.heartbeat_at = now;
+    match outcome {
+        Step2Outcome::Completed(digest) => {
+            entry.state = ProposalState::ValidationComplete;
+            entry.proposal_id = Some(format!("outcome:completed:{digest}"));
+        }
+        Step2Outcome::Failed(exit_code) => {
+            // State stays Validating: a failure is recorded and preserved,
+            // never laundered into completion and never auto-retried.
+            entry.proposal_id = Some(format!("outcome:failed:{exit_code}"));
+        }
+    }
+    save_registry(repo, &registry)
+}
+
+// ---------------------------------------------------------------------------
 // Worker B — fresh process; loads the checkpoint from bytes; refuses closed
 // on any defect; resumes only the pending step.
 // ---------------------------------------------------------------------------
@@ -781,8 +978,6 @@ struct WorkerBInputs {
     b_harness: String,
     require_cap: String,
     resume_authority: Option<AuthoritySnapshot>,
-    replay_step: Option<String>,
-    replay_key: Option<String>,
     target_dir: PathBuf,
 }
 
@@ -802,8 +997,6 @@ fn worker_b_inputs() -> anyhow::Result<WorkerBInputs> {
             .ok()
             .map(|t| serde_json::from_str(&t))
             .transpose()?,
-        replay_step: std::env::var(ENV_REPLAY_STEP).ok(),
-        replay_key: std::env::var(ENV_REPLAY_KEY).ok(),
         target_dir: PathBuf::from(
             std::env::var(ENV_TARGET_DIR).unwrap_or_else(|_| "target-b".to_string()),
         ),
@@ -844,17 +1037,31 @@ fn check_authority_narrowing(
         !resumed.allow_dependency_changes || recorded.allow_dependency_changes,
         "resumed authority enables dependency changes not granted before"
     );
-    if let (Some(r), Some(m)) = (resumed.max_files_changed, recorded.max_files_changed) {
-        anyhow::ensure!(
-            r <= m,
-            "resumed authority widens max_files_changed {m} -> {r}"
-        );
+    // Resource ceilings narrow or stay equal — never widen, and a finite
+    // recorded ceiling may not be dropped entirely.
+    match (resumed.max_files_changed, recorded.max_files_changed) {
+        (Some(r), Some(m)) => {
+            anyhow::ensure!(
+                r <= m,
+                "resumed authority widens max_files_changed {m} -> {r}"
+            )
+        }
+        (None, Some(m)) => {
+            anyhow::bail!("resumed authority removes the finite max_files_changed ceiling {m}")
+        }
+        (Some(_), None) | (None, None) => {}
     }
-    if let (Some(r), Some(m)) = (resumed.max_lines_changed, recorded.max_lines_changed) {
-        anyhow::ensure!(
-            r <= m,
-            "resumed authority widens max_lines_changed {m} -> {r}"
-        );
+    match (resumed.max_lines_changed, recorded.max_lines_changed) {
+        (Some(r), Some(m)) => {
+            anyhow::ensure!(
+                r <= m,
+                "resumed authority widens max_lines_changed {m} -> {r}"
+            )
+        }
+        (None, Some(m)) => {
+            anyhow::bail!("resumed authority removes the finite max_lines_changed ceiling {m}")
+        }
+        (Some(_), None) | (None, None) => {}
     }
     anyhow::ensure!(
         resumed.policy_digest == recorded.policy_digest,
@@ -863,10 +1070,9 @@ fn check_authority_narrowing(
     Ok(())
 }
 
-/// Lexical path normalization for prefix comparison: strips Windows
-/// verbatim prefixes, unifies separators, collapses duplicates, and
-/// lowercases on Windows. Does NOT touch the filesystem, so it works on
-/// paths that do not exist yet.
+/// Lexical normalization for prefix comparison: strips Windows verbatim
+/// prefixes, unifies separators, collapses duplicates, lowercases on
+/// Windows. Does NOT touch the filesystem.
 fn lexical_normalize(path: &Path) -> String {
     let s = path.to_string_lossy().into_owned();
     #[cfg(windows)]
@@ -913,14 +1119,108 @@ fn lexical_normalize(path: &Path) -> String {
     }
 }
 
-fn in_canonical_prefix(path: &Path, prefix: &str) -> bool {
-    let p = lexical_normalize(path);
-    let pre = lexical_normalize(Path::new(prefix));
+/// Lexical absolute-path resolution of `.` and `..` components WITHOUT
+/// touching the filesystem. Rejects `..` traversal that would escape the
+/// filesystem root.
+fn lexical_resolve(p: &Path) -> anyhow::Result<PathBuf> {
+    let mut out = PathBuf::new();
+    for comp in p.components() {
+        match comp {
+            std::path::Component::Prefix(_) | std::path::Component::RootDir => {
+                out.push(comp.as_os_str());
+            }
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !out.pop() {
+                    anyhow::bail!("parent traversal escapes the filesystem root");
+                }
+            }
+            std::path::Component::Normal(seg) => out.push(seg),
+        }
+    }
+    Ok(out)
+}
+
+/// `p` is the same path as `allowed`, or strictly inside it, after
+/// normalization. Both inputs are already absolute or canonical.
+fn path_within(p: &Path, allowed: &Path) -> bool {
+    let p = lexical_normalize(p);
+    let pre = lexical_normalize(allowed);
     #[cfg(windows)]
     let sep = "\\";
     #[cfg(not(windows))]
     let sep = "/";
     !pre.is_empty() && (p == pre || p.starts_with(&format!("{pre}{sep}")))
+}
+
+/// Filesystem-aware containment resolution for the remap target.
+///
+/// Returns the canonical, trusted location the resumed workspace may be
+/// created under, or an error if anything about the request is unsafe or
+/// cannot be checked. No directory is created here.
+///
+/// Rules:
+/// - the approved root must exist and canonicalize;
+/// - the requested root is made absolute and lexically resolved
+///   (`..` traversal that escapes the root or drive is rejected);
+/// - the longest existing ancestor of the request is canonicalized and
+///   must lie inside the approved root (this defeats symlink/junction
+///   escapes);
+/// - the non-existing tail is re-appended and re-checked lexically;
+/// - any target that cannot be established this way is refused.
+fn resolve_within_allowed(requested: &Path, allowed_prefix: &str) -> anyhow::Result<PathBuf> {
+    let allowed = Path::new(allowed_prefix);
+    let canon_allowed = std::fs::canonicalize(allowed)
+        .map_err(|e| anyhow::anyhow!("approved remap root cannot be canonicalized: {e}"))?;
+    let abs = if requested.is_absolute() {
+        requested.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(requested)
+    };
+    let resolved = lexical_resolve(&abs)?;
+    // Longest existing ancestor of the resolved request.
+    let mut existing = resolved.as_path();
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        if existing.exists() {
+            break;
+        }
+        match existing.file_name() {
+            Some(name) => {
+                tail.push(name.to_os_string());
+                existing = existing
+                    .parent()
+                    .ok_or_else(|| anyhow::anyhow!("path escapes the filesystem root"))?;
+            }
+            None => anyhow::bail!("path escapes the filesystem root"),
+        }
+    }
+    let canon_existing = std::fs::canonicalize(existing).map_err(|e| {
+        anyhow::anyhow!("existing ancestor of the remap root cannot be canonicalized: {e}")
+    })?;
+    anyhow::ensure!(
+        path_within(&canon_existing, &canon_allowed),
+        "existing ancestor of the remap root escapes the approved root"
+    );
+    let mut full = canon_existing;
+    for part in tail.into_iter().rev() {
+        full.push(part);
+    }
+    anyhow::ensure!(
+        path_within(&full, &canon_allowed),
+        "remap root escapes the approved root"
+    );
+    // git (and some other tools) reject verbatim-prefixed paths; the
+    // containment check used the canonical form, so strip the prefix for
+    // consumers that need an ordinary absolute path.
+    #[cfg(windows)]
+    {
+        let s = full.to_string_lossy().into_owned();
+        if let Some(rest) = s.strip_prefix(r"\\?\") {
+            return Ok(PathBuf::from(rest));
+        }
+    }
+    Ok(full)
 }
 
 fn verify_artifacts(
@@ -1079,11 +1379,12 @@ fn worker_b_main(env: WorkerBInputs) -> anyhow::Result<(i32, Value)> {
         "diagnostics": [],
         "workspaceCreated": false,
         "capabilityEffects": 0,
-        "replayBlocked": false,
+        "stepClaim": "unclaimed",
         "validator": null,
         "artifactVerified": false,
         "compatibilityDecision": null,
         "resumeAuthority": "equal",
+        "harnessExecutionScope": "structural-compatibility-only",
         "evidence": {},
     });
 
@@ -1247,7 +1548,46 @@ fn worker_b_main(env: WorkerBInputs) -> anyhow::Result<(i32, Value)> {
         "equal"
     });
 
-    // ---- 6. replay guards — before ANY filesystem effect ------------------
+    // ---- 6. durable step-2 claim — BEFORE any effect --------------------
+    // Exactly one process may claim the pending step; a fresh invocation of
+    // worker B against the same checkpoint must never re-execute it.
+    match try_claim_step2(&env.source, &checkpoint)? {
+        ClaimOutcome::AlreadyComplete => {
+            result["outcome"] = json!("already-complete");
+            result["stepClaim"] = json!("already-complete");
+            result["workspaceCreated"] = json!(false);
+            result["capabilityEffects"] = json!(0);
+            return Ok((0, result));
+        }
+        ClaimOutcome::InProgress => {
+            result["outcome"] = json!("in-progress");
+            result["stepClaim"] = json!("in-progress");
+            result["workspaceCreated"] = json!(false);
+            return Ok((3, result));
+        }
+        ClaimOutcome::OutcomeUncertain => {
+            result["outcome"] = json!("outcome-uncertain");
+            result["stepClaim"] = json!("outcome-uncertain");
+            result["workspaceCreated"] = json!(false);
+            return Ok((3, result));
+        }
+        ClaimOutcome::FailedPreviously(detail) => {
+            result["outcome"] = json!("failed-previously");
+            result["stepClaim"] = json!("failed-previously");
+            result["diagnostics"] = json!([format!("prior attempt recorded failure: {detail}")]);
+            result["workspaceCreated"] = json!(false);
+            return Ok((3, result));
+        }
+        ClaimOutcome::Claimed => {
+            mark_step2_executing(&env.source, &checkpoint)?;
+            result["stepClaim"] = json!("claimed");
+        }
+    }
+    // Crash injection point for the crash-after-claim test: the attempt
+    // dies with the claim recorded but the step not yet executed.
+    if std::env::var(ENV_CRASH_AFTER_CLAIM).as_deref() == Ok("1") {
+        std::process::exit(42);
+    }
     let pending: Vec<&str> = checkpoint
         .portable_state
         .steps
@@ -1255,44 +1595,30 @@ fn worker_b_main(env: WorkerBInputs) -> anyhow::Result<(i32, Value)> {
         .filter(|s| s.status == WorkStepStatus::Pending)
         .map(|s| s.step_id.as_str())
         .collect();
-    if let Some(step) = &env.replay_step {
-        let consumed = checkpoint
-            .portable_state
-            .steps
-            .iter()
-            .any(|s| &s.step_id == step && s.status == WorkStepStatus::Completed);
-        if consumed || !pending.iter().any(|p| p == step) {
-            result["outcome"] = json!("duplicate-step-refused");
-            result["replayBlocked"] = json!(true);
+
+    // ---- 7. workspace remap: filesystem-aware containment ---------------
+    let canon_allowed = match std::fs::canonicalize(&checkpoint.workspace_remap.allowed_root_prefix)
+    {
+        Ok(a) => a,
+        Err(e) => {
+            result["outcome"] = json!("workspace-remap-unapproved");
+            result["diagnostics"] =
+                json!([format!("approved remap root cannot be canonicalized: {e}")]);
             return Ok((3, result));
         }
-    }
-    if let Some(key) = &env.replay_key
-        && checkpoint
-            .journal
-            .idempotency_consumed
-            .iter()
-            .any(|k| k == key)
-    {
-        result["outcome"] = json!("replayed-idempotency-identity");
-        result["replayBlocked"] = json!(true);
-        return Ok((3, result));
-    }
-
-    // ---- 7. workspace remap: only inside the allow-listed prefix ---------
-    if !in_canonical_prefix(
+    };
+    let resolved_remap = match resolve_within_allowed(
         &env.remap_root,
         &checkpoint.workspace_remap.allowed_root_prefix,
     ) {
-        result["outcome"] = json!("workspace-remap-unapproved");
-        result["diagnostics"] = json!([format!(
-            "remap root {} is outside the allow-listed prefix {}",
-            env.remap_root.display(),
-            checkpoint.workspace_remap.allowed_root_prefix
-        )]);
-        return Ok((3, result));
-    }
-    std::fs::create_dir_all(&env.remap_root)?;
+        Ok(r) => r,
+        Err(e) => {
+            result["outcome"] = json!("workspace-remap-unapproved");
+            result["diagnostics"] = json!([format!("{e:#}")]);
+            return Ok((3, result));
+        }
+    };
+    std::fs::create_dir_all(&resolved_remap)?;
     result["workspaceCreated"] = json!(false); // until acquire succeeds
 
     // ---- 8. fresh workspace, pinned at the step-1 head, same logical id --
@@ -1312,7 +1638,9 @@ fn worker_b_main(env: WorkerBInputs) -> anyhow::Result<(i32, Value)> {
     }
     .sealed();
     let adapter = GitWorktreeWorkspace {
-        parent_dir: env.remap_root.clone(),
+        // The canonical, containment-checked location — never the raw
+        // caller-supplied string.
+        parent_dir: resolved_remap.clone(),
         source_repo: env.source.clone(),
     };
     let acquired = WorkspaceAdapter::acquire(&adapter, &manifest_b)?;
@@ -1325,6 +1653,27 @@ fn worker_b_main(env: WorkerBInputs) -> anyhow::Result<(i32, Value)> {
     acquired.ensure_writable()?;
     WorkspaceAdapter::validate(&adapter, &acquired)?;
     let worktree_root = acquired.root.clone();
+    // Post-acquisition containment: the created workspace must itself sit
+    // inside the approved root, or it is torn down and the resume refuses.
+    match std::fs::canonicalize(&worktree_root) {
+        Ok(canon_created) if path_within(&canon_created, &canon_allowed) => {}
+        _ => {
+            let _ = git(
+                &env.source,
+                &[
+                    "worktree",
+                    "remove",
+                    "--force",
+                    &worktree_root.to_string_lossy(),
+                ],
+            );
+            result["outcome"] = json!("workspace-remap-escape");
+            result["diagnostics"] =
+                json!(["created workspace escapes the approved root; it was removed"]);
+            result["workspaceCreated"] = json!(false);
+            return Ok((3, result));
+        }
+    }
     result["workspaceCreated"] = json!(true);
 
     // ---- 9. the step-1 artifact must be intact WITHOUT being rewritten --
@@ -1378,8 +1727,31 @@ fn worker_b_main(env: WorkerBInputs) -> anyhow::Result<(i32, Value)> {
     // ---- 12. honest accounting: completed vs failed, evidence attached ---
     let passed = validator.exit_code == Some(pins.expected_exit_code) && !validator.timed_out;
     let after = if passed {
+        // Record the terminal completion in the durable registry BEFORE
+        // publishing the after-state, so a later invocation observes the
+        // completion and never re-executes the step.
+        record_step2_outcome(
+            &env.source,
+            &checkpoint,
+            Step2Outcome::Completed(
+                validator
+                    .output_digest
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string()),
+            ),
+        )?;
         finalize_after_state(&checkpoint.portable_state, true, Some(&validator), None)
     } else {
+        record_step2_outcome(
+            &env.source,
+            &checkpoint,
+            Step2Outcome::Failed(
+                validator
+                    .exit_code
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "none".to_string()),
+            ),
+        )?;
         finalize_after_state(
             &checkpoint.portable_state,
             false,
@@ -1599,6 +1971,11 @@ fn durable_continuation_worker_b_resumes_in_fresh_process_and_workspace() {
     let run = run_worker_b(&sandbox, &[], None, None);
     assert_eq!(run.code, 0, "worker B must run: {:?}", run.result);
     assert_eq!(run.result["outcome"], "completed");
+    assert_eq!(run.result["stepClaim"], "claimed");
+    assert_eq!(
+        run.result["harnessExecutionScope"],
+        "structural-compatibility-only"
+    );
     assert_eq!(run.result["workspaceCreated"], true);
     assert_eq!(run.result["capabilityEffects"], 1);
     assert_eq!(run.result["artifactVerified"], true);
@@ -1611,6 +1988,13 @@ fn durable_continuation_worker_b_resumes_in_fresh_process_and_workspace() {
     assert_eq!(
         run.result["evidence"]["freshWorkspaceRevision"], a.head_revision,
         "fresh workspace pins the step-1 head"
+    );
+    // The created workspace remains inside the approved root.
+    let canon_allowed = std::fs::canonicalize(sandbox.root()).unwrap();
+    let canon_fresh = std::fs::canonicalize(fresh).unwrap();
+    assert!(
+        path_within(&canon_fresh, &canon_allowed),
+        "created workspace must be contained in the approved root"
     );
 
     // Validator really ran, really passed, on the resumed tree.
@@ -1835,6 +2219,51 @@ fn unauthorized_authority_widening_refuses() {
     assert!(!sandbox.resume_root().exists());
 }
 
+/// Removing a finite ceiling on resume must refuse: `Some(1)` → `None` is
+/// a widening, not a narrowing. Fresh process, no effects allowed.
+#[test]
+fn authority_dropped_max_files_ceiling_refuses() {
+    let (sandbox, _a) = a_completed_fixture(&GOOD_EDIT);
+    let checkpoint = parse_checkpoint(&sandbox.checkpoint_path());
+    let mut widened = checkpoint.portable_state.authority.clone();
+    widened.max_files_changed = None;
+    let json = serde_json::to_string(&widened).unwrap();
+    let run = run_worker_b(&sandbox, &[(ENV_RESUME_AUTHORITY, json)], None, None);
+    assert_eq!(run.code, 3, "dropped ceiling must refuse: {:?}", run.result);
+    assert_eq!(run.result["outcome"], "authority-widened");
+    assert_eq!(run.result["workspaceCreated"], false);
+    assert!(!sandbox.resume_root().exists());
+}
+
+/// Removing a finite ceiling on resume must refuse: `Some(4)` → `None`
+/// must not authorize a resumed line-count effect.
+#[test]
+fn authority_dropped_max_lines_ceiling_refuses() {
+    let (sandbox, _a) = a_completed_fixture(&GOOD_EDIT);
+    let checkpoint = parse_checkpoint(&sandbox.checkpoint_path());
+    let mut widened = checkpoint.portable_state.authority.clone();
+    widened.max_lines_changed = None;
+    let json = serde_json::to_string(&widened).unwrap();
+    let run = run_worker_b(&sandbox, &[(ENV_RESUME_AUTHORITY, json)], None, None);
+    assert_eq!(run.code, 3, "dropped ceiling must refuse: {:?}", run.result);
+    assert_eq!(run.result["outcome"], "authority-widened");
+    assert_eq!(run.result["workspaceCreated"], false);
+    assert!(!sandbox.resume_root().exists());
+}
+
+/// Narrowing a finite ceiling is allowed (Some(1) → Some(1)); this is the
+/// control for the two refusals above.
+#[test]
+fn authority_equal_ceilings_still_authorizes_resume() {
+    let (sandbox, _a) = a_completed_fixture(&GOOD_EDIT);
+    let checkpoint = parse_checkpoint(&sandbox.checkpoint_path());
+    let equal = checkpoint.portable_state.authority.clone();
+    let json = serde_json::to_string(&equal).unwrap();
+    let run = run_worker_b(&sandbox, &[(ENV_RESUME_AUTHORITY, json)], None, None);
+    assert_eq!(run.code, 0, "equal ceilings must run: {:?}", run.result);
+    assert_eq!(run.result["outcome"], "completed");
+}
+
 #[test]
 fn missing_completed_step_evidence_refuses() {
     let (sandbox, _a) = a_completed_fixture(&GOOD_EDIT);
@@ -1911,37 +2340,305 @@ fn incompatible_workspace_ref_refuses() {
 }
 
 #[test]
-fn duplicate_step_invocation_refuses() {
+fn remap_parent_traversal_refuses() {
+    let (sandbox, _a) = a_completed_fixture(&GOOD_EDIT);
+    let outside = std::env::temp_dir().join(format!("continuation-outside-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&outside);
+    // Request <allowed-root>/../<outside-name> — a parent-traversal path.
+    let traversal = sandbox
+        .root()
+        .join("..")
+        .join(outside.file_name().expect("outside has a file name"));
+    let run = run_worker_b(&sandbox, &[], Some(traversal), None);
+    assert_eq!(run.code, 3);
+    assert_eq!(run.result["outcome"], "workspace-remap-unapproved");
+    assert!(!outside.exists(), "no external directory may be created");
+    assert!(!sandbox.resume_root().exists());
+}
+
+#[test]
+fn remap_symlink_escape_refuses() {
+    let (sandbox, _a) = a_completed_fixture(&GOOD_EDIT);
+    let outside = std::env::temp_dir().join(format!(
+        "continuation-symlink-outside-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&outside);
+    std::fs::create_dir_all(&outside).expect("outside dir creates");
+    // A symlink (or Windows junction) INSIDE the allowed root that points
+    // OUTSIDE it must not let the resumed workspace escape.
+    let escape_link = sandbox.root().join("escape");
+    #[cfg(windows)]
+    {
+        let r = std::os::windows::fs::symlink_dir(&outside, &escape_link);
+        if r.is_err() {
+            let status = Command::new("cmd")
+                .args([
+                    "/c",
+                    "mklink",
+                    "/J",
+                    &escape_link.to_string_lossy(),
+                    &outside.to_string_lossy(),
+                ])
+                .status()
+                .expect("mklink spawns");
+            assert!(status.success(), "junction creation failed");
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        std::os::unix::fs::symlink(&outside, &escape_link).expect("symlink creates");
+    }
+    let remap = escape_link.join("workspaces");
+    let run = run_worker_b(&sandbox, &[], Some(remap), None);
+    assert_eq!(run.code, 3);
+    assert_eq!(run.result["outcome"], "workspace-remap-unapproved");
+    assert_eq!(
+        std::fs::read_dir(&outside).map(|d| d.count()).unwrap_or(1),
+        0,
+        "nothing may be created through the symlink"
+    );
+    assert!(!sandbox.resume_root().exists());
+    let _ = std::fs::remove_dir_all(&outside);
+}
+
+#[test]
+fn remap_workspace_identity_mismatch_refuses() {
+    let (sandbox, _a) = a_completed_fixture(&GOOD_EDIT);
+    let mut checkpoint = parse_checkpoint(&sandbox.checkpoint_path());
+    checkpoint.workspace_remap.workspace_id = "foreign-workspace-id".to_string();
+    reseal(&mut checkpoint);
+    let forged = sandbox.checkpoint_dir().join("forged_identity.json");
+    std::fs::write(&forged, serde_json::to_string_pretty(&checkpoint).unwrap()).unwrap();
+    let run = run_worker_b(&sandbox, &[], None, Some(forged));
+    assert_eq!(run.code, 3);
+    let diagnostics: Vec<String> = run.result["diagnostics"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|v| v.as_str().unwrap_or("").to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.contains("different logical workspace")),
+        "attestation failure mentions the workspace identity: {diagnostics:?}"
+    );
+    assert!(!sandbox.resume_root().exists());
+}
+
+#[test]
+fn remap_head_revision_mismatch_refuses() {
+    let (sandbox, _a) = a_completed_fixture(&GOOD_EDIT);
+    let checkpoint = parse_checkpoint(&sandbox.checkpoint_path());
+    let mut checkpoint = checkpoint;
+    checkpoint.workspace_remap.allowed_head_revision =
+        checkpoint.workspace_remap.base_revision.clone();
+    reseal(&mut checkpoint);
+    let forged = sandbox.checkpoint_dir().join("forged_revision.json");
+    std::fs::write(&forged, serde_json::to_string_pretty(&checkpoint).unwrap()).unwrap();
+    let run = run_worker_b(&sandbox, &[], None, Some(forged));
+    assert_eq!(run.code, 3);
+    let diagnostics: Vec<String> = run.result["diagnostics"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|v| v.as_str().unwrap_or("").to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        diagnostics.iter().any(|d| d.contains("head revision")),
+        "attestation failure mentions the head revision: {diagnostics:?}"
+    );
+    assert!(!sandbox.resume_root().exists());
+}
+
+/// A second, ordinary invocation of worker B against the same checkpoint
+/// must observe the recorded completion and execute ZERO validators.
+#[test]
+fn second_normal_worker_b_observes_completed_step_with_zero_validators() {
     let (sandbox, a) = a_completed_fixture(&GOOD_EDIT);
-    let before = sha256_hex(&std::fs::read(sandbox.source().join("src/bucket.rs")).unwrap());
+    let first = run_worker_b(&sandbox, &[], None, None);
+    assert_eq!(first.code, 0, "first worker B must run: {:?}", first.result);
+    assert_eq!(first.result["outcome"], "completed");
+    assert_eq!(first.result["stepClaim"], "claimed");
+    assert_eq!(first.result["capabilityEffects"], 1);
+
+    let pin_before = git(&sandbox.source(), &["rev-parse", CONTINUATION_REF]).unwrap();
+    let children_before = std::fs::read_dir(sandbox.workspaces_b())
+        .map(|d| d.count())
+        .unwrap_or(0);
+
+    // The ordinary second invocation: no replay flags, no tricks.
+    let second = run_worker_b(&sandbox, &[], None, None);
+    assert_eq!(
+        second.code, 0,
+        "second worker B must observe: {:?}",
+        second.result
+    );
+    assert_eq!(second.result["outcome"], "already-complete");
+    assert_eq!(second.result["stepClaim"], "already-complete");
+    assert_eq!(
+        second.result["capabilityEffects"], 0,
+        "zero validators may start"
+    );
+    assert_eq!(second.result["validator"], Value::Null);
+    assert_eq!(second.result["workspaceCreated"], false);
+
+    // Nothing duplicated: no second worktree, no second commit, no file writes.
+    let children_after = std::fs::read_dir(sandbox.workspaces_b())
+        .map(|d| d.count())
+        .unwrap_or(0);
+    assert_eq!(children_before, children_after);
+    let pin_after = git(&sandbox.source(), &["rev-parse", CONTINUATION_REF]).unwrap();
+    assert_eq!(pin_before, pin_after);
+    let _ = a;
+}
+
+#[test]
+fn concurrent_worker_b_processes_exactly_one_claims() {
+    let (sandbox, _a) = a_completed_fixture(&GOOD_EDIT);
+    let pin_before = git(&sandbox.source(), &["rev-parse", CONTINUATION_REF]).unwrap();
+
+    // Two worker B processes launched against the same checkpoint at
+    // the same time. Exactly one may win the claim and execute the step.
+    let result_a = sandbox.root().join("worker_b_a.json");
+    let result_b = sandbox.root().join("worker_b_b.json");
+    let mut cmd_a = Command::new(std::env::current_exe().expect("test exe"));
+    let mut cmd_b = Command::new(std::env::current_exe().expect("test exe"));
+    for (key, value) in std::env::vars_os() {
+        if !key
+            .to_string_lossy()
+            .starts_with("PROMETHEOS_CONTINUATION_")
+        {
+            cmd_a.env(key.clone(), value.clone());
+            cmd_b.env(key, value);
+        }
+    }
+    for cmd in [&mut cmd_a, &mut cmd_b] {
+        cmd.arg("--exact")
+            .arg("continuation_worker_b_child")
+            .arg("--test-threads=1")
+            .arg("--nocapture");
+    }
+    cmd_a.env(ENV_ROLE, "b");
+    cmd_b.env(ENV_ROLE, "b");
+    cmd_a.env(ENV_CHECKPOINT, sandbox.checkpoint_path());
+    cmd_b.env(ENV_CHECKPOINT, sandbox.checkpoint_path());
+    cmd_a.env(ENV_CHECKPOINT_DIR, sandbox.checkpoint_dir());
+    cmd_b.env(ENV_CHECKPOINT_DIR, sandbox.checkpoint_dir());
+    cmd_a.env(ENV_SOURCE, sandbox.source());
+    cmd_b.env(ENV_SOURCE, sandbox.source());
+    cmd_a.env(ENV_REMAP_ROOT, sandbox.workspaces_b());
+    cmd_b.env(ENV_REMAP_ROOT, sandbox.workspaces_b());
+    cmd_a.env(ENV_TARGET_DIR, sandbox.target_dir());
+    cmd_b.env(ENV_TARGET_DIR, sandbox.target_dir());
+    cmd_a.env(ENV_RESULT, &result_a);
+    cmd_b.env(ENV_RESULT, &result_b);
+    cmd_a.env("CARGO_NET_OFFLINE", "true");
+    cmd_b.env("CARGO_NET_OFFLINE", "true");
+    cmd_a.env("CARGO_TARGET_DIR", sandbox.target_dir());
+    cmd_b.env("CARGO_TARGET_DIR", sandbox.target_dir());
+
+    let mut child_a = cmd_a.spawn().expect("spawn worker B a");
+    let mut child_b = cmd_b.spawn().expect("spawn worker B b");
+    let status_a = child_a.wait().expect("reap worker B a");
+    let status_b = child_b.wait().expect("reap worker B b");
+    let out_a: Value = serde_json::from_str(
+        &std::fs::read_to_string(&result_a)
+            .unwrap_or_else(|_| "{\"outcome\":\"no-result\"}".to_string()),
+    )
+    .expect("result A parses");
+    let out_b: Value = serde_json::from_str(
+        &std::fs::read_to_string(&result_b)
+            .unwrap_or_else(|_| "{\"outcome\":\"no-result\"}".to_string()),
+    )
+    .expect("result B parses");
+
+    let outcomes = [
+        out_a["outcome"].as_str().unwrap_or("?").to_string(),
+        out_b["outcome"].as_str().unwrap_or("?").to_string(),
+    ];
+    let completed = outcomes.iter().filter(|o| *o == "completed").count();
+    let in_progress = outcomes.iter().filter(|o| *o == "in-progress").count();
+    assert_eq!(
+        completed, 1,
+        "exactly one worker B may execute the step: {outcomes:?}"
+    );
+    assert_eq!(
+        in_progress, 1,
+        "the other worker B must observe the claim and refuse: {outcomes:?}"
+    );
+    let effects: i64 = [&out_a, &out_b]
+        .iter()
+        .map(|r| r["capabilityEffects"].as_i64().unwrap_or(0))
+        .sum();
+    assert_eq!(effects, 1, "exactly one validator may have run");
+    // No duplicate effects at all: source unchanged, no extra commits.
+    let pin_after = git(&sandbox.source(), &["rev-parse", CONTINUATION_REF]).unwrap();
+    assert_eq!(pin_before, pin_after);
+    assert_eq!(
+        git(&sandbox.source(), &["rev-parse", "HEAD"]).unwrap(),
+        _a.base_revision
+    );
+    let _ = (status_a, status_b);
+}
+
+#[test]
+fn crash_after_claim_never_executes_and_refuses_reentry() {
+    let (sandbox, a) = a_completed_fixture(&GOOD_EDIT);
+    // The child claims the step, then dies before any effect.
     let run = run_worker_b(
         &sandbox,
-        &[(ENV_REPLAY_STEP, STEP1.to_string())],
+        &[(ENV_CRASH_AFTER_CLAIM, "1".to_string())],
         None,
         None,
     );
-    assert_eq!(run.code, 3);
-    assert_eq!(run.result["outcome"], "duplicate-step-refused");
-    // The source must be untouched: source repo HEAD is unchanged and the
-    // fixture file still pins r0 bytes.
-    let head = git(&sandbox.source(), &["rev-parse", "HEAD"]).unwrap();
-    assert_eq!(head, a.base_revision, "resume must not create commits");
-    let _ = before;
+    assert_eq!(run.code, 42, "crash injection must fire: {:?}", run.result);
+
+    // Re-running worker B against the same checkpoint observes the pending
+    // claim and refuses WITHOUT executing anything.
+    let second = run_worker_b(&sandbox, &[], None, None);
+    assert_eq!(second.code, 3);
+    assert_eq!(second.result["outcome"], "in-progress");
+    assert_eq!(second.result["capabilityEffects"], 0);
+    assert_eq!(second.result["validator"], Value::Null);
     assert!(!sandbox.resume_root().exists());
+    let head = git(&sandbox.source(), &["rev-parse", "HEAD"]).unwrap();
+    assert_eq!(head, a.base_revision);
+    assert!(
+        !sandbox
+            .workspaces_b()
+            .join(WORK_ID)
+            .join("worktree")
+            .exists()
+    );
 }
 
 #[test]
 fn replayed_idempotency_identity_refuses() {
     let (sandbox, a) = a_completed_fixture(&GOOD_EDIT);
-    let run = run_worker_b(
-        &sandbox,
-        &[(ENV_REPLAY_KEY, a.idempotency_key.clone())],
-        None,
-        None,
+    let run = run_worker_b(&sandbox, &[], None, None);
+    assert_eq!(run.code, 0);
+    // A second attempt against the same checkpoint (same idempotency
+    // identity for step 2) is refused to ZERO effects.
+    let second = run_worker_b(&sandbox, &[], None, None);
+    assert_eq!(second.code, 0);
+    assert_eq!(second.result["outcome"], "already-complete");
+    assert_eq!(second.result["capabilityEffects"], 0);
+    // After the first normal run completes, a second run creates nothing
+    // and executes nothing.
+    let children = std::fs::read_dir(sandbox.workspaces_b())
+        .map(|d| d.count())
+        .unwrap_or(0);
+    assert_eq!(
+        children, 1,
+        "a second invocation must not re-create the workspace"
     );
-    assert_eq!(run.code, 3);
-    assert_eq!(run.result["outcome"], "replayed-idempotency-identity");
-    assert!(!sandbox.resume_root().exists());
+    let _ = a;
 }
 
 #[test]
