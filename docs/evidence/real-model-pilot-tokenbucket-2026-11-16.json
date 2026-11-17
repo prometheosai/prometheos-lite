@@ -1,0 +1,493 @@
+{
+  "accounting": {
+    "cost": {
+      "currency": "USD",
+      "derivationTokens": 3435,
+      "method": "directed-rates",
+      "minorUnits": 0,
+      "pricingSource": "example-operator-price-book",
+      "pricingVersion": "example-2026-11",
+      "state": "known"
+    },
+    "usage": {
+      "completionTokens": 258,
+      "promptTokens": 3177,
+      "state": "known",
+      "totalTokens": 3435
+    }
+  },
+  "attempts": [
+    {
+      "applied": true,
+      "attempt": 1,
+      "editCount": 1,
+      "failure": null,
+      "modelResponseDigest": "34689e41bf1c44bc6c82529341a5e6aaffeb3e5bc6d72755ccfffd90c0178979",
+      "proposal": "{\"edits\":[{\"file\":\"src/bucket.rs\",\"search\":\"    fn refill(&mut self, now_millis: u64) {\\n        let elapsed = now_millis.saturating_sub(self.last_refill);\\n        let ticks = elapsed / self.tick_millis;\\n        if ticks == 0 {\\n            return;\\n        }\\n        let gained = ticks.saturating_mul(self.refill_per_tick);\\n        self.tokens = self.capacity.min(self.tokens.saturating_add(gained));\\n        self.last_refill = now_millis;\\n    }\",\"replace\":\"    fn refill(&mut self, now_millis: u64) {\\n        let elapsed = now_millis.saturating_sub(self.last_refill);\\n        let ticks = elapsed / self.tick_millis;\\n        if ticks == 0 {\\n            return;\\n        }\\n        let gained = ticks.saturating_mul(self.refill_per_tick);\\n        self.tokens = self.capacity.min(self.tokens.saturating_add(gained));\\n        self.last_refill += ticks * self.tick_millis;\\n    }\"}]}",
+      "proposalDigest": "a35d9156de4fb2419cb71bbadd31c679e05ff95a9e32ad0f55605ef0d0a8ccb2",
+      "validatorExitCode": 0
+    }
+  ],
+  "baselineDigest": "5203dab9ffbbc48a56f75769fbad1db9f630c9d293d60dfed5713e76328ae97a",
+  "capabilityEffects": 1,
+  "changedVsBaseline": [
+    "src/bucket.rs"
+  ],
+  "classification": "GovernedProductOutcome",
+  "envelope": {
+    "baselineContentDigest": "5203dab9ffbbc48a56f75769fbad1db9f630c9d293d60dfed5713e76328ae97a",
+    "classification": "governed-product-outcome",
+    "contentDigest": "2025ccc20cccbb25bbc67384e3866ae7db2f9a5993515ebed2f0802c21bbe412",
+    "evaluatedAt": "2026-12-01T12:00:02Z",
+    "externalEvaluationFormat": {
+      "contract": "foundry.workflow-evaluation (unpublished)",
+      "detail": "Lite exports raw evidence records only; the Foundry external evaluation format is unpublished. No Foundry consumption, metrics or comparisons are claimed.",
+      "status": "unsupported"
+    },
+    "namespace": "lite.evidence.task-run",
+    "postRunContentDigest": "6faf92bb7dc6b6776c73f7eb8d690350de6905f0f8388a09210cdf427f690d7d",
+    "provenance": {
+      "fixtureOnly": true,
+      "injectedClock": true,
+      "redaction": "digest-sealed artifacts carry identities and digests only; raw secret material is never serialized (canary-verified in tests)",
+      "runner": "lite-task-execution-fixture-runner",
+      "runnerRevision": "2"
+    },
+    "repair": {
+      "action": "search-replace",
+      "applied": true,
+      "changedFiles": [
+        "src/bucket.rs"
+      ],
+      "fileAfterDigest": "4873f68151f318d1f955ad2a78bf8572fccc44db024d7c45672e76288da67b7d",
+      "fileBeforeDigest": "6da1ba7f9302da08bc447552a973cdbfef5e9e30f32fb6fa49bdc46737ea9e9c",
+      "modelProvenance": {
+        "attempt": 1,
+        "harnessRevision": "lite.harness.local_model@v1",
+        "modelIdentity": "nemotron-ultra-550b-free",
+        "modelResponseDigest": "34689e41bf1c44bc6c82529341a5e6aaffeb3e5bc6d72755ccfffd90c0178979",
+        "proposalDigest": "a35d9156de4fb2419cb71bbadd31c679e05ff95a9e32ad0f55605ef0d0a8ccb2"
+      },
+      "origin": "model-authored",
+      "patchDigest": "a35d9156de4fb2419cb71bbadd31c679e05ff95a9e32ad0f55605ef0d0a8ccb2",
+      "writeAuthority": "model-authored-workspace-file-policy"
+    },
+    "scenarioRun": {
+      "attempt": {
+        "contentDigest": "200b2b8bcf1a150a5f56834c23152bddd7ea3c898e9233f22b6a51b8d9d45425",
+        "decisionDigest": "f6019c1442fd85c66a454c1eb9df4b32f66af7d018289860c5a4b1840dabaffd",
+        "governedCalls": 1,
+        "harnessId": "lite.harness.local_model",
+        "idempotencyKey": "fixture-model-step-1",
+        "journalEntry": {
+          "detailDigest": "008cef40eb50dc7af19e5742c92029398d8ccede14565bad9e19d0a4d6015f00",
+          "entryDigest": "2cce29826ff4405482308178ffaae16447c1d0498ca41b5b6de06f354c257aed",
+          "identityKey": "fixture-model-step-1",
+          "prevEntryDigest": null,
+          "sequence": 0,
+          "stage": "Journaled"
+        },
+        "manifestDigest": "c1f4c500788b369125f36c261477e2d6fd2549192f473fa2ef643d88310b19b5",
+        "model": "nemotron-ultra-550b-free",
+        "outcomeKind": "completed",
+        "providerIdentity": "openrouter-via-loopback-gateway",
+        "routeEvidenceDigest": "44c7ca12681cae7ab56929938e6d9f8a1431155586b2e99de935281929ef2d7f",
+        "schemaVersion": "1.0.0",
+        "snapshotDigest": "429606f9b822aa3b1dd09059338429d8a7e4bd4b404f2263a6aa1be0856e9e07",
+        "workspaceManifestDigest": "546a3c8ee9e690cd133069a1706ba1298fd6e93190d4e121504531d737a3ae2f"
+      },
+      "attemptAccounting": {
+        "accountingId": "acct/scenario-task-execution-graph/fixture-model-node/fixture-model-step-1/2cce29826ff44054",
+        "attemptDigest": "200b2b8bcf1a150a5f56834c23152bddd7ea3c898e9233f22b6a51b8d9d45425",
+        "contentDigest": "eb9e15a38a27d77ed6f398af2615904937d50209f9d969c0c03b56bc9291f40e",
+        "cost": {
+          "currency": "USD",
+          "derivationTokens": 3435,
+          "method": "directed-rates",
+          "minorUnits": 0,
+          "pricingSource": "example-operator-price-book",
+          "pricingVersion": "example-2026-11",
+          "state": "known"
+        },
+        "graphId": "scenario-task-execution-graph",
+        "harnessId": "lite.harness.local_model",
+        "harnessRevision": "v1",
+        "idempotencyKey": "fixture-model-step-1",
+        "journalDigest": "2cce29826ff4405482308178ffaae16447c1d0498ca41b5b6de06f354c257aed",
+        "latencyMs": 4739,
+        "model": "nemotron-ultra-550b-free",
+        "nodeId": "fixture-model-node",
+        "outcome": {
+          "outcomeKind": "completed"
+        },
+        "providerIdentity": "openrouter-via-loopback-gateway",
+        "routeSetId": "routes-scenario-live-pilot",
+        "schemaVersion": "1.0.0",
+        "usage": {
+          "completionTokens": 258,
+          "promptTokens": 3177,
+          "state": "known",
+          "totalTokens": 3435
+        }
+      },
+      "classification": "governed-product-outcome",
+      "contentDigest": "b67ef11d09a56acd506eebe6972de4a9cd3034236e377983e95be2223b38a455",
+      "descriptor": {
+        "dimensions": {
+          "controlled": [
+            "repository-content",
+            "task-statement",
+            "policy-profile",
+            "authority",
+            "workspace",
+            "harness",
+            "harness-revision",
+            "route",
+            "provider",
+            "model",
+            "evaluation-instant",
+            "context-rules",
+            "expected-evidence",
+            "validation"
+          ],
+          "variable": []
+        },
+        "expected": {
+          "evidenceArtifacts": [
+            "route-evidence",
+            "snapshot",
+            "attempt",
+            "journal-entry",
+            "accounting-record",
+            "graph-accounting"
+          ],
+          "observableOutcome": "the disposable source repository is staged and content-verified, an isolated writable git worktree is acquired under the pinned authority, the live model-authored patch to src/bucket.rs (only) is applied with permission, the pinned validator (cargo test --offline) runs and exits 0, and the post-run tree digest reflects the model-authored repair; the envelope binds route/attempt/journal/accounting/workspace records and the model-patch provenance",
+          "outcome": "attempt-recorded-and-accounted"
+        },
+        "harness": {
+          "id": "lite.harness.local_model",
+          "revision": "v1"
+        },
+        "kind": "bugfix",
+        "language": "rust",
+        "namespace": "lite.fixtures.scenario",
+        "policy": {
+          "executionClass": "deterministic",
+          "mutation": "none",
+          "networkPolicyDefault": "deny",
+          "profile": "standard",
+          "readableScopes": [
+            "repo://fixture"
+          ],
+          "writableScopes": [
+            "repo://fixture"
+          ]
+        },
+        "repository": {
+          "contentDigest": "5203dab9ffbbc48a56f75769fbad1db9f630c9d293d60dfed5713e76328ae97a",
+          "fixture": "tests/fixtures/scenarios/rust-tokenbucket-bugfix/repo",
+          "revision": "a20621ef7c5c432d4f98e6217fdc708c4426ef65"
+        },
+        "requirements": {
+          "degradationPermitted": false,
+          "forbidSubstitution": true
+        },
+        "route": {
+          "candidateId": "openrouter-via-loopback-gateway-candidate",
+          "dispatchAt": "2026-12-01T12:00:03Z",
+          "evaluatedAt": "2026-12-01T12:00:02Z",
+          "model": "nemotron-ultra-550b-free",
+          "pinnedCandidateId": "openrouter-via-loopback-gateway-candidate",
+          "priority": 10,
+          "profile": "standard",
+          "providerIdentity": "openrouter-via-loopback-gateway",
+          "providerLocality": "local",
+          "routeSetId": "routes-scenario-live-pilot",
+          "routeSetVersion": "1.0.0",
+          "trustTtlSeconds": 86400,
+          "trustVerifiedAt": "2026-12-01T00:00:00Z"
+        },
+        "scenarioId": "lite-rust-tokenbucket-bugfix-model-live-001",
+        "schemaVersion": "1.0.0",
+        "task": {
+          "statement": "The fixture crate fixture-tokenbucket in this workspace implements a keyed token-bucket rate limiter (see README.md). Its integration tests fail: `cargo test --offline` reports `refill_accumulates_sub_window_remainder` failing with `assertion failed: limiter.allow(\"a\")`. Investigate the crate, find the defect, and fix it by editing ONLY src/bucket.rs. Do not edit tests/, Cargo.toml, README.md, or any other file. Do not change the public API."
+        },
+        "title": "Rust keyed rate limiter (live model pilot): refill remainder is not carried forward",
+        "validation": {
+          "args": [
+            "test",
+            "--offline"
+          ],
+          "command": "cargo",
+          "expectedAssertion": "model-authored repair pilot (live): the keyed rate limiter carries sub-window refill remainder forward; verified by `cargo test --offline` in the isolated workspace (all integration tests pass)",
+          "expectedExitCode": 0,
+          "expectedFileAfterDigest": "4873f68151f318d1f955ad2a78bf8572fccc44db024d7c45672e76288da67b7d",
+          "expectedPostRunDigest": "1ea6e33704a57af0fe9e77400be45617ad46b2b149c681d37ad02c7421492b98",
+          "schemaVersion": "1.0.0"
+        },
+        "version": "1.0.0",
+        "workspace": {
+          "adapter": "git-worktree",
+          "adapterRevision": "lite.workspace.adapter.v1",
+          "mode": "writable",
+          "writableScopes": [
+            "repo://fixture"
+          ]
+        }
+      },
+      "evaluatedAt": "2026-12-01T12:00:02Z",
+      "externalEvaluationFormat": {
+        "contract": "foundry.workflow-evaluation (unpublished)",
+        "detail": "Lite exports raw evidence records only; the Foundry external evaluation format is unpublished. No Foundry consumption, metrics or comparisons are claimed.",
+        "status": "unsupported"
+      },
+      "graphAccounting": {
+        "attempts": 1,
+        "cancelled": 0,
+        "completed": 1,
+        "cost": {
+          "currencies": {
+            "USD": 0
+          },
+          "knownAttempts": {
+            "USD": 1
+          },
+          "mixedCurrencies": [
+            "USD"
+          ],
+          "totalKnownExact": true,
+          "unknownAttempts": 0
+        },
+        "failed": 0,
+        "graphId": "scenario-task-execution-graph",
+        "latencyMsMax": 4739,
+        "latencyMsTotal": 4739,
+        "nodes": [
+          {
+            "attempts": 1,
+            "cancelled": 0,
+            "completed": 1,
+            "cost": {
+              "currencies": {
+                "USD": 0
+              },
+              "knownAttempts": {
+                "USD": 1
+              },
+              "mixedCurrencies": [
+                "USD"
+              ],
+              "totalKnownExact": true,
+              "unknownAttempts": 0
+            },
+            "failed": 0,
+            "latencyMsMax": 4739,
+            "latencyMsTotal": 4739,
+            "nodeId": "fixture-model-node",
+            "usage": {
+              "complete": true,
+              "completionTokens": 258,
+              "knownAttempts": 1,
+              "partialAttempts": 0,
+              "promptTokens": 3177,
+              "totalTokens": 3435,
+              "unknownAttempts": 0
+            }
+          }
+        ],
+        "schemaVersion": "1.0.0",
+        "usage": {
+          "complete": true,
+          "completionTokens": 258,
+          "knownAttempts": 1,
+          "partialAttempts": 0,
+          "promptTokens": 3177,
+          "totalTokens": 3435,
+          "unknownAttempts": 0
+        }
+      },
+      "manifest": {
+        "inputs": [],
+        "memoryReads": [],
+        "memoryWrites": [],
+        "nextRouteHints": [],
+        "nodeId": "fixture-model-node",
+        "outputs": [
+          {
+            "name": "out",
+            "typeRef": "string"
+          }
+        ],
+        "purpose": "governed model-authored pilot node",
+        "readableScopes": [
+          "repo://fixture"
+        ],
+        "retry": {
+          "maxAttempts": 1,
+          "retryableClasses": []
+        },
+        "schemaVersion": "1.0.0",
+        "tokenBudget": null,
+        "workStateRef": null,
+        "writableScopes": []
+      },
+      "namespace": "lite.evidence.scenario-run",
+      "provenance": {
+        "fixtureOnly": true,
+        "injectedClock": true,
+        "redaction": "digest-sealed artifacts carry identities and digests only; raw secret material is never serialized (canary-verified in tests)",
+        "runner": "lite-scenario-fixture-runner",
+        "runnerRevision": "1"
+      },
+      "routeEvidence": {
+        "authorityDeclaredDigest": "af03c69c78ccf4f7c3b98fb9041ce91392d181d8a449eba3f5561d5debaf0864",
+        "authorityEffectiveDigest": "af03c69c78ccf4f7c3b98fb9041ce91392d181d8a449eba3f5561d5debaf0864",
+        "candidateSetDigest": "029ab2d50e22f78182a1c20dc1726e61887f2dc3ea00f94c33bb99aaab62b514",
+        "capabilitySetDigest": "929326b1a9545198706de24bb87ee397060529bd4a0876419a73d67dc507ecf0",
+        "contentDigest": "44c7ca12681cae7ab56929938e6d9f8a1431155586b2e99de935281929ef2d7f",
+        "decisionDigest": "f6019c1442fd85c66a454c1eb9df4b32f66af7d018289860c5a4b1840dabaffd",
+        "decisionId": "routes-scenario-live-pilot/openrouter-via-loopback-gateway-candidate",
+        "declarationDigest": "c96adeaea6fb345c13c5d2f96047a247eefbdef9155daf97d9432858234cd281",
+        "evaluatedAt": "2026-12-01T12:00:02Z",
+        "pinnedCandidateId": "openrouter-via-loopback-gateway-candidate",
+        "profile": "standard",
+        "rejected": [],
+        "requirementsDigest": "0605bfb1c12aafe8dc1f22c275ad3fc9dad2e3fbea08fd617c6fa13b656ee885",
+        "routeSetId": "routes-scenario-live-pilot",
+        "routeSetVersion": "1.0.0",
+        "schemaVersion": "1.0.0",
+        "selected": {
+          "candidateId": "openrouter-via-loopback-gateway-candidate",
+          "experimental": false,
+          "family": "local-model",
+          "harnessId": "lite.harness.local_model",
+          "harnessRevision": "v1",
+          "model": "nemotron-ultra-550b-free",
+          "priority": 10,
+          "providerIdentity": "openrouter-via-loopback-gateway"
+        },
+        "snapshotDigest": "429606f9b822aa3b1dd09059338429d8a7e4bd4b404f2263a6aa1be0856e9e07"
+      },
+      "schemaVersion": "1.0.0",
+      "snapshot": {
+        "authorityDeclaredDigest": "af03c69c78ccf4f7c3b98fb9041ce91392d181d8a449eba3f5561d5debaf0864",
+        "authorityEffectiveDigest": "af03c69c78ccf4f7c3b98fb9041ce91392d181d8a449eba3f5561d5debaf0864",
+        "capabilitySetDigest": "929326b1a9545198706de24bb87ee397060529bd4a0876419a73d67dc507ecf0",
+        "contentDigest": "429606f9b822aa3b1dd09059338429d8a7e4bd4b404f2263a6aa1be0856e9e07",
+        "decisionDigest": "f6019c1442fd85c66a454c1eb9df4b32f66af7d018289860c5a4b1840dabaffd",
+        "declarationDigest": "c96adeaea6fb345c13c5d2f96047a247eefbdef9155daf97d9432858234cd281",
+        "effectiveProfile": {
+          "declared": {
+            "authority": {
+              "executionClass": "deterministic",
+              "mutation": "none"
+            },
+            "capabilities": [
+              "harness.local_model.infer"
+            ]
+          },
+          "effective": {
+            "authority": {
+              "executionClass": "deterministic",
+              "mutation": "none"
+            },
+            "capabilities": [
+              "harness.local_model.infer"
+            ]
+          },
+          "harness": "lite.harness.local_model",
+          "id": "routes-scenario-live-pilot/openrouter-via-loopback-gateway-candidate",
+          "model": "nemotron-ultra-550b-free",
+          "provider": "openrouter-via-loopback-gateway",
+          "schemaVersion": "1.1.0",
+          "validation": {
+            "failClosed": true
+          },
+          "version": "1.1.0"
+        },
+        "evaluatedAt": "2026-12-01T12:00:02Z",
+        "profile": "standard",
+        "requirementsDigest": "0605bfb1c12aafe8dc1f22c275ad3fc9dad2e3fbea08fd617c6fa13b656ee885",
+        "routeSetId": "routes-scenario-live-pilot",
+        "routeSetVersion": "1.0.0",
+        "schemaVersion": "1.0.0",
+        "selected": {
+          "candidateId": "openrouter-via-loopback-gateway-candidate",
+          "experimental": false,
+          "family": "local-model",
+          "harnessId": "lite.harness.local_model",
+          "harnessRevision": "v1",
+          "model": "nemotron-ultra-550b-free",
+          "priority": 10,
+          "providerIdentity": "openrouter-via-loopback-gateway"
+        },
+        "snapshotId": "routes-scenario-live-pilot/openrouter-via-loopback-gateway-candidate",
+        "workspace": {
+          "adapter": "git-worktree",
+          "adapterRevision": "lite.workspace.adapter.v1",
+          "manifestDigest": "546a3c8ee9e690cd133069a1706ba1298fd6e93190d4e121504531d737a3ae2f",
+          "mode": "write",
+          "workspaceId": "scenario-workspace-lite-rust-tokenbucket-bugfix-model-live-001"
+        }
+      },
+      "workspaceManifest": {
+        "adapter": "git-worktree",
+        "adapterRevision": "lite.workspace.adapter.v1",
+        "baseRevision": "a20621ef7c5c432d4f98e6217fdc708c4426ef65",
+        "contentDigest": "546a3c8ee9e690cd133069a1706ba1298fd6e93190d4e121504531d737a3ae2f",
+        "createdAt": "2026-12-01T12:00:02Z",
+        "mode": "writable",
+        "repoIdentity": "https://repo.invalid/prometheos/lite-fixtures/rust-tokenbucket-bugfix-model-001.git",
+        "resourceLockId": "scenario-lock-lite-rust-tokenbucket-bugfix-model-live-001",
+        "schemaVersion": "1.0.0",
+        "workspaceId": "scenario-workspace-lite-rust-tokenbucket-bugfix-model-live-001",
+        "writableScopes": [
+          "repo://fixture"
+        ]
+      }
+    },
+    "schemaVersion": "1.1.0",
+    "taskOutcome": "repaired",
+    "validator": {
+      "args": [
+        "test",
+        "--offline"
+      ],
+      "assertion": "model-authored repair pilot (live): the keyed rate limiter carries sub-window refill remainder forward; verified by `cargo test --offline` in the isolated workspace (all integration tests pass)",
+      "command": "cargo",
+      "durationMs": 5926,
+      "exitCode": 0,
+      "expectedExitCode": 0,
+      "outputBytes": 1154,
+      "outputDigest": "bd4331e6317945233fb8c0681c2fe1b56ec0de0741b7d4b98ecd1cb6a45657df",
+      "provenance": "observed-subprocess",
+      "timedOut": false
+    },
+    "verificationScope": "internally consistent operator-observed measurements: the embedded records re-derive cleanly. It is NOT cryptographic proof that an external process produced the recorded output; a fully consistent re-forgery cannot be detected from bytes alone. The pinned descriptor command/argv and the pinned expected-outcome digests narrow the forgery surface but do not remove it."
+  },
+  "envelopeDigest": "2025ccc20cccbb25bbc67384e3866ae7db2f9a5993515ebed2f0802c21bbe412",
+  "envelopeSealed": true,
+  "harness": "lite.harness.local_model@v1",
+  "harnessVisibleModel": "nemotron-ultra-550b-free",
+  "patched": true,
+  "pilot": "lite-rust-tokenbucket-bugfix-model-live-001",
+  "postRunDigest": "6faf92bb7dc6b6776c73f7eb8d690350de6905f0f8388a09210cdf427f690d7d",
+  "preFixProbe": {
+    "args": [
+      "test",
+      "--offline"
+    ],
+    "command": "cargo",
+    "exitCode": 101,
+    "outputBytes": 1306,
+    "outputDigest": "fbcf874266388f98fe7ca6477953ce1badf21bd3ff3e6f51e2f52a39bf577689",
+    "outputTail": "\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 5 tests\ntest refill_accumulates_sub_window_remainder ... FAILED\ntest zero_cost_spend_is_always_allowed ... ok\ntest burst_is_granted_up_to_capacity_then_denied ... ok\ntest full_window_elapsed_refills_quota ... ok\ntest keys_are_accounted_independently ... ok\n\nfailures:\n\n---- refill_accumulates_sub_window_remainder stdout ----\n\nthread 'refill_accumulates_sub_window_remainder' (21420) panicked at tests\\rate_limit.rs:44:5:\nassertion failed: limiter.allow(\"a\")\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n\nfailures:\n    refill_accumulates_sub_window_remainder\n\ntest result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.35s\n\n   Compiling fixture-tokenbucket v0.1.0 (C:\\Users\\Diego\\AppData\\Local\\Temp\\.tmpJaw87C\\source)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.02s\n     Running unittests src\\lib.rs (C:\\Users\\Diego\\AppData\\Local\\Temp\\.tmpJaw87C\\target\\debug\\deps\\fixture_tokenbucket-54c6e99e9dea3eff.exe)\n     Running tests\\rate_limit.rs (C:\\Users\\Diego\\AppData\\Local\\Temp\\.tmpJaw87C\\target\\debug\\deps\\rate_limit-e7584f9f36c3ac1b.exe)\nerror: test failed, to rerun pass `--test rate_limit`\n",
+    "timedOut": false
+  },
+  "route": "openrouter-via-loopback-gateway",
+  "schemaVersion": "1.0.0",
+  "sealError": null,
+  "taskOutcome": "Repaired",
+  "upstreamModel": "nvidia/nemotron-3-ultra-550b-a55b:free",
+  "validatorExitCode": 0
+}

@@ -3,7 +3,9 @@
 Issue #136 Slice A delivers the first repeatable, governed-workflow evaluation
 fixtures for PrometheOS Lite. Slice B executes one bounded repair task end to
 end on those bytes. Slice C adds a second executed task type (documentation)
-and a replayable failure → replay → verified-repair evidence chain. This page
+and a replayable failure → replay → verified-repair evidence chain. Slice D
+executes a genuine model-authored repair in an isolated pinned workspace
+(synthetic, declared). This page
 documents what Lite owns, what it deliberately does not own, and the exact
 status of the Foundry boundary.
 
@@ -26,6 +28,91 @@ Lite produces tasks and raw evidence. Foundry owns everything downstream of
 that. Nothing in this repository may present Lite-internal envelopes as a
 Foundry contract, and no code path treats a Lite-internal record as a
 benchmark result.
+
+## What Slice D adds
+
+Slice D executes a **genuine model-authored repair pilot** (#136 Slice D,
+owner-ratified ADR `docs/adr/ADR-2026-11-16-real-repository-coding-proof.md`)
+on a synthetic, declared OSS-style task. It is the first slice in which the
+repair is authored at run time by a real model — never by a fixture script —
+and it is **not** a benchmark, comparison or Foundry claim.
+
+- **The task (synthetic, declared)** - `lite-rust-tokenbucket-bugfix-model-001`
+  (`tests/fixtures/scenarios/rust-tokenbucket-bugfix/`, two descriptors:
+  `descriptor.json` for deterministic offline tests, `descriptor.live.json`
+  for the opt-in live pilot). A small keyed token-bucket rate limiter
+  (`src/bucket.rs`, `src/clock.rs`, `src/limiter.rs`, `src/lib.rs`,
+  `tests/rate_limit.rs`) in which the refill bookkeeping discards the
+  sub-window remainder. `cargo test --offline` fails pre-fix
+  (`refill_accumulates_sub_window_remainder`, exit 101). It is a synthetic,
+  self-contained crate — deliberately NOT an external held-out repository
+  bug — and that weaker provenance is stated here explicitly. No reference
+  patch, answer key or hidden test is visible to the solving model; the
+  editable set is `src/bucket.rs` only; the reference repair is used only
+  by the offline canned path to emulate a successful response.
+- **Proven pre-fix failure** - the pilot actually runs the pinned validator
+  (`cargo test --offline`) in a throwaway copy of the staged source before
+  any model dispatch and records exit code, output digest, output byte
+  count and the captured tail (the public failure signal a CI log shows).
+  `preFixProbe.exitCode == 101` on every run; a sealed envelope never exists
+  for a run whose pre-fix probe is missing.
+- **The model (live, opt-in, $0)** - `PROMETHEOS_REAL_MODEL_PILOT=1` plus an
+  already-configured `OPENROUTER_API_KEY` runs
+  `nvidia/nemotron-3-ultra-550b-a55b:free` (OpenRouter free tier; prompt and
+  completion price 0, verified against `GET /api/v1/models` on 2026-11-16).
+  Lite's governed local-model harness talks to a loopback operator gateway;
+  the gateway alone holds the key, forwards to OpenRouter and rewrites the
+  model identity to the harness-visible alias `nemotron-ultra-550b-free`.
+  The harness, route resolution, capability boundary, journal, accounting,
+  file policy and sealing are all the normal Lite-governed path; the
+  gateway sets `reasoning.enabled=false` as operator policy because the
+  reasoning-enabled variants of this class of model consumed the entire
+  completion budget and returned `content: null`. A first preliminary run
+  with `cohere/north-mini-code:free` (also $0) produced three no-op edits
+  ("Edit 0 has identical search and replace content") that were all
+  rejected by the edit boundary before any write; that run sealed nothing,
+  applied nothing, and is reported here as an observation, not as a result.
+- **The real result (Windows, 2026-11-16)** - one attempt, 1 model-authored
+  `search-replace` edit to `src/bucket.rs`
+  (`self.last_refill = self.last_refill.saturating_add(ticks.saturating_mul(self.tick_millis));`),
+  applied under the single-file write authority, pinned validator
+  `cargo test --offline` exit 0, `taskOutcome: repaired`,
+  `classification: governed-product-outcome`. Usage KNOWN: 3177 prompt +
+  258 completion = 3435 tokens; cost KNOWN 0 (operator example price book,
+  free upstream at $0). Committed receipt with the complete sealed envelope:
+  `docs/evidence/real-model-pilot-tokenbucket-2026-11-16.json`.
+  `committed_live_pilot_envelope_verifies` re-derives every binding from
+  the committed bytes alone, offline, with no model and no session state.
+- **Provenance, bound** - every model-authored repair carries
+  `modelPatchProvenance`: sha256 of the raw model response, the canonical
+  digest of the parsed proposal (identical to the applied patch digest),
+  the 1-based attempt number, the routed model identity and the harness
+  revision. A re-sealed envelope conflicting with any trusted pin (validator
+  exit code, baseline digest) or with the provenance binding is rejected at
+  verification. Model-authored repairs are NOT bound byte-for-byte to the
+  task-setter's reference repair (a genuine model may author any
+  behavior-correct repair); the byte-exact expected-digest pins still bind
+  scripted fixtures, and the validator exit code binds both.
+- **Bounded attempts, honest failures** - up to 3 attempts; the failing
+  validator output tail is fed back between attempts; malformed proposals,
+  out-of-scope files, identical search/replace edits, missing usage
+  (usage/cost recorded Unknown, never 0) and interrupted dispatches (typed
+  timeout, zero effects, journal preserved) are all typed, accounted outcomes.
+- **Negative matrix** - forbidden editable file (`tests/rate_limit.rs`,
+  `src/lib.rs`) rejected before any write; nonexistent search text rejected;
+  stale revision refused pre-effect; interrupted dispatch keeps failure
+  evidence and applies nothing; duplicate application refused (a second
+  apply of the same edit does not mutate); false-success reseal rejected on
+  every tamper axis; solver-visible corpus leakage guard (no reference-fix
+  bytes, no pinned digests); missing usage or missing pricing is recorded
+  Unknown, never fabricated.
+
+Verification scope is unchanged: the envelope proves the pinned validator ran
+and exited as measured after an applied, permitted repair — nothing more.
+Not a benchmark, not model-coding-skill certification, not a Foundry
+evaluation, not a public claim. One run on one synthetic task on Windows is
+an existence proof, not a rate; Linux/macOS not run; the matched comparison
+harness against a baseline coding agent remains Foundry-owned future work.
 
 ## What Slice C adds
 

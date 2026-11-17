@@ -1,5 +1,38 @@
 ## Unreleased
 
+- #136 E7/I01 Slice D - genuine model-authored repair pilot (Lite-internal,
+  experimental; not a benchmark, not a Foundry claim). A new synthetic,
+  declared OSS-style fixture (`lite-rust-tokenbucket-bugfix-model-001`,
+  `tests/fixtures/scenarios/rust-tokenbucket-bugfix/`) in which a small
+  keyed token-bucket rate limiter discards sub-window refill remainder;
+  `cargo test --offline` fails pre-fix (exit 101,
+  `refill_accumulates_sub_window_remainder`). The opt-in live pilot
+  (`PROMETHEOS_REAL_MODEL_PILOT=1`, existing `OPENROUTER_API_KEY`) ran the
+  genuine model `nvidia/nemotron-3-ultra-550b-a55b:free` (OpenRouter free
+  tier, prompt/completion price 0 verified 2026-11-16) through the normal
+  governed local-model path via a loopback operator gateway to an isolated,
+  content-pinned, revision-pinned git-worktree: one attempt, one
+  model-authored search-replace edit to `src/bucket.rs`, applied under
+  single-file write authority, pinned validator exit 0, `taskOutcome:
+  repaired`, classification `governed-product-outcome`; usage KNOWN
+  (3177+258=3435 tokens), cost KNOWN 0 under the operator example price
+  book. A preliminary free-model run authoring no-op edits was rejected by
+  the edit boundary and applied nothing. The sealed envelope carries
+  `modelPatchProvenance` (raw model-response sha256, canonical proposal
+  digest identical to the applied patch digest, attempt number, routed
+  model identity, harness revision); re-sealed false-success envelopes are
+  rejected on every tamper axis. Committed receipt with the full sealed
+  envelope: `docs/evidence/real-model-pilot-tokenbucket-2026-11-16.json`
+  (offline test `committed_live_pilot_envelope_verifies` re-derives every
+  binding from committed bytes; no model, no session state). Negative
+  matrix: forbidden files (`tests/rate_limit.rs`, `src/lib.rs`), nonexistent
+  search text, stale revision, interrupted dispatch (typed timeout, zero
+  effects, journal preserved), duplicate application refused, missing usage
+  or missing pricing is Unknown (never zero), solver-visible corpus leakage
+  guard, offline canned adaptation for the same machinery. Synthetic-task
+  provenance stated explicitly; no benchmark, ranking, Foundry
+  compatibility or external held-out issue is claimed; Linux/macOS not run.
+
 - #136 E7/I01 Slice C - task variety and replayable failure evidence on the
   Slice B executed-task path. Two new deterministic, actually executed
   Lite-owned scenario kinds. (1) An executed DOCUMENTATION task

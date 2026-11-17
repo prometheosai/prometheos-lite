@@ -1269,6 +1269,7 @@ pub fn run_task_execution_with_fault(
                         file_after_digest,
                         patch_digest: repair_patch_digest(&edits),
                         applied: patched,
+                        model_provenance: None,
                     };
                     match LiteTaskRunEvidence::sealed(
                         scenario_run,

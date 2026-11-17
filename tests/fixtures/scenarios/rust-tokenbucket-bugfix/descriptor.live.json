@@ -1,0 +1,103 @@
+{
+  "schemaVersion": "1.0.0",
+  "namespace": "lite.fixtures.scenario",
+  "scenarioId": "lite-rust-tokenbucket-bugfix-model-live-001",
+  "version": "1.0.0",
+  "title": "Rust keyed rate limiter (live model pilot): refill remainder is not carried forward",
+  "kind": "bugfix",
+  "language": "rust",
+  "task": {
+    "statement": "The fixture crate fixture-tokenbucket in this workspace implements a keyed token-bucket rate limiter (see README.md). Its integration tests fail: `cargo test --offline` reports `refill_accumulates_sub_window_remainder` failing with `assertion failed: limiter.allow(\"a\")`. Investigate the crate, find the defect, and fix it by editing ONLY src/bucket.rs. Do not edit tests/, Cargo.toml, README.md, or any other file. Do not change the public API."
+  },
+  "repository": {
+    "fixture": "tests/fixtures/scenarios/rust-tokenbucket-bugfix/repo",
+    "contentDigest": "5203dab9ffbbc48a56f75769fbad1db9f630c9d293d60dfed5713e76328ae97a",
+    "revision": "a20621ef7c5c432d4f98e6217fdc708c4426ef65"
+  },
+  "expected": {
+    "outcome": "attempt-recorded-and-accounted",
+    "observableOutcome": "the disposable source repository is staged and content-verified, an isolated writable git worktree is acquired under the pinned authority, the live model-authored patch to src/bucket.rs (only) is applied with permission, the pinned validator (cargo test --offline) runs and exits 0, and the post-run tree digest reflects the model-authored repair; the envelope binds route/attempt/journal/accounting/workspace records and the model-patch provenance",
+    "evidenceArtifacts": [
+      "route-evidence",
+      "snapshot",
+      "attempt",
+      "journal-entry",
+      "accounting-record",
+      "graph-accounting"
+    ]
+  },
+  "requirements": {
+    "degradationPermitted": false,
+    "forbidSubstitution": true
+  },
+  "policy": {
+    "profile": "standard",
+    "executionClass": "deterministic",
+    "mutation": "none",
+    "readableScopes": [
+      "repo://fixture"
+    ],
+    "writableScopes": [
+      "repo://fixture"
+    ],
+    "networkPolicyDefault": "deny"
+  },
+  "workspace": {
+    "adapter": "git-worktree",
+    "adapterRevision": "lite.workspace.adapter.v1",
+    "mode": "writable",
+    "writableScopes": [
+      "repo://fixture"
+    ]
+  },
+  "harness": {
+    "id": "lite.harness.local_model",
+    "revision": "v1"
+  },
+  "route": {
+    "routeSetId": "routes-scenario-live-pilot",
+    "routeSetVersion": "1.0.0",
+    "candidateId": "openrouter-via-loopback-gateway-candidate",
+    "providerIdentity": "openrouter-via-loopback-gateway",
+    "providerLocality": "local",
+    "model": "nemotron-ultra-550b-free",
+    "priority": 10,
+    "profile": "standard",
+    "evaluatedAt": "2026-12-01T12:00:02Z",
+    "dispatchAt": "2026-12-01T12:00:03Z",
+    "trustVerifiedAt": "2026-12-01T00:00:00Z",
+    "trustTtlSeconds": 86400,
+    "pinnedCandidateId": "openrouter-via-loopback-gateway-candidate"
+  },
+  "dimensions": {
+    "controlled": [
+      "repository-content",
+      "task-statement",
+      "policy-profile",
+      "authority",
+      "workspace",
+      "harness",
+      "harness-revision",
+      "route",
+      "provider",
+      "model",
+      "evaluation-instant",
+      "context-rules",
+      "expected-evidence",
+      "validation"
+    ],
+    "variable": []
+  },
+  "validation": {
+    "schemaVersion": "1.0.0",
+    "command": "cargo",
+    "args": [
+      "test",
+      "--offline"
+    ],
+    "expectedExitCode": 0,
+    "expectedAssertion": "model-authored repair pilot (live): the keyed rate limiter carries sub-window refill remainder forward; verified by `cargo test --offline` in the isolated workspace (all integration tests pass)",
+    "expectedFileAfterDigest": "4873f68151f318d1f955ad2a78bf8572fccc44db024d7c45672e76288da67b7d",
+    "expectedPostRunDigest": "1ea6e33704a57af0fe9e77400be45617ad46b2b149c681d37ad02c7421492b98"
+  }
+}

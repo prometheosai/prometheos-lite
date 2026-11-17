@@ -6,6 +6,9 @@
 //! module holds it once.
 
 pub mod governance_permit;
+/// #136 Slice D — genuine model-authored pilot runner (offline tests
+/// plus the env-gated live pilot). Not a model; see module docs.
+pub mod model_pilot;
 /// Shared executed-task fixture runner (Slices B and C). Each executed
 /// scenario suite pins its own [`task_execution::TaskExecutionSpec`].
 pub mod task_execution;
