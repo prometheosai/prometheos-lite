@@ -2,7 +2,7 @@
 
 - #138 E7/I03 Slice A - security regression suite + threat-boundary matrix
   for the independent security assessment (Lite-internal, experimental; NOT
-  an independent assessment; NOT a release gate). PR #_PR_NUMBER_ (2026-11-17):
+  an independent assessment; NOT a release gate). PR #315 (2026-11-17):
   repairs two demonstrated path/authority defects - (1) `PathGuard` checked
   the canonical *parent* directory only, so a repo-internal symlink (dir or
   junction) satisfied the syntactic checks and let `read_file`, `write_file`,
