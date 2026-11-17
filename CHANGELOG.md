@@ -1,7 +1,7 @@
 ## Unreleased
 
 - #137 E7/I02 Slice A - controlled reliability / fault-injection campaign
-  (Lite-internal, experimental). PR #_PR_NUMBER_ (2026-11-17): a new narrow
+  (Lite-internal, experimental). PR #313 (2026-11-17): a new narrow
   fault-injection hook in `workflow::durable` (thread-local, no-op unless armed
   by a test) plus a caller-supplied-deadline validator runner in test support,
   driving a new slice of executable campaigns: durable atomic publication
