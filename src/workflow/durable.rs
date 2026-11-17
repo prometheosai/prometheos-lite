@@ -11,27 +11,82 @@ use serde::Serialize;
 use std::io::Write;
 use std::path::Path;
 
+// ---------------------------------------------------------------------------
+// Fault-injection seam for #137 reliability campaigns
+// ---------------------------------------------------------------------------
+
+/// Points inside the atomic publication at which a campaign test may inject a
+/// deterministic interruption. Every point maps to a real step of the
+/// temp-write → fsync → rename sequence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AtomicWriteStep {
+    /// Before the temp file is created (no temp material exists yet).
+    BeforeTempCreate,
+    /// After the temp file was created, before any bytes were written.
+    TempCreated,
+    /// After all bytes were written, before fsync.
+    TempWritten,
+    /// After fsync, before the atomic rename.
+    TempFsynced,
+    /// After the atomic rename, before the directory fsync.
+    AfterRename,
+    /// After the directory fsync — i.e. the publication completed, but the
+    /// caller is about to observe the return value.
+    AfterPublish,
+}
+
+/// Fault-injection hook consulted at each atomic-publication step. Tests only;
+/// unset in production (every check is a cheap no-op).
+pub type AtomicWriteHook = Box<dyn FnMut(AtomicWriteStep, &Path) -> Result<()>>;
+
+thread_local! {
+    static ATOMIC_WRITE_HOOK: std::cell::RefCell<Option<AtomicWriteHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Register (or clear) the fault hook used by the #137 reliability campaign
+/// tests. Normal production code never sets this; while unset every check is
+/// a cheap no-op. The hook is thread-local, so it cannot leak into other
+/// tests running on other threads (and a child process setting its own hook
+/// does not affect its parent).
+pub fn set_atomic_write_hook(hook: Option<AtomicWriteHook>) {
+    ATOMIC_WRITE_HOOK.with(|slot| *slot.borrow_mut() = hook);
+}
+
+fn run_fault_hook(step: AtomicWriteStep, path: &Path) -> Result<()> {
+    ATOMIC_WRITE_HOOK.with(|slot| match &mut *slot.borrow_mut() {
+        Some(hook) => hook(step, path),
+        None => Ok(()),
+    })
+}
+
 /// Write `value` as pretty JSON to `path` atomically and durably.
 pub fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("failed to create dir {}", parent.display()))?;
     }
+    run_fault_hook(AtomicWriteStep::BeforeTempCreate, path)?;
     let tmp = path.with_extension("json.tmp");
     let json = serde_json::to_string_pretty(value)
         .with_context(|| format!("failed to serialize document for {}", path.display()))?;
     let mut file = std::fs::File::create(&tmp)
         .with_context(|| format!("failed to create temp file {}", tmp.display()))?;
+    run_fault_hook(AtomicWriteStep::TempCreated, path)?;
     file.write_all(json.as_bytes())
         .with_context(|| format!("failed to write temp file {}", tmp.display()))?;
+    run_fault_hook(AtomicWriteStep::TempWritten, path)?;
     file.sync_all()
         .with_context(|| format!("failed to fsync temp file {}", tmp.display()))?;
     drop(file);
+    run_fault_hook(AtomicWriteStep::TempFsynced, path)?;
     std::fs::rename(&tmp, path)
         .with_context(|| format!("failed to atomically rename into {}", path.display()))?;
+    run_fault_hook(AtomicWriteStep::AfterRename, path)?;
     if let Some(parent) = path.parent() {
         sync_dir(parent)?;
     }
+    run_fault_hook(AtomicWriteStep::AfterPublish, path)?;
     Ok(())
 }
 
@@ -60,19 +115,25 @@ pub fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("failed to create dir {}", parent.display()))?;
     }
+    run_fault_hook(AtomicWriteStep::BeforeTempCreate, path)?;
     let tmp = path.with_extension("tmp");
     let mut file = std::fs::File::create(&tmp)
         .with_context(|| format!("failed to create temp file {}", tmp.display()))?;
+    run_fault_hook(AtomicWriteStep::TempCreated, path)?;
     file.write_all(bytes)
         .with_context(|| format!("failed to write temp file {}", tmp.display()))?;
+    run_fault_hook(AtomicWriteStep::TempWritten, path)?;
     file.sync_all()
         .with_context(|| format!("failed to fsync temp file {}", tmp.display()))?;
     drop(file);
+    run_fault_hook(AtomicWriteStep::TempFsynced, path)?;
     std::fs::rename(&tmp, path)
         .with_context(|| format!("failed to atomically rename into {}", path.display()))?;
+    run_fault_hook(AtomicWriteStep::AfterRename, path)?;
     if let Some(parent) = path.parent() {
         sync_dir(parent)?;
     }
+    run_fault_hook(AtomicWriteStep::AfterPublish, path)?;
     Ok(())
 }
 
