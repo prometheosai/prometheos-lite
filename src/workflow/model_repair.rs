@@ -37,6 +37,14 @@
 //! live adapter is wired in `examples/model_repair_live.rs` against the
 //! governed remote-service harness path; it is driven by operator
 //! configuration, never by task input.
+//!
+//! Provenance honesty note: a sealed report from a scripted double is
+//! internally consistent operator-observed evidence of the repair loop, NOT
+//! provider-issued evidence that any live model authored the patch. The
+//! `sealable` verdict answers "are the response-bound identities present?",
+//! never "did an authenticated third-party provider issue them?". Strict
+//! third-party provenance requires the live path with the operator-authorized
+//! gateway and egress-independent provider authentication.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -331,8 +339,16 @@ pub struct ModelRepairReport {
     /// sha256 (hex64) of the redacted full diff artifact.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_diff_sha256: Option<String>,
-    /// The unified diff, truncated to [`MAX_DIFF_BYTES`]. Diagnostic only;
-    /// the digest above binds the full artifact.
+    /// The COMPLETE, untruncated unified diff. Diagnostic excerpts are never
+    /// a substitute for this bytes-exact artifact; [`ModelRepairReport::verify`]
+    /// re-derives `sha256(final_diff) == finalDiffSha256` and fails on any
+    /// mismatch. `None` when the repair did not complete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_diff: Option<String>,
+    /// The unified diff, truncated to [`MAX_DIFF_BYTES`] at a UTF-8 character
+    /// boundary. Diagnostic only; the digest above binds the full artifact in
+    /// [`final_diff`](crate::workflow::model_repair::ModelRepairReport::final_diff).
+    /// This field is NEVER replayable as a patch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_diff_excerpt: Option<String>,
     pub prompt_bytes_total: u64,
@@ -412,6 +428,26 @@ impl ModelRepairReport {
             if self.final_tree_digest.is_none() || self.final_diff_sha256.is_none() {
                 return Err("repaired outcome requires tree and diff digests".to_string());
             }
+            // The full diff is mandatory for a repaired outcome: the digest
+            // binds it, and the hidden acceptance oracle replays it.
+            if self.final_diff.is_none() {
+                return Err(
+                    "repaired outcome requires the complete untruncated finalDiff".to_string(),
+                );
+            }
+        }
+        // When the full diff is present, its bytes-exact digest must equal
+        // the bound `finalDiffSha256`. A mutated or partially-written diff
+        // is not verification-eligible.
+        if let Some(diff) = &self.final_diff {
+            match self.final_diff_sha256.as_deref() {
+                Some(digest) if digest == hex_sha256(diff.as_bytes()) => {}
+                Some(_) | None => {
+                    return Err(
+                        "finalDiff bytes do not match the bound finalDiffSha256".to_string()
+                    );
+                }
+            }
         }
         // Execution identity is load-bearing: tampering with it must break
         // verification. Re-derive the bound events digest.
@@ -451,9 +487,15 @@ impl ModelRepairReport {
 /// `sealable` is true iff the report carries every field a strict
 /// `soma.model-coding-run` v1.0.0 envelope needs *without inventing
 /// values*: execution identity, a provider-issued response/run id on the
-/// sealing attempt, and a configured repository + revision + issue binding.
-/// Nothing else is required of the flag itself; patch/validation detail
-/// appears in [`soma_field_mapping`].
+/// sealing attempt whose provenance source does not name a test double,
+/// and a configured repository + revision + issue binding. Nothing else is
+/// required of the flag itself; patch/validation detail appears in
+/// [`soma_field_mapping`].
+///
+/// Honest interpretation: a `sealable` verdict from a scripted test double
+/// indicates structural completeness, not authenticated third-party
+/// provenance. Strict provider-issuance evidence requires the live model-
+/// repair path with the operator-authorized remote-service gateway.
 pub fn compute_sealability(report: &ModelRepairReport) -> (bool, Vec<String>) {
     let mut reasons = Vec::new();
     if report.execution_id.trim().is_empty() {
@@ -489,6 +531,31 @@ pub fn compute_sealability(report: &ModelRepairReport) -> (bool, Vec<String>) {
             "the responder did not expose a response/run id on the sealing attempt; not sealable for the strict SOMA provenance path"
                 .to_string(),
         );
+    } else {
+        // A provenance source that names a test double is not third-party
+        // evidence, even when the id itself is well-formed. Scripted models
+        // legitimately supply provider-id-shaped strings; they are not
+        // provider-issued provenance.
+        let source = sealing
+            .and_then(|a| a.provider_response_id_source.as_deref())
+            .map(|s| s.to_ascii_lowercase())
+            .unwrap_or_default();
+        const TEST_DOUBLE_MARKERS: &[&str] = &[
+            "scripted-test-double",
+            "test-double",
+            "test double",
+            "scripted",
+            "canned",
+            "mock",
+            "phantom",
+            "fixture",
+        ];
+        if let Some(marker) = TEST_DOUBLE_MARKERS.iter().find(|m| source.contains(**m)) {
+            reasons.push(format!(
+                "provider id source {:?} names a test double (marker {marker:?}); not live-provider provenance",
+                sealing.and_then(|a| a.provider_response_id_source.as_deref()),
+            ));
+        }
     }
     (reasons.is_empty(), reasons)
 }
@@ -827,18 +894,35 @@ fn diff_against_baseline(worktree: &Path, target: &str) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
-fn excerpt(bytes: &[u8], cap: usize) -> String {
+/// Bounded diagnostic excerpt of `bytes` at `cap` bytes, always cut at a
+/// UTF-8 character boundary and followed by an explicit truncation marker.
+/// Public for evidence consumers that must bound output deterministically.
+pub fn bounded_excerpt(bytes: &[u8], cap: usize) -> String {
     let text = String::from_utf8_lossy(bytes);
     let total = text.len();
     if total <= cap {
         text.into_owned()
     } else {
+        // Truncate deterministically at a UTF-8 character boundary that does
+        // not exceed `cap` bytes; a naive byte slice would panic on a
+        // multibyte character spanning the boundary.
+        let mut end = cap;
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
         format!(
             "{}\n[... {} more bytes truncated ...]",
-            &text[..cap],
-            total - cap
+            &text[..end],
+            total - end
         )
     }
+}
+
+/// sha256-hex of `bytes`. Public surface for evidence consumers (the hidden
+/// acceptance oracle) that must verify the digest bound in a sealed report
+/// before replaying the patch.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    hex_sha256(bytes)
 }
 
 /// Run the pinned validator once, retaining a bounded excerpt for model
@@ -940,7 +1024,7 @@ fn run_validator_feedback(
     let mut digest_input = Vec::with_capacity(out_bytes.len() + err_bytes.len());
     digest_input.extend_from_slice(&out_bytes);
     digest_input.extend_from_slice(&err_bytes);
-    let excerpt = excerpt(&digest_input, MAX_FEEDBACK_BYTES);
+    let excerpt = bounded_excerpt(&digest_input, MAX_FEEDBACK_BYTES);
     (
         TaskValidatorRecord {
             command: spec.command.clone(),
@@ -1077,6 +1161,7 @@ pub async fn run_model_repair(
         baseline_validator: None,
         final_tree_digest: None,
         final_diff_sha256: None,
+        final_diff: None,
         final_diff_excerpt: None,
         prompt_bytes_total: 0,
         wall_ms: 0,
@@ -1494,7 +1579,9 @@ pub async fn run_model_repair(
                     let diff = diff_against_baseline(&spec.worktree, &spec.repair_target);
                     if let Some(diff) = diff {
                         report.final_diff_sha256 = Some(hex_sha256(diff.as_bytes()));
-                        report.final_diff_excerpt = Some(excerpt(diff.as_bytes(), MAX_DIFF_BYTES));
+                        report.final_diff_excerpt =
+                            Some(bounded_excerpt(diff.as_bytes(), MAX_DIFF_BYTES));
+                        report.final_diff = Some(diff);
                     }
                     break;
                 }
