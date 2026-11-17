@@ -108,28 +108,39 @@ pub fn parse_edit_response(raw: &str) -> Result<Vec<EditOperation>> {
 
 fn parse_unified_diff_text(diff_text: &str) -> Result<Vec<EditOperation>> {
     let mut edits = Vec::new();
-    let diffs = parse_unified_diff(diff_text)?;
-
-    for diff in diffs {
-        if diff.is_new_file {
-            let content = reconstruct_new_file_content(&diff)?;
-            edits.push(EditOperation::CreateFile(CreateFileEdit {
-                file: diff.new_file,
-                content,
-                executable: None,
-            }));
-        } else if diff.is_deleted {
-            edits.push(EditOperation::DeleteFile(DeleteFileEdit {
-                file: diff.old_file.unwrap_or(diff.new_file.clone()),
-            }));
+    let lines: Vec<&str> = diff_text.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        if lines[i].starts_with("diff --git") || lines[i].starts_with("---") {
+            let start = i;
+            let (diff, consumed) = parse_single_diff(&lines[i..])
+                .with_context(|| format!("Failed to parse diff at line {}", i + 1))?;
+            let raw = lines[start..start + consumed].join("\n");
+            if diff.is_new_file {
+                let content = reconstruct_new_file_content(&diff)?;
+                edits.push(EditOperation::CreateFile(CreateFileEdit {
+                    file: diff.new_file,
+                    content,
+                    executable: None,
+                }));
+            } else if diff.is_deleted {
+                edits.push(EditOperation::DeleteFile(DeleteFileEdit {
+                    file: diff.old_file.unwrap_or(diff.new_file.clone()),
+                }));
+            } else {
+                edits.push(EditOperation::UnifiedDiff(UnifiedDiffEdit {
+                    // Keep the file headers: downstream validation and
+                    // application re-parse this text, and a hunks-only
+                    // fragment cannot round-trip.
+                    diff: raw,
+                    target_file: Some(diff.new_file),
+                }));
+            }
+            i += consumed;
         } else {
-            edits.push(EditOperation::UnifiedDiff(UnifiedDiffEdit {
-                diff: render_hunks(&diff),
-                target_file: Some(diff.new_file),
-            }));
+            i += 1;
         }
     }
-
     Ok(edits)
 }
 
@@ -307,37 +318,6 @@ fn reconstruct_new_file_content(diff: &ParsedDiff) -> Result<String> {
     Ok(content.join("\n"))
 }
 
-fn render_hunks(diff: &ParsedDiff) -> String {
-    let mut output = String::new();
-
-    for hunk in &diff.hunks {
-        output.push_str(&hunk.header);
-        output.push('\n');
-
-        for line in &hunk.lines {
-            match line {
-                DiffLine::Context(text) => {
-                    output.push(' ');
-                    output.push_str(text);
-                    output.push('\n');
-                }
-                DiffLine::Added(text) => {
-                    output.push('+');
-                    output.push_str(text);
-                    output.push('\n');
-                }
-                DiffLine::Removed(text) => {
-                    output.push('-');
-                    output.push_str(text);
-                    output.push('\n');
-                }
-            }
-        }
-    }
-
-    output
-}
-
 /// Apply a unified diff to original content
 ///
 /// This function correctly handles context lines - they are verified but not modified.
@@ -435,7 +415,14 @@ pub fn apply_unified_diff(original: &str, diff: &ParsedDiff) -> Result<String> {
         offset += (hunk.new_lines as i64) - (hunk.old_lines as i64);
     }
 
-    Ok(result.join("\n"))
+    let mut joined = result.join("\n");
+    // The line splitter drops the terminator of the final line; restore it
+    // so a patch can never silently strip a trailing newline.
+    if original.ends_with('\n') && !joined.ends_with('\n') {
+        joined.push('\n');
+    }
+
+    Ok(joined)
 }
 
 pub fn validate_edit_operations(

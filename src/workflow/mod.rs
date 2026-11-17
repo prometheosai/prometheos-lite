@@ -36,6 +36,7 @@ pub mod graph_state;
 pub mod graph_suspend;
 pub mod local_model_harness;
 pub mod memory_contracts;
+pub mod model_repair;
 pub mod native_harness;
 pub mod node_contracts;
 pub mod node_doc_release;
