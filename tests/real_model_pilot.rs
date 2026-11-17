@@ -633,16 +633,61 @@ fn offline_failed_dispatch_applies_no_repair_and_seals_nothing() {
 // authorized for the synthetic fixture only, and every outbound effect is
 // decided before any upstream byte leaves the process.
 
+/// Parsed and validated upstream destination. Scheme, user information,
+/// fragments, host and port are all checked before this `Result` is given
+/// to any caller.
+struct ParsedUpstream {
+    /// Lowercased host (no port, no user information).
+    host: String,
+}
+
+/// Validate an upstream URL strictly, with `reqwest::Url` parsing.
+///
+/// Refuses malformed or ambiguous authorities, user information,
+/// fragments, unexpected ports and unsupported or insecure schemes.
+/// Non-loopback destinations must use HTTPS on the default port; plain
+/// HTTP is tolerated only for the restricted loopback exception (127.0.0.1,
+/// localhost, ::1) used by the local mock tests.
+fn parse_upstream_url(url: &str) -> Result<ParsedUpstream, &'static str> {
+    let parsed = reqwest::Url::parse(url).map_err(|_| "upstream URL unparseable")?;
+    // Ambiguous or smuggled authority material is never acceptable.
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("upstream URL must not contain user information");
+    }
+    if parsed.fragment().is_some() {
+        return Err("upstream URL must not contain a fragment");
+    }
+    let host = parsed
+        .host_str()
+        .map(|h| h.to_ascii_lowercase())
+        .filter(|h| !h.is_empty())
+        .ok_or("upstream URL has no host")?;
+    let is_loopback = host == "127.0.0.1" || host == "localhost" || host == "[::1]";
+    match parsed.scheme() {
+        "https" => {
+            if !is_loopback && parsed.port().is_some() {
+                // reqwest normalizes the default port (443) away, so any
+                // explicit port here is unexpected.
+                return Err("unexpected port for HTTPS upstream; the default port is required");
+            }
+        }
+        "http" => {
+            if !is_loopback {
+                return Err(
+                    "plain HTTP egress is refused; HTTPS is required for non-loopback upstreams",
+                );
+            }
+        }
+        _ => return Err("unsupported upstream URL scheme; HTTPS is required"),
+    }
+    Ok(ParsedUpstream { host })
+}
+
 fn upstream_host(url: &str) -> String {
-    url.trim_start_matches("http://")
-        .trim_start_matches("https://")
-        .split('/')
-        .next()
-        .unwrap_or("")
-        .split(':')
-        .next()
-        .unwrap_or("")
-        .to_string()
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(|h| h.to_ascii_lowercase()))
+        .unwrap_or_default()
 }
 
 /// Mock upstream that records how many requests it received.
@@ -696,6 +741,70 @@ fn spawn_mock_upstream(response_body: String) -> (String, Arc<AtomicU64>) {
                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                         body_bytes.len(),
                         String::from_utf8_lossy(&body_bytes)
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    let _ = stream.shutdown(std::net::Shutdown::Both);
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    (url, hits)
+}
+
+/// Mock upstream that replies with a canned 3xx redirect and records
+/// how many requests it received. Used to prove that redirects from an
+/// allowed upstream are never followed to another host.
+fn spawn_redirect_mock_upstream(status_line: &str, location: String) -> (String, Arc<AtomicU64>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("redirect mock binds");
+    let addr = listener.local_addr().expect("redirect mock addr");
+    let url = format!("http://127.0.0.1:{}/v1/chat/completions", addr.port());
+    let hits = Arc::new(AtomicU64::new(0));
+    let hits_thread = hits.clone();
+    let status_line = status_line.to_string();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            match stream {
+                Ok(mut stream) => {
+                    hits_thread.fetch_add(1, Ordering::SeqCst);
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+                    let mut buf = Vec::with_capacity(8192);
+                    let mut chunk = [0u8; 8192];
+                    let mut content_length = 0usize;
+                    let mut header_end: Option<usize> = None;
+                    loop {
+                        match stream.read(&mut chunk) {
+                            Ok(0) => break,
+                            Ok(n) => {
+                                buf.extend_from_slice(&chunk[..n]);
+                                if header_end.is_none()
+                                    && let Some(pos) = find_subslice(&buf, b"\r\n\r\n")
+                                {
+                                    header_end = Some(pos + 4);
+                                    let headers =
+                                        String::from_utf8_lossy(&buf[..pos]).to_lowercase();
+                                    for line in headers.lines() {
+                                        if let Some(value) = line.strip_prefix("content-length:") {
+                                            content_length = value.trim().parse().unwrap_or(0);
+                                        }
+                                    }
+                                }
+                                if let Some(end) = header_end
+                                    && buf.len() >= end + content_length
+                                {
+                                    break;
+                                }
+                                if buf.len() > 256 * 1024 {
+                                    break;
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    let body = "{}";
+                    let response = format!(
+                        "HTTP/1.1 {status_line}\r\nLocation: {location}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
                     );
                     let _ = stream.write_all(response.as_bytes());
                     let _ = stream.shutdown(std::net::Shutdown::Both);
@@ -1015,6 +1124,241 @@ fn egress_preflight_refuses_plain_http_to_non_loopback_upstream() {
     assert!(egress_preflight(&grant, br#"{"messages":[]}"#).is_err());
 }
 
+#[test]
+fn egress_preflight_refuses_userinfo_hostname_confusion() {
+    // `https://openrouter.ai:443@attacker.invalid/path`: a naive
+    // string-split authority says "openrouter.ai", but the real authority
+    // host is attacker.invalid with user information "openrouter.ai:443".
+    // Both the user-information rule and the allowlist must refuse it.
+    let spoofed = "https://openrouter.ai:443@attacker.invalid/path".to_string();
+    let grant = allow_remote_grant(spoofed, "openrouter.ai".to_string(), vec![]);
+    assert!(egress_preflight(&grant, br#"{"messages":[]}"#).is_err());
+    // Even when the true host is allowlisted, user information is refused.
+    let spoofed = "https://openrouter.ai@attacker.invalid/path".to_string();
+    let grant = allow_remote_grant(spoofed, "attacker.invalid".to_string(), vec![]);
+    assert!(egress_preflight(&grant, br#"{"messages":[]}"#).is_err());
+    // Password-bearing user information is refused too.
+    let spoofed = "https://user:pass@openrouter.ai/api/v1/chat/completions".to_string();
+    let grant = allow_remote_grant(spoofed, "openrouter.ai".to_string(), vec![]);
+    assert!(egress_preflight(&grant, br#"{"messages":[]}"#).is_err());
+    // Fragment smuggling behind an authorized-looking host is refused.
+    let spoofed = "https://openrouter.ai/api/v1/chat/completions#@attacker.invalid".to_string();
+    let grant = allow_remote_grant(spoofed, "openrouter.ai".to_string(), vec![]);
+    assert!(egress_preflight(&grant, br#"{"messages":[]}"#).is_err());
+    // Malformed authorities are refused, not guessed at.
+    let grant = allow_remote_grant("https://".to_string(), "openrouter.ai".to_string(), vec![]);
+    assert!(egress_preflight(&grant, br#"{"messages":[]}"#).is_err());
+    let grant = allow_remote_grant("not-a-url".to_string(), "openrouter.ai".to_string(), vec![]);
+    assert!(egress_preflight(&grant, br#"{"messages":[]}"#).is_err());
+}
+
+#[test]
+fn egress_preflight_refuses_unexpected_port_and_destination() {
+    // Non-default explicit port on an HTTPS destination: refused even
+    // when the host is allowlisted and authorized.
+    let upstream = "https://openrouter.ai:8443/api/v1/chat/completions".to_string();
+    let grant = allow_remote_grant(upstream, "openrouter.ai".to_string(), vec![]);
+    assert!(egress_preflight(&grant, br#"{"messages":[]}"#).is_err());
+    // The explicit default HTTPS port is equivalent to none and allowed.
+    let upstream = "https://openrouter.ai:443/api/v1/chat/completions".to_string();
+    let grant = allow_remote_grant(upstream, "openrouter.ai".to_string(), vec![]);
+    assert!(egress_preflight(&grant, br#"{"messages":[]}"#).is_ok());
+    // An allowlist entry that does not match the real authority is refused.
+    let upstream = "https://other.example.com/api/v1/chat/completions".to_string();
+    let grant = allow_remote_grant(upstream, "openrouter.ai".to_string(), vec![]);
+    assert!(egress_preflight(&grant, br#"{"messages":[]}"#).is_err());
+    // The explicitly authorized live HTTPS destination is accepted.
+    let upstream = "https://openrouter.ai/api/v1/chat/completions".to_string();
+    let grant = allow_remote_grant(upstream, "openrouter.ai".to_string(), vec![]);
+    assert!(egress_preflight(&grant, br#"{"messages":[]}"#).is_ok());
+}
+
+#[test]
+fn egress_preflight_refuses_unsupported_and_insecure_schemes() {
+    for upstream in [
+        "ftp://openrouter.ai/api/v1/chat/completions",
+        "file:///etc/passwd",
+        "wss://openrouter.ai/api/v1/chat/completions",
+        "gopher://openrouter.ai/",
+        "http://openrouter.ai/api/v1/chat/completions",
+    ] {
+        let grant = allow_remote_grant(upstream.to_string(), "openrouter.ai".to_string(), vec![]);
+        assert!(
+            egress_preflight(&grant, br#"{"messages":[]}"#).is_err(),
+            "scheme must be refused: {upstream}"
+        );
+    }
+    // The restricted loopback exception still allows local mock tests.
+    let upstream = "http://127.0.0.1:9/v1/chat/completions".to_string();
+    let grant = allow_remote_grant(upstream, "127.0.0.1".to_string(), vec![]);
+    assert!(egress_preflight(&grant, br#"{"messages":[]}"#).is_ok());
+    let upstream = "http://localhost:9/v1/chat/completions".to_string();
+    let grant = allow_remote_grant(upstream, "localhost".to_string(), vec![]);
+    assert!(egress_preflight(&grant, br#"{"messages":[]}"#).is_ok());
+}
+
+#[test]
+fn gateway_refuses_secret_bearing_outbound_payload_before_any_dial() {
+    // The check runs against the serialized payload that will actually be
+    // transmitted (inbound messages + upstream model/reasoning rewrite),
+    // not merely against the inbound gateway body.
+    let secret = "CANARY-SECRET-9f8a7b6c";
+    let (upstream_url, hits) = spawn_mock_upstream(canned_chat_completion(
+        "nemotron-ultra-550b-free",
+        &reference_proposal(),
+        true,
+    ));
+    let host = upstream_host(&upstream_url);
+    let grant = allow_remote_grant(upstream_url, host, vec![secret.to_string()]);
+    let (endpoint, _effects, refused, would_dial, stop) = spawn_openrouter_gateway(grant);
+    let gateway_addr = endpoint
+        .strip_prefix("http://")
+        .and_then(|rest| rest.split('/').next())
+        .expect("gateway host:port")
+        .to_string();
+    let body = json!({
+        "messages": [{"role": "user", "content": format!("leak {secret}")}]
+    })
+    .to_string();
+    let request = format!(
+        "POST /v1/chat/completions HTTP/1.1\r\nHost: {gateway_addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let mut stream = std::net::TcpStream::connect(&gateway_addr).expect("connect gateway");
+    stream.write_all(request.as_bytes()).expect("write request");
+    let mut response = String::new();
+    let _ = stream.read_to_string(&mut response);
+    stop.store(true, Ordering::SeqCst);
+    assert!(
+        response.starts_with("HTTP/1.1 403"),
+        "gateway must refuse with 403 egress-refused, got: {response}"
+    );
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        0,
+        "upstream must receive zero requests"
+    );
+    assert_eq!(
+        would_dial.load(Ordering::SeqCst),
+        0,
+        "egress refused before dialing"
+    );
+    assert_eq!(refused.load(Ordering::SeqCst), 1);
+}
+
+struct RedirectPilotResult {
+    run: ModelPilotRun,
+    redirect_target_hits: Arc<AtomicU64>,
+    authorized_upstream_hits: Arc<AtomicU64>,
+    refused: Arc<AtomicU64>,
+    would_dial: Arc<AtomicU64>,
+    stop: Arc<AtomicBool>,
+}
+
+fn run_redirect_pilot(status_line: &str) -> RedirectPilotResult {
+    // Redirect target on a different host name (localhost vs 127.0.0.1):
+    // a second, unauthorized destination the gateway must never dial.
+    let (target_url, target_hits) = spawn_mock_upstream(canned_chat_completion(
+        "nemotron-ultra-550b-free",
+        &reference_proposal(),
+        true,
+    ));
+    let cross_host_location = target_url.replacen("127.0.0.1", "localhost", 1);
+    let (redirect_url, upstream_hits) =
+        spawn_redirect_mock_upstream(status_line, cross_host_location);
+    let host = upstream_host(&redirect_url);
+    let grant = allow_remote_grant(redirect_url, host, vec![]);
+    let (endpoint, effects, refused, would_dial, stop) = spawn_openrouter_gateway(grant);
+    let mut spawn = |_attempt: u32| PilotEndpoint {
+        endpoint: endpoint.clone(),
+        effects: effects.clone(),
+    };
+    let run = run_model_pilot(
+        LIVE_DESCRIPTOR,
+        PILOT_EXAMPLE_PRICE_BOOK,
+        10_000,
+        RouteProfile::Standard,
+        TaskRepairProvenanceKind::OperatorObservedLive,
+        &mut spawn,
+    );
+    RedirectPilotResult {
+        run,
+        redirect_target_hits: target_hits,
+        authorized_upstream_hits: upstream_hits,
+        refused,
+        would_dial,
+        stop,
+    }
+}
+
+#[test]
+fn cross_host_307_redirect_is_never_followed() {
+    let outcome = run_redirect_pilot("307 Temporary Redirect");
+    outcome.stop.store(true, Ordering::SeqCst);
+    let run = &outcome.run;
+    let target_hits = &outcome.redirect_target_hits;
+    let upstream_hits = &outcome.authorized_upstream_hits;
+    let refused = &outcome.refused;
+    let would_dial = &outcome.would_dial;
+    assert_eq!(
+        refused.load(Ordering::SeqCst),
+        0,
+        "the authorized upstream itself is not refused"
+    );
+    assert_eq!(
+        target_hits.load(Ordering::SeqCst),
+        0,
+        "the redirect target must receive zero requests"
+    );
+    assert_eq!(
+        upstream_hits.load(Ordering::SeqCst),
+        1,
+        "only the authorized upstream is dialed"
+    );
+    assert_eq!(would_dial.load(Ordering::SeqCst), 1);
+    assert!(!run.patched);
+    assert!(run.envelope.is_none());
+    let failure = run.attempts[0].failure.as_deref().expect("typed failure");
+    assert!(
+        failure.contains("governed effect failed"),
+        "redirect must surface as a non-successful provider response: {failure}"
+    );
+}
+
+#[test]
+fn cross_host_308_redirect_is_never_followed() {
+    let outcome = run_redirect_pilot("308 Permanent Redirect");
+    outcome.stop.store(true, Ordering::SeqCst);
+    let run = &outcome.run;
+    let target_hits = &outcome.redirect_target_hits;
+    let upstream_hits = &outcome.authorized_upstream_hits;
+    let refused = &outcome.refused;
+    let would_dial = &outcome.would_dial;
+    assert_eq!(
+        refused.load(Ordering::SeqCst),
+        0,
+        "the authorized upstream itself is not refused"
+    );
+    assert_eq!(
+        target_hits.load(Ordering::SeqCst),
+        0,
+        "the redirect target must receive zero requests"
+    );
+    assert_eq!(
+        upstream_hits.load(Ordering::SeqCst),
+        1,
+        "only the authorized upstream is dialed"
+    );
+    assert_eq!(would_dial.load(Ordering::SeqCst), 1);
+    assert!(!run.patched);
+    assert!(run.envelope.is_none());
+    let failure = run.attempts[0].failure.as_deref().expect("typed failure");
+    assert!(
+        failure.contains("governed effect failed"),
+        "redirect must surface as a non-successful provider response: {failure}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Committed live-pilot receipt: preserved historical evidence, accurately
 // classified; every link recomputable from the committed bytes
@@ -1189,22 +1533,13 @@ pub struct GatewayEgressGrant {
 
 /// Outbound effect boundary. Runs BEFORE the gateway opens any upstream
 /// connection; on any refusal it returns `Err(reason)` and the caller
-/// must NOT dial out.
+/// must NOT dial out. `body` must be the exact serialized payload that
+/// will be transmitted on the wire.
 fn egress_preflight(grant: &GatewayEgressGrant, body: &[u8]) -> Result<(), &'static str> {
-    let url = grant.upstream_url.clone();
-    // Host pinning and scheme-vs-host consistency (host without port).
-    let host = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-        .map(|rest| rest.split('/').next().unwrap_or(""))
-        .map(|authority| authority.split(':').next().unwrap_or("").to_lowercase())
-        .unwrap_or_default();
-    if url.starts_with("http://") && host != "127.0.0.1" && host != "localhost" {
-        return Err("plain HTTP egress is refused; HTTPS is required for non-loopback upstreams");
-    }
-    if host.is_empty() {
-        return Err("upstream host unparseable");
-    }
+    // Scheme pinning, authority disambiguation and port pinning via
+    // proper URL parsing (never manual string splitting).
+    let parsed = parse_upstream_url(&grant.upstream_url)?;
+    let host = parsed.host;
     // The effective network policy decides, not the URL shape.
     let policy_permits = match grant.effective_network_policy.default {
         prometheos_lite::workflow::soma::types::NetworkDefault::Allow => true,
@@ -1336,8 +1671,16 @@ fn handle_gateway_conn(mut stream: std::net::TcpStream, grant: GatewayEgressGran
     // harness itself is untouched.
     upstream_request["reasoning"] = json!({ "enabled": false });
 
+    // ---- Build the actual outbound payload FIRST ----------------------
+    // The authorization and known-secret checks below run against these
+    // exact bytes, which are the bytes transmitted on the wire.
+    let payload = match serde_json::to_vec(&upstream_request) {
+        Ok(payload) => payload,
+        Err(_) => return,
+    };
+
     // ---- EGRESS PREFLIGHT: decide before any upstream effect -----------
-    if let Err(reason) = egress_preflight(&grant, body) {
+    if let Err(reason) = egress_preflight(&grant, &payload) {
         grant.refused.fetch_add(1, Ordering::SeqCst);
         let refusal_body = json!({ "error": "egress-refused", "reason": reason }).to_string();
         let refusal = format!(
@@ -1369,8 +1712,13 @@ fn handle_gateway_conn(mut stream: std::net::TcpStream, grant: GatewayEgressGran
         Ok(runtime) => runtime,
         Err(_) => return,
     };
+    // Redirects are NEVER followed: a 301/302/303/307/308 from the
+    // upstream must not become permission to contact another host. Any
+    // redirect response is handled as a non-successful provider response
+    // below.
     let client = match reqwest::Client::builder()
         .timeout(Duration::from_secs(100))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
     {
         Ok(client) => client,
@@ -1386,7 +1734,7 @@ fn handle_gateway_conn(mut stream: std::net::TcpStream, grant: GatewayEgressGran
                 "https://github.com/prometheosai/prometheos-lite",
             )
             .header("X-Title", "prometheos-lite pilot")
-            .json(&upstream_request);
+            .body(payload);
         let builder = match &api_key {
             Some(key) => builder.bearer_auth(key),
             None => builder,
@@ -1399,7 +1747,24 @@ fn handle_gateway_conn(mut stream: std::net::TcpStream, grant: GatewayEgressGran
             Err(_) => (502, String::new()),
         }
     });
-    if let Ok(mut parsed) = serde_json::from_str::<Value>(&response_body) {
+    // A redirect response is a non-successful provider response. It is
+    // never followed (Policy::none above) and never becomes a fresh
+    // authorized dial; the harness sees an explicit non-2xx result.
+    let mut redirect_refused = false;
+    let status = if (300..400).contains(&status) {
+        redirect_refused = true;
+        502
+    } else {
+        status
+    };
+    if redirect_refused {
+        response_body = json!({
+            "error": "redirect-refused",
+            "reason": "upstream returned a redirect; redirects are not followed and the destination is not authorized",
+        })
+        .to_string();
+    }
+    if !redirect_refused && let Ok(mut parsed) = serde_json::from_str::<Value>(&response_body) {
         parsed["model"] = json!(grant.harness_visible_model);
         response_body = parsed.to_string();
     }
