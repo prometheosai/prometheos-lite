@@ -292,16 +292,15 @@ impl ModelRepairReport {
             );
         }
         for attempt in &self.attempts {
-            if let Some(validator) = &attempt.validator {
-                if validator.command != self.validator.command
+            if let Some(validator) = &attempt.validator
+                && (validator.command != self.validator.command
                     || validator.args != self.validator.args
-                    || validator.expected_exit_code != pinned_exit
-                {
-                    return Err(format!(
-                        "attempt {} validator does not match the pinned command/argv/expectation",
-                        attempt.attempt
-                    ));
-                }
+                    || validator.expected_exit_code != pinned_exit)
+            {
+                return Err(format!(
+                    "attempt {} validator does not match the pinned command/argv/expectation",
+                    attempt.attempt
+                ));
             }
         }
         if self.status == ModelRepairStatus::Repaired {
@@ -842,7 +841,7 @@ pub async fn run_model_repair(
         if total_prompt_bytes >= MAX_PROMPT_BYTES_TOTAL {
             report.attempts.push(attempt_refusal(
                 attempt_index + 1,
-                &ModelRepairStatus::BudgetExhausted.as_str(),
+                ModelRepairStatus::BudgetExhausted.as_str(),
             ));
             report.status = ModelRepairStatus::BudgetExhausted;
             break;

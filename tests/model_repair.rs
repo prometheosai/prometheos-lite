@@ -497,7 +497,7 @@ fn report_serde_round_trip_and_digest() {
     let (temp, rev) = stage_fixture();
     let runtime = tokio::runtime::Runtime::new().expect("runtime");
     let report: ModelRepairReport = runtime.block_on(async {
-        let spec = repair_spec(&temp.path().to_path_buf(), &rev);
+        let spec = repair_spec(temp.path(), &rev);
         let proposer = ScriptedProposer::new(descriptor(), vec![Ok(FIX_DIFF.to_string())]);
         prometheos_lite::workflow::model_repair::run_model_repair(&spec, proposer, None).await
     });

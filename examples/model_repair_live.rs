@@ -399,9 +399,9 @@ impl ModelProposer for LiveProposer {
         let content = parsed
             .get("output")
             .and_then(|o| o.get("content"))
-            .and_then(|c| match c {
-                serde_json::Value::String(s) => Some(s.clone()),
-                other => Some(other.to_string()),
+            .map(|c| match c {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
             })
             .ok_or_else(|| {
                 ModelProposeError::Unavailable("harness output lacks content".to_string())
