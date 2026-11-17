@@ -1,5 +1,31 @@
 ## Unreleased
 
+- #156 E7/I07 Slice A - Lite-native classified failure -> minimized, redacted,
+  versioned evaluation case, with the verified fix linked back to the
+  originating failure (Lite-internal, experimental; not a Foundry claim).
+  PR #312 (2026-11-17): a new `workflow::failure_case` module converts the
+  pinned #136 `rust-bugfix-arithmetic` governed validation failure
+  (`cargo test --offline`, exit 101, class `governed-product-outcome`) into a
+  versioned Lite-internal case (`lite.evaluation.failure-case`, schema 1.0.0)
+  that binds the original failure identity, source/task/repository/harness/
+  provider pins, baseline content digest, validator command/argv/exit,
+  effective authority (writable scopes, repair origin, changed files), the
+  expected result, the reproduction/fix/chain evidence digests and the export
+  scan record. Minimization is bounded and replay-validated: only incidental
+  files (one at a time) are dropped, every accepted removal is replayed
+  through the real governed boundary and must reproduce the exact pinned
+  failure signature (validator command/argv/exit/outcome/classification/
+  failure class); a drifted or non-reproducing candidate is rejected and
+  restored byte-for-byte. The export is refused (never rewritten) when the
+  serialized case contains any registered known secret, the test canary, or
+  machine-path material; equivalence-aware deduplication merges equivalent
+  occurrences by stable failure identity + full pin equivalence without
+  dropping divergent provenance (same-identity-incompatible-pins are kept as
+  separate groups and reported). Verified fix is bound to the original
+  failure identity via `verify_against_chain`. NO Foundry ingestion, metrics,
+  rankings, certification, or external-evaluation claim: `externalEvaluationFormat.status` stays `unsupported`. Linux/macOS NOT RUN;
+  Windows local execution only; independent ChatGPT review gate pending.
+
 - #136 E7/I01 Slice D - genuine model-authored repair pilot (Lite-internal,
   experimental; not a benchmark, not a Foundry claim). PR #310 round 2
   (2026-11-16, trust-boundary repair) after independent review: the gateway
