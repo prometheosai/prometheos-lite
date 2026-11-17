@@ -1580,16 +1580,23 @@ pub const TASK_RUN_RUNNER_REVISION: &str = "2";
 /// validator receipt. Pinned on every envelope and enforced at sealing.
 pub const TASK_RUN_VERIFICATION_SCOPE: &str = "internally consistent operator-observed measurements: the embedded records re-derive cleanly. It is NOT cryptographic proof that an external process produced the recorded output; a fully consistent re-forgery cannot be detected from bytes alone. The pinned descriptor command/argv and the pinned expected-outcome digests narrow the forgery surface but do not remove it.";
 
-/// Where the repair content came from. Exactly one origin exists in Slice B
-/// and it is **not** a model: a pre-scripted, committed, reviewed repair
-/// fixture. Typed (not a free-form string) so "the model fixed the bug" can
-/// never be smuggled into this record; genuine model coding skill is out of
-/// scope for this fixture and no field in this document claims it.
+/// Where the repair content came from. Exactly two origins exist and they
+/// are typed (not free-form strings) so "the model fixed the bug" can
+/// never be smuggled into this record or scripted provenance can never be
+/// relabelled as model output:
+///
+/// * [`TaskRepairOrigin::ScriptedFixture`] — a pre-scripted, committed,
+///   reviewed repair fixture.
+/// * [`TaskRepairOrigin::ModelAuthored`] — a patch authored at run time by
+///   the routed model, bound to the model's raw response and to the parsed
+///   proposal it produced (see [`ModelPatchProvenance`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TaskRepairOrigin {
     /// Scripted fixture repair, authored against the pinned bytes.
     ScriptedFixture,
+    /// Repair authored at run time by the routed model (#136 Slice D).
+    ModelAuthored,
 }
 
 /// What happened to the task itself. Deliberately distinct from
@@ -1611,11 +1618,12 @@ pub enum TaskOutcome {
     RepairRefused,
 }
 
-/// Where the repair write authority came from. Exactly one source exists in
-/// this fixture and it is **not** the model: a scripted fixture repair,
-/// authorized by the isolated writable workspace and the file policy. The
-/// governed model dispatch itself holds no write authority (its node
-/// manifest pins `writableScopes: []`); this record makes the separation
+/// Where the repair write authority came from. Typed so the two write
+/// paths can never be confused: a scripted fixture repair authorized by
+/// the workspace+file policy, or a model-authored repair authorized the
+/// same way (never by the governed model dispatch itself — its node
+/// manifest pins `writableScopes: []`). The governed model dispatch holds
+/// no write authority in either case; this record makes the separation
 /// explicit instead of borrowing the model's authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -1624,6 +1632,10 @@ pub enum TaskRepairWriteAuthority {
     /// file policy editable set for a fixture-scripted patch. Never the
     /// model's authority.
     ScriptedFixtureWorkspaceFilePolicy,
+    /// Write authorized by the isolated writable workspace (#171) plus the
+    /// file policy editable set for a model-authored patch. Never the
+    /// model's authority.
+    ModelAuthoredWorkspaceFilePolicy,
 }
 
 /// How the recorded validator result was observed. Only a subprocess the
@@ -1641,14 +1653,79 @@ pub enum TaskValidatorProvenance {
     NotExecuted,
 }
 
+/// How a model-patch provenance was observed. Required for any
+/// model-authored repair sealed after the 2026-11 trust-boundary repair.
+/// The offline suite can only ever produce
+/// [`TaskRepairProvenanceKind::CannedTest`]; a response observed through an
+/// authorized real-model loopback gateway produces
+/// [`TaskRepairProvenanceKind::OperatorObservedLive`]. A sealed canned
+/// fixture can never be upgraded to the live kind by re-sealing, and an
+/// offline envelope can never claim the live kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TaskRepairProvenanceKind {
+    /// Deterministic canned loopback responder used by the offline suite.
+    /// Not a genuine external model, not independently authenticated.
+    CannedTest,
+    /// Response observed through an authorized real-model loopback gateway.
+    /// Operator-observed, not cryptographically authenticated by the
+    /// provider (no provider attestation is retained).
+    OperatorObservedLive,
+}
+
+/// Provenance of a model-authored patch (#136 Slice D, trust-boundary
+/// repair). Binds the edit digest to the *embedded routed attempt*, to the
+/// raw response bytes recorded in this very record, and to the routed
+/// provider/model and harness identity. The recorded response bytes are
+/// self-consistency-checked (the raw response hashes to
+/// [`ModelPatchProvenance::model_response_digest`]); provider authenticity
+/// is operator-observed and is NOT cryptographically attested.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelPatchProvenance {
+    /// sha256 (hex64) of the raw model response bytes observed by the
+    /// runner, before any parsing.
+    pub model_response_digest: String,
+    /// Canonical digest ([`try_canonical_digest`] equivalent over the
+    /// parsed proposal document) of the edit operations the model
+    /// proposed. Must equal [`TaskRepairRecord::patch_digest`].
+    pub proposal_digest: String,
+    /// 1-based attempt number that produced the applied patch.
+    pub attempt: u32,
+    /// Model identifier as pinned by the route candidate and re-checked by
+    /// the harness. Never taken from the model's self-report; must equal
+    /// the embedded routed attempt's model.
+    pub model_identity: String,
+    /// Harness id and revision that mediated the call,
+    /// `"{harnessId}@{revision}"` (e.g. `lite.harness.local_model@v1`).
+    /// Must equal the embedded routed attempt's harness id and the
+    /// descriptor's pinned harness revision.
+    pub harness_revision: String,
+    /// How this provenance was observed. `None` on envelopes sealed
+    /// before the trust-boundary repair; such envelopes can never pass
+    /// verification again (they are preserved historical evidence, not
+    /// policy-compliant run records).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<TaskRepairProvenanceKind>,
+    /// The raw model response bytes as observed by the gateway/harness,
+    /// capped by the harness's output limit. Verification recomputes
+    /// their sha256 and requires it to equal [`ModelPatchProvenance::model_response_digest`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_response: Option<String>,
+    /// Idempotency key of the routed attempt that produced the applied
+    /// patch; must equal the embedded routed attempt's idempotency key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_idempotency_key: Option<String>,
+}
+
 /// The repair the fixture runner attempted. Single-file scoped on purpose:
-/// the task fixture is one source file.
+/// the pinned tasks carry one editable source file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TaskRepairRecord {
     pub origin: TaskRepairOrigin,
-    /// Whose authority made the write. Explicitly the scripted-fixture
-    /// workspace/file-policy permit — never the governed model dispatch.
+    /// Whose authority made the write. Explicitly the workspace/file-policy
+    /// permit — never the governed model dispatch.
     pub write_authority: TaskRepairWriteAuthority,
     /// Patch action used, e.g. `"search-replace"`.
     pub action: String,
@@ -1664,6 +1741,10 @@ pub struct TaskRepairRecord {
     pub patch_digest: String,
     /// Whether the patch was actually applied to the workspace.
     pub applied: bool,
+    /// Model-authored provenance. Present iff `origin` is
+    /// [`TaskRepairOrigin::ModelAuthored`]; absent for scripted fixtures.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_provenance: Option<ModelPatchProvenance>,
 }
 
 /// The validator the fixture runner executed. The command/argv/expected
@@ -1708,11 +1789,13 @@ pub struct TaskValidatorRecord {
 /// re-derives everything from embedded bytes alone. Never a Foundry
 /// contract; the external evaluation format stays UNSUPPORTED.
 ///
-/// Honesty boundary: this record proves a scripted, fixture-authored repair
+/// Honesty boundary: this record proves a scripted fixture repair — or a
+/// model-authored repair bound by [`ModelPatchProvenance`] to the raw
+/// model response and to the parsed proposal the applied edits came from —
 /// was applied in an authorised disposable workspace and that the pinned
 /// validator ran and exited with the recorded status. It does **not**
-/// prove model coding ability, does not rank anything, and carries no
-/// benchmark semantics.
+/// rank models, does not benchmark anything, and carries no benchmark
+/// semantics.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LiteTaskRunEvidence {
@@ -1776,9 +1859,12 @@ fn derive_task_outcome(
 /// the full list of violations (empty = bound). Shared by `sealed` and
 /// `verify`. `descriptor` is the embedded run's descriptor: the validator
 /// receipt is checked against ITS pins, so a spliced record cannot borrow
-/// another scenario's expectation.
+/// another scenario's expectation. `attempt` is the embedded routed
+/// attempt: a model-authored repair is bound to it exactly, so a record
+/// cannot borrow another dispatch's identity.
 fn check_task_run_bindings(
     descriptor: &ScenarioDescriptor,
+    attempt: &RoutedAttemptV1,
     repair: &TaskRepairRecord,
     validator: &TaskValidatorRecord,
     baseline: &str,
@@ -1806,6 +1892,117 @@ fn check_task_run_bindings(
     }
     if !is_hex64(post_run) {
         fail("postRunContentDigest must be a lower hex sha256 digest".to_string());
+    }
+    // ---- Origin / authority / provenance consistency ------------------------
+    match repair.origin {
+        TaskRepairOrigin::ScriptedFixture => {
+            if repair.write_authority
+                != TaskRepairWriteAuthority::ScriptedFixtureWorkspaceFilePolicy
+            {
+                fail("a scripted-fixture repair must carry the scripted-fixture workspace/file-policy write authority".to_string());
+            }
+            if repair.model_provenance.is_some() {
+                fail(
+                    "a scripted-fixture repair cannot carry model-authored provenance".to_string(),
+                );
+            }
+        }
+        TaskRepairOrigin::ModelAuthored => {
+            if repair.write_authority != TaskRepairWriteAuthority::ModelAuthoredWorkspaceFilePolicy
+            {
+                fail("a model-authored repair must carry the model-authored workspace/file-policy write authority".to_string());
+            }
+            match &repair.model_provenance {
+                None => fail("a model-authored repair must carry model provenance".to_string()),
+                Some(provenance) => {
+                    if !is_hex64(&provenance.model_response_digest) {
+                        fail(
+                            "modelProvenance.modelResponseDigest must be a lower hex sha256 digest"
+                                .to_string(),
+                        );
+                    }
+                    if !is_hex64(&provenance.proposal_digest) {
+                        fail(
+                            "modelProvenance.proposalDigest must be a lower hex sha256 digest"
+                                .to_string(),
+                        );
+                    }
+                    if provenance.attempt == 0 {
+                        fail("modelProvenance.attempt must be at least 1".to_string());
+                    }
+                    if provenance.model_identity.trim().is_empty() {
+                        fail("modelProvenance.modelIdentity must be non-empty".to_string());
+                    }
+                    if provenance.harness_revision.trim().is_empty() {
+                        fail("modelProvenance.harnessRevision must be non-empty".to_string());
+                    }
+                    // ---- Trust-boundary binding: the embedded routed attempt --
+                    match &provenance.kind {
+                        None => fail(
+                            "modelProvenance.kind must state canned-test or operator-observed-live"
+                                .to_string(),
+                        ),
+                        Some(TaskRepairProvenanceKind::CannedTest)
+                        | Some(TaskRepairProvenanceKind::OperatorObservedLive) => {}
+                    }
+                    match &provenance.raw_response {
+                        None => fail(
+                            "modelProvenance.rawResponse must embed the raw response bytes (re-sealed historical envelopes can never verify)"
+                                .to_string(),
+                        ),
+                        Some(raw) => {
+                            if !is_hex64(&provenance.model_response_digest) {
+                                // already reported above; avoid cascading errors
+                            } else {
+                                let digest =
+                                    hex_lower(&Sha256::digest(raw.as_bytes()));
+                                if digest != provenance.model_response_digest {
+                                    fail(
+                                        "modelProvenance.rawResponse does not hash to modelProvenance.modelResponseDigest"
+                                            .to_string(),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    match &provenance.attempt_idempotency_key {
+                        None => fail(
+                            "modelProvenance.attemptIdempotencyKey must bind the embedded routed attempt"
+                                .to_string(),
+                        ),
+                        Some(key) => {
+                            if key != &attempt.idempotency_key {
+                                fail(
+                                    "modelProvenance.attemptIdempotencyKey != embedded routed attempt idempotency key (the recorded patch is not bound to this dispatch)"
+                                        .to_string(),
+                                );
+                            }
+                        }
+                    }
+                    let expected_model = attempt.model.clone().unwrap_or_default();
+                    if provenance.model_identity != expected_model {
+                        fail(
+                            "modelProvenance.modelIdentity != embedded routed attempt model (provider/model identity mismatch)"
+                                .to_string(),
+                        );
+                    }
+                    let expected_harness =
+                        format!("{}@{}", attempt.harness_id, descriptor.harness.revision);
+                    if provenance.harness_revision != expected_harness {
+                        fail(
+                            "modelProvenance.harnessRevision != descriptor harness id@revision (harness identity mismatch)"
+                                .to_string(),
+                        );
+                    }
+                    if provenance.proposal_digest != repair.patch_digest {
+                        fail(
+                            "modelProvenance.proposalDigest != repair.patchDigest (the applied edits are not the edits the model proposed)"
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+        }
     }
     // ---- Descriptor-pinned validator surface -------------------------------
     let pins = match &descriptor.validation {
@@ -1944,17 +2141,24 @@ fn check_task_run_bindings(
                             .to_string(),
                     );
                 }
-                if repair.file_after_digest != pins.expected_file_after_digest {
-                    fail(
-                        "repaired outcome but repair.fileAfterDigest != pinned validation.expectedFileAfterDigest"
-                            .to_string(),
-                    );
-                }
-                if post_run != pins.expected_post_run_digest {
-                    fail(
-                        "repaired outcome but postRunContentDigest != pinned validation.expectedPostRunDigest"
-                            .to_string(),
-                    );
+                // Byte-exact pins bind a repair to the task-setter's reference
+                // bytes. They are meaningful for a scripted fixture; a genuine
+                // model may author any behavior-correct repair, so for a
+                // model-authored repair the applied-vs-proposed provenance
+                // binding above replaces the byte pin.
+                if repair.origin == TaskRepairOrigin::ScriptedFixture {
+                    if repair.file_after_digest != pins.expected_file_after_digest {
+                        fail(
+                            "repaired outcome but repair.fileAfterDigest != pinned validation.expectedFileAfterDigest"
+                                .to_string(),
+                        );
+                    }
+                    if post_run != pins.expected_post_run_digest {
+                        fail(
+                            "repaired outcome but postRunContentDigest != pinned validation.expectedPostRunDigest"
+                                .to_string(),
+                        );
+                    }
                 }
             }
         }
@@ -2047,6 +2251,7 @@ impl LiteTaskRunEvidence {
         );
         let violations = check_task_run_bindings(
             &scenario_run.descriptor,
+            &scenario_run.attempt,
             &repair,
             &validator,
             &baseline_content_digest,
@@ -2128,6 +2333,7 @@ impl LiteTaskRunEvidence {
         self.scenario_run.verify()?;
         let violations = check_task_run_bindings(
             &self.scenario_run.descriptor,
+            &self.scenario_run.attempt,
             &self.repair,
             &self.validator,
             &self.baseline_content_digest,

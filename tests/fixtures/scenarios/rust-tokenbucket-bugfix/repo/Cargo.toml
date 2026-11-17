@@ -1,0 +1,6 @@
+[package]
+name = "fixture-tokenbucket"
+version = "0.1.0"
+edition = "2021"
+description = "Pinned #136 Slice D evaluation fixture (synthetic OSS-style crate). Never published."
+license = "MIT"

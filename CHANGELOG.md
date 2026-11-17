@@ -1,5 +1,65 @@
 ## Unreleased
 
+- #136 E7/I01 Slice D - genuine model-authored repair pilot (Lite-internal,
+  experimental; not a benchmark, not a Foundry claim). PR #310 round 2
+  (2026-11-16, trust-boundary repair) after independent review: the gateway
+  is now a real authorization boundary (upstream's remote locality is
+  represented, per-run synthetic-source egress authorization required,
+  effective NetworkPolicy re-checked at the outbound effect, HTTPS-only
+  outside loopback, no known secrets cross), the sealed provenance binds
+  the embedded routed attempt exactly (raw response recomputed from
+  embedded bytes, proposal digest == applied patch digest, winning-attempt
+  idempotency key, model identity, harness id@revision), canned-test and
+  operator-observed-live provenance are distinguished and sealed, and the
+  historical live run is re-classified `historical-ungoverned-egress`
+  (preserved byte-for-byte as historical experimental evidence, NOT a
+  policy-compliant governed run; live reproduction is
+  LIVE_REPRODUCTION_BLOCKED — OpenRouter free tier returned HTTP 401 on
+  re-probes). The recorded model proposal was
+  `self.last_refill += ticks * self.tick_millis;` (the earlier release note
+  mis-stated it — now corrected). Negative matrix extended: remote+local-only
+  profile refusal, network-deny pre-dial refusal (zero upstream bytes),
+  authorized cloud-backed dispatch, wrong provider/model identity, wrong
+  harness revision, wrong winning attempt, fabricated raw-response digest,
+  proposal/patch disagreement, canned envelope re-labelled as live,
+  secret-bearing outbound message refused at the egress preflight.
+
+- #136 E7/I01 Slice D - initial pilot (Lite-internal, experimental; not a
+  benchmark, not a Foundry claim). A new synthetic,
+  declared OSS-style fixture (`lite-rust-tokenbucket-bugfix-model-001`,
+  `tests/fixtures/scenarios/rust-tokenbucket-bugfix/`) in which a small
+  keyed token-bucket rate limiter discards sub-window refill remainder;
+  `cargo test --offline` fails pre-fix (exit 101,
+  `refill_accumulates_sub_window_remainder`). The opt-in live pilot
+  (`PROMETHEOS_REAL_MODEL_PILOT=1`, existing `OPENROUTER_API_KEY`) ran the
+  genuine model `nvidia/nemotron-3-ultra-550b-a55b:free` (OpenRouter free
+  tier, prompt/completion price 0 verified 2026-11-16) through the normal
+  governed local-model path via a loopback operator gateway to an isolated,
+  content-pinned, revision-pinned git-worktree: one attempt, one
+  model-authored search-replace edit to `src/bucket.rs` (the proposal was
+  `self.last_refill += ticks * self.tick_millis;`), applied under
+  single-file write authority, pinned validator exit 0, `taskOutcome:
+  repaired`, classification `governed-product-outcome`; usage KNOWN
+  (3177+258=3435 tokens), cost KNOWN 0 under the operator example price
+  book. A preliminary free-model run authoring no-op edits was rejected by
+  the edit boundary and applied nothing. The sealed envelope carries
+  `modelPatchProvenance` (raw model-response sha256, canonical proposal
+  digest identical to the applied patch digest, attempt number, routed
+  model identity, harness revision); re-sealed false-success envelopes are
+  rejected on every tamper axis. Committed receipt with the full sealed
+  envelope: `docs/evidence/real-model-pilot-tokenbucket-2026-11-16.json`
+  (independent assessor replay re-derives the recorded post-run tree
+  digest from the committed bytes offline; the preserved envelope fails the
+  repaired verification by design — it is historical evidence, not a
+  policy-compliant record). Negative
+  matrix: forbidden files (`tests/rate_limit.rs`, `src/lib.rs`), nonexistent
+  search text, stale revision, interrupted dispatch (typed timeout, zero
+  effects, journal preserved), duplicate application refused, missing usage
+  or missing pricing is Unknown (never zero), solver-visible corpus leakage
+  guard, offline canned adaptation for the same machinery. Synthetic-task
+  provenance stated explicitly; no benchmark, ranking, Foundry
+  compatibility or external held-out issue is claimed; Linux/macOS not run.
+
 - #136 E7/I01 Slice C - task variety and replayable failure evidence on the
   Slice B executed-task path. Two new deterministic, actually executed
   Lite-owned scenario kinds. (1) An executed DOCUMENTATION task
