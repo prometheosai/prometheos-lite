@@ -533,7 +533,8 @@ fn positive_end_to_end_pinned_failure_to_linked_fix() {
 
     // ---- Deterministic re-export: the same failure re-exports byte-for-byte,
     // arming no second effect ----------------------------------------------
-    let case_again = LiteFailureCase::sealed(chain, minimization, &[]).expect("re-export seals");
+    let case_again = LiteFailureCase::sealed(chain, minimization, &known_secrets())
+        .expect("re-export seals");
     assert_eq!(case.content_digest, case_again.content_digest);
     assert_eq!(
         serde_json::to_string_pretty(&case).expect("serializes"),
@@ -827,9 +828,10 @@ fn tampered_baseline_digest_is_refused() {
     evil.source.repository_baseline_digest = "e".repeat(64);
     assert!(redigest(evil).verify_against_chain(shared_chain()).is_err());
 
-    // A stale minimization baseline is refused at seal time too.
+    // A minimized surface that does not equal the pinned baseline is refused
+    // at seal time.
     let mut minimization = base_minimization();
-    minimization.original_tree_digest = "f".repeat(64);
+    minimization.minimized_tree_digest = "f".repeat(64);
     assert!(LiteFailureCase::sealed(shared_chain(), minimization, &[]).is_err());
 }
 
