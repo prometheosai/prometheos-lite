@@ -424,6 +424,18 @@ pub fn run_validator(
     worktree: &Path,
     target_dir: &Path,
 ) -> prometheos_lite::workflow::scenario::TaskValidatorRecord {
+    run_validator_with_timeout(pins, worktree, target_dir, VALIDATOR_TIMEOUT)
+}
+
+/// Same validator runner with a caller-supplied deadline. The #137 Slice A
+/// reliability campaign uses this to prove a hanging validator is killed and
+/// classified as a timeout — never as a success.
+pub fn run_validator_with_timeout(
+    pins: &prometheos_lite::workflow::scenario::ValidationPin,
+    worktree: &Path,
+    target_dir: &Path,
+    timeout: Duration,
+) -> prometheos_lite::workflow::scenario::TaskValidatorRecord {
     use prometheos_lite::workflow::scenario::{TaskValidatorProvenance, TaskValidatorRecord};
     let started = Instant::now();
     let result = Command::new(&pins.command)
@@ -457,7 +469,7 @@ pub fn run_validator(
                 .stderr
                 .take()
                 .map(|r| thread::spawn(move || drain_capped(r)));
-            let deadline = Instant::now() + VALIDATOR_TIMEOUT;
+            let deadline = Instant::now() + timeout;
             let mut timed_out = false;
             let status = loop {
                 match child.try_wait() {

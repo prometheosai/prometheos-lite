@@ -1,5 +1,28 @@
 ## Unreleased
 
+- #137 E7/I02 Slice A - controlled reliability / fault-injection campaign
+  (Lite-internal, experimental). PR #_PR_NUMBER_ (2026-11-17): a new narrow
+  fault-injection hook in `workflow::durable` (thread-local, no-op unless armed
+  by a test) plus a caller-supplied-deadline validator runner in test support,
+  driving a new slice of executable campaigns: durable atomic publication
+  interrupted at each real step (before temp create / temp created / temp
+  written / temp fsynced / after rename / after publication) with committed
+  bytes always intact and temp material never read as a document; two REAL OS
+  processes racing one pinned fixture through the governed boundary (exactly
+  one CAS winner runs the real validator; the loser records zero effects);
+  interrupted-winner recovery by a fresh process with lease/fencing checks and
+  zero duplicate effects; lease correctness under an injected deterministic
+  clock (live heartbeating worker never reclaimed; stale orphan reclaimed;
+  skew and ambiguous clocks fail closed); bounded resource failures (ENOSPC
+  injected at artifact, checkpoint and bytes publication boundaries; validator
+  timeout via a real hanging subprocess; output-size cap; cancellation before
+  effect with zero effects; interrupted accounting publication yields absence,
+  never a fabricated zero; forged receipts fail at the integrity gate; journal
+  gap detection; unapproved-revision boundary refusal with zero effects).
+  Reuse only: no new lease registry, journal or authority framework; the
+  campaign does not touch Foundry, benchmarks, providers or live services.
+  Full suite green on Windows; Linux/macOS NOT RUN.
+
 - #156 E7/I07 Slice A - Lite-native classified failure -> minimized, redacted,
   versioned evaluation case, with the verified fix linked back to the
   originating failure (Lite-internal, experimental; not a Foundry claim).
