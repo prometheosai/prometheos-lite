@@ -59,7 +59,7 @@
     "routeSetVersion": "1.0.0",
     "candidateId": "openrouter-via-loopback-gateway-candidate",
     "providerIdentity": "openrouter-via-loopback-gateway",
-    "providerLocality": "local",
+    "providerLocality": "remote",
     "model": "nemotron-ultra-550b-free",
     "priority": 10,
     "profile": "standard",

@@ -1653,13 +1653,33 @@ pub enum TaskValidatorProvenance {
     NotExecuted,
 }
 
-/// Provenance of a model-authored patch (#136 Slice D). Binds three
-/// digests together so a re-sealed envelope cannot claim the model
-/// produced an edit the model never proposed: the raw model response
-/// bytes, the canonical digest of the parsed proposal the model produced,
-/// and the `patch_digest` of the edit operations actually applied.
-/// `model_identity` and `harness_revision` are recorded verbatim from the
-/// routed dispatch, never from the model's own claim.
+/// How a model-patch provenance was observed. Required for any
+/// model-authored repair sealed after the 2026-11 trust-boundary repair.
+/// The offline suite can only ever produce
+/// [`TaskRepairProvenanceKind::CannedTest`]; a response observed through an
+/// authorized real-model loopback gateway produces
+/// [`TaskRepairProvenanceKind::OperatorObservedLive`]. A sealed canned
+/// fixture can never be upgraded to the live kind by re-sealing, and an
+/// offline envelope can never claim the live kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TaskRepairProvenanceKind {
+    /// Deterministic canned loopback responder used by the offline suite.
+    /// Not a genuine external model, not independently authenticated.
+    CannedTest,
+    /// Response observed through an authorized real-model loopback gateway.
+    /// Operator-observed, not cryptographically authenticated by the
+    /// provider (no provider attestation is retained).
+    OperatorObservedLive,
+}
+
+/// Provenance of a model-authored patch (#136 Slice D, trust-boundary
+/// repair). Binds the edit digest to the *embedded routed attempt*, to the
+/// raw response bytes recorded in this very record, and to the routed
+/// provider/model and harness identity. The recorded response bytes are
+/// self-consistency-checked (the raw response hashes to
+/// [`ModelPatchProvenance::model_response_digest`]); provider authenticity
+/// is operator-observed and is NOT cryptographically attested.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelPatchProvenance {
@@ -1673,11 +1693,29 @@ pub struct ModelPatchProvenance {
     /// 1-based attempt number that produced the applied patch.
     pub attempt: u32,
     /// Model identifier as pinned by the route candidate and re-checked by
-    /// the harness. Never taken from the model's self-report.
+    /// the harness. Never taken from the model's self-report; must equal
+    /// the embedded routed attempt's model.
     pub model_identity: String,
-    /// Harness id and revision that mediated the call, e.g.
-    /// `"lite.harness.local_model@v1"`.
+    /// Harness id and revision that mediated the call,
+    /// `"{harnessId}@{revision}"` (e.g. `lite.harness.local_model@v1`).
+    /// Must equal the embedded routed attempt's harness id and the
+    /// descriptor's pinned harness revision.
     pub harness_revision: String,
+    /// How this provenance was observed. `None` on envelopes sealed
+    /// before the trust-boundary repair; such envelopes can never pass
+    /// verification again (they are preserved historical evidence, not
+    /// policy-compliant run records).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<TaskRepairProvenanceKind>,
+    /// The raw model response bytes as observed by the gateway/harness,
+    /// capped by the harness's output limit. Verification recomputes
+    /// their sha256 and requires it to equal [`ModelPatchProvenance::model_response_digest`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_response: Option<String>,
+    /// Idempotency key of the routed attempt that produced the applied
+    /// patch; must equal the embedded routed attempt's idempotency key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_idempotency_key: Option<String>,
 }
 
 /// The repair the fixture runner attempted. Single-file scoped on purpose:
@@ -1821,9 +1859,12 @@ fn derive_task_outcome(
 /// the full list of violations (empty = bound). Shared by `sealed` and
 /// `verify`. `descriptor` is the embedded run's descriptor: the validator
 /// receipt is checked against ITS pins, so a spliced record cannot borrow
-/// another scenario's expectation.
+/// another scenario's expectation. `attempt` is the embedded routed
+/// attempt: a model-authored repair is bound to it exactly, so a record
+/// cannot borrow another dispatch's identity.
 fn check_task_run_bindings(
     descriptor: &ScenarioDescriptor,
+    attempt: &RoutedAttemptV1,
     repair: &TaskRepairRecord,
     validator: &TaskValidatorRecord,
     baseline: &str,
@@ -1894,6 +1935,64 @@ fn check_task_run_bindings(
                     }
                     if provenance.harness_revision.trim().is_empty() {
                         fail("modelProvenance.harnessRevision must be non-empty".to_string());
+                    }
+                    // ---- Trust-boundary binding: the embedded routed attempt --
+                    match &provenance.kind {
+                        None => fail(
+                            "modelProvenance.kind must state canned-test or operator-observed-live"
+                                .to_string(),
+                        ),
+                        Some(TaskRepairProvenanceKind::CannedTest)
+                        | Some(TaskRepairProvenanceKind::OperatorObservedLive) => {}
+                    }
+                    match &provenance.raw_response {
+                        None => fail(
+                            "modelProvenance.rawResponse must embed the raw response bytes (re-sealed historical envelopes can never verify)"
+                                .to_string(),
+                        ),
+                        Some(raw) => {
+                            if !is_hex64(&provenance.model_response_digest) {
+                                // already reported above; avoid cascading errors
+                            } else {
+                                let digest =
+                                    hex_lower(&Sha256::digest(raw.as_bytes()));
+                                if digest != provenance.model_response_digest {
+                                    fail(
+                                        "modelProvenance.rawResponse does not hash to modelProvenance.modelResponseDigest"
+                                            .to_string(),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    match &provenance.attempt_idempotency_key {
+                        None => fail(
+                            "modelProvenance.attemptIdempotencyKey must bind the embedded routed attempt"
+                                .to_string(),
+                        ),
+                        Some(key) => {
+                            if key != &attempt.idempotency_key {
+                                fail(
+                                    "modelProvenance.attemptIdempotencyKey != embedded routed attempt idempotency key (the recorded patch is not bound to this dispatch)"
+                                        .to_string(),
+                                );
+                            }
+                        }
+                    }
+                    let expected_model = attempt.model.clone().unwrap_or_default();
+                    if provenance.model_identity != expected_model {
+                        fail(
+                            "modelProvenance.modelIdentity != embedded routed attempt model (provider/model identity mismatch)"
+                                .to_string(),
+                        );
+                    }
+                    let expected_harness =
+                        format!("{}@{}", attempt.harness_id, descriptor.harness.revision);
+                    if provenance.harness_revision != expected_harness {
+                        fail(
+                            "modelProvenance.harnessRevision != descriptor harness id@revision (harness identity mismatch)"
+                                .to_string(),
+                        );
                     }
                     if provenance.proposal_digest != repair.patch_digest {
                         fail(
@@ -2152,6 +2251,7 @@ impl LiteTaskRunEvidence {
         );
         let violations = check_task_run_bindings(
             &scenario_run.descriptor,
+            &scenario_run.attempt,
             &repair,
             &validator,
             &baseline_content_digest,
@@ -2233,6 +2333,7 @@ impl LiteTaskRunEvidence {
         self.scenario_run.verify()?;
         let violations = check_task_run_bindings(
             &self.scenario_run.descriptor,
+            &self.scenario_run.attempt,
             &self.repair,
             &self.validator,
             &self.baseline_content_digest,

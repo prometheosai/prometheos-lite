@@ -72,40 +72,111 @@ and it is **not** a benchmark, comparison or Foundry claim.
   ("Edit 0 has identical search and replace content") that were all
   rejected by the edit boundary before any write; that run sealed nothing,
   applied nothing, and is reported here as an observation, not as a result.
-- **The real result (Windows, 2026-11-16)** - one attempt, 1 model-authored
-  `search-replace` edit to `src/bucket.rs`
-  (`self.last_refill = self.last_refill.saturating_add(ticks.saturating_mul(self.tick_millis));`),
-  applied under the single-file write authority, pinned validator
-  `cargo test --offline` exit 0, `taskOutcome: repaired`,
-  `classification: governed-product-outcome`. Usage KNOWN: 3177 prompt +
-  258 completion = 3435 tokens; cost KNOWN 0 (operator example price book,
-  free upstream at $0). Committed receipt with the complete sealed envelope:
+- **The real (historical) run (Windows, 2026-11-16)** - one attempt, one
+  model-authored `search-replace` edit to `src/bucket.rs`
+  (`self.last_refill += ticks * self.tick_millis;`), applied under the
+  single-file write authority, pinned validator `cargo test --offline`
+  exit 0, `taskOutcome: repaired`, `classification:
+  governed-product-outcome`. Usage KNOWN: 3177 prompt + 258 completion =
+  3435 tokens; cost KNOWN 0 (operator example price book, free upstream at
+  $0). Committed receipt with the complete sealed envelope:
   `docs/evidence/real-model-pilot-tokenbucket-2026-11-16.json`.
-  `committed_live_pilot_envelope_verifies` re-derives every binding from
-  the committed bytes alone, offline, with no model and no session state.
+- **Accurate classification of that historical run** - it crossed the
+  cloud boundary BEFORE the trust-boundary repair existed: the gateway
+  forwarded repository source to OpenRouter without an explicit
+  external-egress authorization, and the sealed route declared the provider
+  `local` while the upstream was remote. It is preserved, byte-for-byte,
+  as **historical experimental evidence — NOT an accepted policy-compliant
+  governed run** (`authorityAssessment: historical-ungoverned-egress` in
+  the receipt). The envelope therefore can never pass the repaired
+  verification again, and the fixture's offline tests were re-derived
+  accordingly. The four trust-boundary defects were:
+  (P1-A) remote provider misclassified `local` with no egress authorization;
+  (P1-B) provenance self-asserted (no binding to the embedded routed
+  attempt, no raw-response recompute, canned vs live undistinguishable);
+  (P2-C) report/receipt divergence (the model's actual proposal line was
+  `self.last_refill += ticks * self.tick_millis;`);
+  and the independent assessor had been conflated with the envelope
+  self-check.
+- **What the repair (2026-11-16) adds** -
+  - `TaskRepairProvenanceKind::CannedTest` vs
+    `OperatorObservedLive`, sealed into the envelope and enforced at
+    verification; the offline suite can never produce the live kind.
+  - `ModelPatchProvenance` gains `kind`, `raw_response` and
+    `attempt_idempotency_key`. `verify()` now requires: sha256(raw response)
+    == `model_response_digest`; the canonical digest of the parsed proposal
+    == the applied patch digest; `attempt_idempotency_key` == the embedded
+    routed attempt's idempotency key; `model_identity` == the embedded
+    attempt's routed model; `harness_revision` == `"{harnessId}@{descriptor
+    .harness.revision}"`. A re-sealed envelope that swaps any of these is
+    rejected. Sealing rejects the same mismatches; a mismatched dispatch
+    embeds no sealed envelope at all.
+  - The receipt carries `authorityAssessment:
+    historical-ungoverned-egress` and `preservationNote` (added; no
+    envelope or raw response bytes were rewritten).
+  - **Independent assessor replay** (`historical_live_pilot_receipt_is_consistent_but_not_policy_compliant`):
+    the recorded raw proposal bytes re-hash to the recorded response
+    digest; the parsed proposal re-derives the applied patch digest; the
+    recorded proposal applied to the pinned fixture bytes passes `cargo
+    test --offline` and reproduces the recorded post-run tree digest. The
+    preserved envelope additionally fails the repaired
+    verification (`verify().is_err()`), by design.
+- **Live reproduction** - with the repaired gateway and a genuinely
+  authorized call, `PROMETHEOS_REAL_MODEL_PILOT=1` +
+  `PROMETHEOS_PILOT_SYNTHETIC_EGRESS_AUTHORIZATION=1` re-runs the pilot
+  offline-deterministically against a mock upstream; the OpenRouter free
+  tier returned HTTP 401 on re-probes on 2026-11-16, so a fresh live
+  reproduction is `LIVE_REPRODUCTION_BLOCKED` and none is claimed. The
+  historical success above predates those 401 responses.
 - **Provenance, bound** - every model-authored repair carries
-  `modelPatchProvenance`: sha256 of the raw model response, the canonical
-  digest of the parsed proposal (identical to the applied patch digest),
-  the 1-based attempt number, the routed model identity and the harness
-  revision. A re-sealed envelope conflicting with any trusted pin (validator
-  exit code, baseline digest) or with the provenance binding is rejected at
-  verification. Model-authored repairs are NOT bound byte-for-byte to the
-  task-setter's reference repair (a genuine model may author any
-  behavior-correct repair); the byte-exact expected-digest pins still bind
-  scripted fixtures, and the validator exit code binds both.
+  `modelPatchProvenance`: sha256 of the raw model response (recomputed at
+  verification from the embedded raw bytes), the canonical digest of the
+  parsed proposal (identical to the applied patch digest), the 1-based
+  attempt number bound to the embedded routed attempt's idempotency key,
+  the routed model identity, the harness id@revision, and the observation
+  kind (`canned-test` vs `operator-observed-live`). A re-sealed envelope
+  conflicting with any trusted pin (validator exit code, baseline digest)
+  or with any provenance binding is rejected at verification.
+  Model-authored repairs are NOT bound byte-for-byte to the task-setter's
+  reference repair (a genuine model may author any behavior-correct
+  repair); the byte-exact expected-digest pins still bind scripted
+  fixtures, and the validator exit code binds both.
 - **Bounded attempts, honest failures** - up to 3 attempts; the failing
   validator output tail is fed back between attempts; malformed proposals,
   out-of-scope files, identical search/replace edits, missing usage
   (usage/cost recorded Unknown, never 0) and interrupted dispatches (typed
   timeout, zero effects, journal preserved) are all typed, accounted outcomes.
+- **Egress boundary (loopback gateway, real boundary)** - the live path
+  forwards to a cloud upstream ONLY when (a) the descriptor route pins the
+  true upstream locality (`remote`, never relabelled `local`), (b) the route
+  profile permits remote (`standard`; `conservative` refuses pre-effect),
+  (c) the run's effective authority carries an explicit network policy
+  allowing exactly `openrouter.ai` as an allowlist exception to a default
+  deny, and (d) the per-run operator authorization
+  (`PROMETHEOS_PILOT_SYNTHETIC_EGRESS_AUTHORIZATION=1`) permits the
+  synthetic fixture source to leave the machine. The gateway re-checks the
+  effective policy, the scheme (HTTPS outside loopback), the host pin and
+  the known-secret canary at its outbound effect BEFORE any upstream byte
+  is dialed; a refusal returns HTTP 403 and the governed dispatch fails
+  typed with zero repository effects (mock-upstream tests prove zero
+  upstream hits).
 - **Negative matrix** - forbidden editable file (`tests/rate_limit.rs`,
   `src/lib.rs`) rejected before any write; nonexistent search text rejected;
   stale revision refused pre-effect; interrupted dispatch keeps failure
   evidence and applies nothing; duplicate application refused (a second
-  apply of the same edit does not mutate); false-success reseal rejected on
-  every tamper axis; solver-visible corpus leakage guard (no reference-fix
-  bytes, no pinned digests); missing usage or missing pricing is recorded
-  Unknown, never fabricated.
+  apply of the same edit does not mutate); remote-backed route under a
+  conservative (local-only) profile refused before any effect; network
+  deny refuses remote egress with zero upstream bytes dialed (recorded by
+  the mock upstream); authorized cloud-backed synthetic task dispatches and
+  seals with `operator-observed-live` provenance; wrong provider/model
+  identity rejected; wrong harness revision rejected; wrong winning-attempt
+  identity rejected (idempotency-key binding); fabricated raw-response
+  digest rejected (recomputed from bytes); parsed proposal vs applied
+  patch disagreement rejected; canned offline envelope cannot be
+  re-labelled as live; secret-bearing outbound message refused at the
+  egress preflight; every re-seal tamper axis rejected; solver-visible
+  corpus leakage guard (no reference-fix bytes, no pinned digests);
+  missing usage or missing pricing is recorded Unknown, never fabricated.
 
 Verification scope is unchanged: the envelope proves the pinned validator ran
 and exited as measured after an applied, permitted repair — nothing more.

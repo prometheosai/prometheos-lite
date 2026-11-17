@@ -36,9 +36,13 @@ use common::model_pilot::{
     run_model_pilot, solver_visible_files,
 };
 use common::task_execution::sha256_hex;
+use prometheos_lite::workflow::route_resolution::RouteProfile;
 use prometheos_lite::workflow::scenario::{
-    ScenarioOutcomeClass, TaskOutcome, TaskRepairOrigin, TaskRepairWriteAuthority,
+    ScenarioOutcomeClass, TaskOutcome, TaskRepairOrigin, TaskRepairProvenanceKind,
+    TaskRepairWriteAuthority,
 };
+use prometheos_lite::workflow::soma::contracts::NetworkPolicy;
+use prometheos_lite::workflow::soma::types::NetworkDefault;
 
 const OFFLINE_DESCRIPTOR: &str =
     include_str!("fixtures/scenarios/rust-tokenbucket-bugfix/descriptor.json");
@@ -49,7 +53,7 @@ const LIVE_DESCRIPTOR: &str =
 // Canned (offline) responders
 // ---------------------------------------------------------------------------
 
-fn canned_chat_completion(content: &str, with_usage: bool) -> String {
+fn canned_chat_completion(model: &str, content: &str, with_usage: bool) -> String {
     let usage = if with_usage {
         json!({ "prompt_tokens": 125, "completion_tokens": 40, "total_tokens": 165 })
     } else {
@@ -58,7 +62,7 @@ fn canned_chat_completion(content: &str, with_usage: bool) -> String {
     json!({
         "id": "chatcmpl-offline-pilot",
         "object": "chat.completion",
-        "model": "tiny-local-model",
+        "model": model,
         "choices": [{
             "index": 0,
             "message": { "role": "assistant", "content": content },
@@ -97,17 +101,23 @@ fn run_pilot_with_canned(
         // Once the scripted responses are exhausted, the canned model
         // produces non-JSON junk forever (a stubborn model), never a
         // silent success. Tests that want recovery script the recovery.
-        let body = responses
-            .borrow_mut()
-            .pop_front()
-            .unwrap_or_else(|| canned_chat_completion("I cannot help with that.", true));
+        let body = responses.borrow_mut().pop_front().unwrap_or_else(|| {
+            canned_chat_completion("tiny-local-model", "I cannot help with that.", true)
+        });
         let server = common::task_execution::spawn_loopback_model(body);
         PilotEndpoint {
             endpoint: server.endpoint,
             effects: server.effects,
         }
     };
-    run_model_pilot(descriptor, price_book, timeout_ms, &mut spawn)
+    run_model_pilot(
+        descriptor,
+        price_book,
+        timeout_ms,
+        RouteProfile::Standard,
+        TaskRepairProvenanceKind::CannedTest,
+        &mut spawn,
+    )
 }
 
 fn run_canned(descriptor: &str, responses: Vec<String>) -> ModelPilotRun {
@@ -122,7 +132,11 @@ fn run_canned(descriptor: &str, responses: Vec<String>) -> ModelPilotRun {
 fn offline_canned_model_repair_seals_repaired_envelope() {
     let run = run_canned(
         OFFLINE_DESCRIPTOR,
-        vec![canned_chat_completion(&reference_proposal(), true)],
+        vec![canned_chat_completion(
+            "tiny-local-model",
+            &reference_proposal(),
+            true,
+        )],
     );
     // Phase B: the pre-fix failure really happened (exit code non-zero).
     let pre_fix = run.pre_fix.as_ref().expect("pre-fix probe recorded");
@@ -180,10 +194,11 @@ fn offline_canned_attempted_edits_are_preserved_across_attempts() {
         OFFLINE_DESCRIPTOR,
         vec![
             canned_chat_completion(
+                "tiny-local-model",
                 "{\"edits\":[{\"file\":\"src/bucket.rs\",\"search\":\"NO SUCH TEXT\",\"replace\":\"x\"}]}",
                 true,
             ),
-            canned_chat_completion(&reference_proposal(), true),
+            canned_chat_completion("tiny-local-model", &reference_proposal(), true),
         ],
     );
     assert_eq!(run.attempts.len(), 2);
@@ -207,7 +222,7 @@ fn offline_canned_model_attempting_forbidden_file_is_rejected() {
     .to_string();
     let run = run_canned(
         OFFLINE_DESCRIPTOR,
-        vec![canned_chat_completion(&outside, true)],
+        vec![canned_chat_completion("tiny-local-model", &outside, true)],
     );
     // The scripted response is rejected; the canned fallback produces
     // non-JSON junk for the remaining attempts, so nothing ever applies.
@@ -241,7 +256,7 @@ fn offline_canned_model_attempting_src_lib_rs_is_rejected() {
     .to_string();
     let run = run_canned(
         OFFLINE_DESCRIPTOR,
-        vec![canned_chat_completion(&outside, true)],
+        vec![canned_chat_completion("tiny-local-model", &outside, true)],
     );
     assert!(!run.attempts[0].applied);
     assert_eq!(run.changed_vs_baseline, Vec::<String>::new());
@@ -252,7 +267,10 @@ fn offline_canned_model_attempting_src_lib_rs_is_rejected() {
 fn offline_malformed_model_json_is_rejected_without_effects() {
     let run = run_canned(
         OFFLINE_DESCRIPTOR,
-        vec![canned_chat_completion("I would rather not say", true); MAX_ATTEMPTS as usize],
+        vec![
+            canned_chat_completion("tiny-local-model", "I would rather not say", true);
+            MAX_ATTEMPTS as usize
+        ],
     );
     assert_eq!(run.attempts.len(), MAX_ATTEMPTS as usize);
     assert!(run.attempts.iter().all(|a| !a.applied));
@@ -269,7 +287,7 @@ fn offline_model_proposal_for_nonexistent_search_text_applies_nothing() {
     .to_string();
     let run = run_canned(
         OFFLINE_DESCRIPTOR,
-        vec![canned_chat_completion(&proposal, true); MAX_ATTEMPTS as usize],
+        vec![canned_chat_completion("tiny-local-model", &proposal, true); MAX_ATTEMPTS as usize],
     );
     assert!(run.attempts.iter().all(|a| !a.applied));
     assert_eq!(run.changed_vs_baseline, Vec::<String>::new());
@@ -324,6 +342,8 @@ fn offline_interrupted_dispatch_preserves_failure_evidence_and_applies_nothing()
         OFFLINE_DESCRIPTOR,
         PILOT_EXAMPLE_PRICE_BOOK,
         200,
+        RouteProfile::Standard,
+        TaskRepairProvenanceKind::CannedTest,
         &mut spawn,
     );
     let _ = started.elapsed();
@@ -359,7 +379,14 @@ fn offline_stale_revision_refusal_happens_before_any_effect() {
         endpoint: "http://127.0.0.1:1/v1".to_string(),
         effects: Arc::new(AtomicU64::new(0)),
     };
-    let run = run_model_pilot(&stale, PILOT_EXAMPLE_PRICE_BOOK, 5_000, &mut spawn);
+    let run = run_model_pilot(
+        &stale,
+        PILOT_EXAMPLE_PRICE_BOOK,
+        5_000,
+        RouteProfile::Standard,
+        TaskRepairProvenanceKind::CannedTest,
+        &mut spawn,
+    );
     assert_eq!(run.classification, ScenarioOutcomeClass::SetupError);
     assert!(run.stage_error.is_some() || run.acquire_error.is_some());
     assert_eq!(run.capability_effects, 0);
@@ -428,7 +455,11 @@ fn offline_duplicate_repair_application_is_refused_without_effect() {
 fn offline_usage_missing_from_model_response_is_unknown_never_zero() {
     let run = run_canned(
         OFFLINE_DESCRIPTOR,
-        vec![canned_chat_completion(&reference_proposal(), false)],
+        vec![canned_chat_completion(
+            "tiny-local-model",
+            &reference_proposal(),
+            false,
+        )],
     );
     let envelope = run.envelope.as_ref().expect("envelope sealed");
     let usage = serde_json::to_value(&envelope.scenario_run.attempt_accounting.usage)
@@ -458,7 +489,11 @@ fn offline_pricing_missing_from_price_book_is_unknown_never_zero() {
         OFFLINE_DESCRIPTOR,
         empty_book,
         5_000,
-        vec![canned_chat_completion(&reference_proposal(), true)],
+        vec![canned_chat_completion(
+            "tiny-local-model",
+            &reference_proposal(),
+            true,
+        )],
     );
     let envelope = run.envelope.as_ref().expect("envelope sealed");
     let cost = serde_json::to_value(&envelope.scenario_run.attempt_accounting.cost)
@@ -506,7 +541,11 @@ fn offline_solver_visible_corpus_contains_no_assessor_only_material() {
 fn offline_resealed_false_success_conflicting_with_trusted_pins_is_rejected() {
     let run = run_canned(
         OFFLINE_DESCRIPTOR,
-        vec![canned_chat_completion(&reference_proposal(), true)],
+        vec![canned_chat_completion(
+            "tiny-local-model",
+            &reference_proposal(),
+            true,
+        )],
     );
     let envelope = run.envelope.expect("envelope sealed");
 
@@ -569,6 +608,8 @@ fn offline_failed_dispatch_applies_no_repair_and_seals_nothing() {
         OFFLINE_DESCRIPTOR,
         PILOT_EXAMPLE_PRICE_BOOK,
         2_000,
+        RouteProfile::Standard,
+        TaskRepairProvenanceKind::CannedTest,
         &mut spawn,
     );
     assert!(!run.patched);
@@ -583,53 +624,628 @@ fn offline_failed_dispatch_applies_no_repair_and_seals_nothing() {
 }
 
 // ---------------------------------------------------------------------------
-// Committed live-pilot receipt: independently re-verifiable
+// Trust-boundary / adversarial coverage (2026-11-16 repair)
+// ---------------------------------------------------------------------------
+//
+// The live pilot forwards repository source to a cloud provider through a
+// loopback operator gateway. These tests pin the authorization boundary:
+// the upstream's real locality is represented, egress is explicitly
+// authorized for the synthetic fixture only, and every outbound effect is
+// decided before any upstream byte leaves the process.
+
+fn upstream_host(url: &str) -> String {
+    url.trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Mock upstream that records how many requests it received.
+fn spawn_mock_upstream(response_body: String) -> (String, Arc<AtomicU64>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("mock upstream binds");
+    let addr = listener.local_addr().expect("mock upstream addr");
+    let url = format!("http://127.0.0.1:{}/v1/chat/completions", addr.port());
+    let hits = Arc::new(AtomicU64::new(0));
+    let hits_thread = hits.clone();
+    let body_bytes = response_body.into_bytes();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            match stream {
+                Ok(mut stream) => {
+                    hits_thread.fetch_add(1, Ordering::SeqCst);
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+                    let mut buf = Vec::with_capacity(8192);
+                    let mut chunk = [0u8; 8192];
+                    let mut content_length = 0usize;
+                    let mut header_end: Option<usize> = None;
+                    loop {
+                        match stream.read(&mut chunk) {
+                            Ok(0) => break,
+                            Ok(n) => {
+                                buf.extend_from_slice(&chunk[..n]);
+                                if header_end.is_none()
+                                    && let Some(pos) = find_subslice(&buf, b"\r\n\r\n")
+                                {
+                                    header_end = Some(pos + 4);
+                                    let headers =
+                                        String::from_utf8_lossy(&buf[..pos]).to_lowercase();
+                                    for line in headers.lines() {
+                                        if let Some(value) = line.strip_prefix("content-length:") {
+                                            content_length = value.trim().parse().unwrap_or(0);
+                                        }
+                                    }
+                                }
+                                if let Some(end) = header_end
+                                    && buf.len() >= end + content_length
+                                {
+                                    break;
+                                }
+                                if buf.len() > 256 * 1024 {
+                                    break;
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body_bytes.len(),
+                        String::from_utf8_lossy(&body_bytes)
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    let _ = stream.shutdown(std::net::Shutdown::Both);
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    (url, hits)
+}
+
+/// Per-run grant that AUTHORIZES this synthetic fixture egress to the
+/// named host only (deny + allowlist containing exactly that host).
+fn allow_remote_grant(
+    upstream_url: String,
+    host: String,
+    known_secrets: Vec<String>,
+) -> GatewayEgressGrant {
+    GatewayEgressGrant {
+        upstream_url,
+        effective_network_policy: NetworkPolicy {
+            default: NetworkDefault::Deny,
+            allowlist: Some(vec![host]),
+        },
+        permit_synthetic_source_egress: true,
+        provider_identity: "openrouter-via-loopback-gateway".to_string(),
+        upstream_model: "nvidia/nemotron-3-ultra-550b-a55b:free".to_string(),
+        harness_visible_model: "nemotron-ultra-550b-free".to_string(),
+        known_secrets,
+        would_dial: Arc::new(AtomicU64::new(0)),
+        refused: Arc::new(AtomicU64::new(0)),
+    }
+}
+
+/// Grant that authorizes NOTHING: effective policy denies with no
+/// allowlist, and no synthetic-source egress is authorized.
+fn deny_remote_grant(upstream_url: String, _host: String) -> GatewayEgressGrant {
+    GatewayEgressGrant {
+        upstream_url,
+        effective_network_policy: NetworkPolicy {
+            default: NetworkDefault::Deny,
+            allowlist: None,
+        },
+        permit_synthetic_source_egress: false,
+        provider_identity: "openrouter-via-loopback-gateway".to_string(),
+        upstream_model: "nvidia/nemotron-3-ultra-550b-a55b:free".to_string(),
+        harness_visible_model: "nemotron-ultra-550b-free".to_string(),
+        known_secrets: vec![],
+        would_dial: Arc::new(AtomicU64::new(0)),
+        refused: Arc::new(AtomicU64::new(0)),
+    }
+}
+
+#[test]
+fn remote_provider_behind_localhost_cannot_satisfy_local_only_policy() {
+    // Route resolution with a conservative (local-only) profile must
+    // refuse the remote-backed route before any effect; the loopback URL
+    // does not launder the provider's cloud locality.
+    let mut spawn = |_attempt: u32| -> PilotEndpoint {
+        panic!("dispatch must not be reached when route resolution refuses")
+    };
+    let run = run_model_pilot(
+        LIVE_DESCRIPTOR,
+        PILOT_EXAMPLE_PRICE_BOOK,
+        5_000,
+        RouteProfile::Conservative,
+        TaskRepairProvenanceKind::OperatorObservedLive,
+        &mut spawn,
+    );
+    assert_eq!(run.classification, ScenarioOutcomeClass::SetupError);
+    assert_eq!(run.capability_effects, 0);
+    assert!(run.attempts.is_empty());
+    assert_eq!(run.changed_vs_baseline, Vec::<String>::new());
+}
+
+#[test]
+fn network_deny_policy_refuses_remote_egress_before_any_upstream_bytes() {
+    // The upstream records hits: the denial must happen BEFORE dialing.
+    let (upstream_url, hits) = spawn_mock_upstream(canned_chat_completion(
+        "nemotron-ultra-550b-free",
+        &reference_proposal(),
+        true,
+    ));
+    let host = upstream_host(&upstream_url);
+    let grant = deny_remote_grant(upstream_url, host);
+    let (endpoint, effects, refused, would_dial, stop) = spawn_openrouter_gateway(grant);
+    let mut spawn = |_attempt: u32| PilotEndpoint {
+        endpoint: endpoint.clone(),
+        effects: effects.clone(),
+    };
+    let run = run_model_pilot(
+        LIVE_DESCRIPTOR,
+        PILOT_EXAMPLE_PRICE_BOOK,
+        5_000,
+        RouteProfile::Standard,
+        TaskRepairProvenanceKind::OperatorObservedLive,
+        &mut spawn,
+    );
+    stop.store(true, Ordering::SeqCst);
+    assert_eq!(run.attempts.len(), 1);
+    let failure = run.attempts[0].failure.as_deref().expect("typed failure");
+    assert!(
+        failure.contains("governed effect failed"),
+        "typed failure: {failure}"
+    );
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        0,
+        "upstream must receive zero requests"
+    );
+    assert_eq!(
+        would_dial.load(Ordering::SeqCst),
+        0,
+        "egress refused before dialing"
+    );
+    assert_eq!(
+        refused.load(Ordering::SeqCst),
+        1,
+        "gateway must record the refusal"
+    );
+    assert_eq!(run.changed_vs_baseline, Vec::<String>::new());
+    assert!(!run.patched);
+    assert!(run.envelope.is_none());
+}
+
+#[test]
+fn authorized_cloud_backed_synthetic_task_can_dispatch() {
+    // The same remote route with an explicit per-run authorization for
+    // the synthetic fixture source dispatches, applies and seals.
+    let (upstream_url, hits) = spawn_mock_upstream(canned_chat_completion(
+        "nemotron-ultra-550b-free",
+        &reference_proposal(),
+        true,
+    ));
+    let host = upstream_host(&upstream_url);
+    let grant = allow_remote_grant(upstream_url, host, vec![]);
+    let (endpoint, effects, refused, would_dial, stop) = spawn_openrouter_gateway(grant);
+    let mut spawn = |_attempt: u32| PilotEndpoint {
+        endpoint: endpoint.clone(),
+        effects: effects.clone(),
+    };
+    let run = run_model_pilot(
+        LIVE_DESCRIPTOR,
+        PILOT_EXAMPLE_PRICE_BOOK,
+        10_000,
+        RouteProfile::Standard,
+        TaskRepairProvenanceKind::OperatorObservedLive,
+        &mut spawn,
+    );
+    stop.store(true, Ordering::SeqCst);
+    assert_eq!(run.attempts.len(), 1);
+    assert!(
+        run.patched,
+        "authorized cloud-backed synthetic task must dispatch"
+    );
+    assert_eq!(would_dial.load(Ordering::SeqCst), 1);
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    assert_eq!(refused.load(Ordering::SeqCst), 0);
+    let envelope = run.envelope.as_ref().expect("envelope sealed");
+    let provenance = envelope
+        .repair
+        .model_provenance
+        .as_ref()
+        .expect("provenance bound");
+    assert_eq!(
+        provenance.kind,
+        Some(TaskRepairProvenanceKind::OperatorObservedLive)
+    );
+    assert_eq!(provenance.model_identity, "nemotron-ultra-550b-free");
+    envelope
+        .verify()
+        .expect("live-path envelope verifies end-to-end");
+}
+
+#[test]
+fn resealed_provenance_identity_swaps_are_rejected() {
+    let run = run_canned(
+        OFFLINE_DESCRIPTOR,
+        vec![canned_chat_completion(
+            "tiny-local-model",
+            &reference_proposal(),
+            true,
+        )],
+    );
+    let envelope = run.envelope.expect("envelope sealed");
+
+    let mut tampered = envelope.clone();
+    tampered
+        .repair
+        .model_provenance
+        .as_mut()
+        .expect("provenance")
+        .model_identity = "wrong-provider/model".to_string();
+    assert!(
+        tampered.verify().is_err(),
+        "wrong provider/model identity must fail verify"
+    );
+
+    let mut tampered = envelope.clone();
+    tampered
+        .repair
+        .model_provenance
+        .as_mut()
+        .expect("provenance")
+        .harness_revision = "lite.harness.local_model@v2".to_string();
+    assert!(
+        tampered.verify().is_err(),
+        "wrong harness revision must fail verify"
+    );
+
+    let mut tampered = envelope.clone();
+    tampered
+        .repair
+        .model_provenance
+        .as_mut()
+        .expect("provenance")
+        .attempt_idempotency_key = Some("not-the-dispatched-attempt".to_string());
+    assert!(
+        tampered.verify().is_err(),
+        "wrong winning-attempt identity must fail verify"
+    );
+
+    // Fabricated raw model-response digest (valid hex, wrong bytes).
+    let mut tampered = envelope.clone();
+    tampered
+        .repair
+        .model_provenance
+        .as_mut()
+        .expect("provenance")
+        .raw_response = Some("different bytes entirely".to_string());
+    assert!(
+        tampered.verify().is_err(),
+        "raw response bytes not hashing to the recorded digest must fail verify"
+    );
+
+    // Stripped and swapped canned/live kinds.
+    let mut tampered = envelope.clone();
+    tampered
+        .repair
+        .model_provenance
+        .as_mut()
+        .expect("provenance")
+        .kind = None;
+    assert!(
+        tampered.verify().is_err(),
+        "absent provenance kind must fail verify"
+    );
+    let mut tampered = envelope;
+    tampered
+        .repair
+        .model_provenance
+        .as_mut()
+        .expect("provenance")
+        .kind = Some(TaskRepairProvenanceKind::OperatorObservedLive);
+    assert!(
+        tampered.verify().is_err(),
+        "a canned envelope re-labelled as live must fail verify"
+    );
+}
+
+#[test]
+fn offline_canned_envelope_is_never_operator_observed_live() {
+    let run = run_canned(
+        OFFLINE_DESCRIPTOR,
+        vec![canned_chat_completion(
+            "tiny-local-model",
+            &reference_proposal(),
+            true,
+        )],
+    );
+    let envelope = run.envelope.expect("envelope sealed");
+    assert_eq!(
+        envelope.repair.model_provenance.as_ref().unwrap().kind,
+        Some(TaskRepairProvenanceKind::CannedTest),
+        "offline canned responder must never seal as operator-observed-live"
+    );
+}
+
+#[test]
+fn egress_preflight_refuses_secret_bearing_outbound_messages() {
+    let upstream = "http://127.0.0.1:1/v1/chat/completions".to_string();
+    let grant = allow_remote_grant(
+        upstream,
+        "127.0.0.1".to_string(),
+        vec!["CANARY-SECRET-9f8a7b6c".to_string()],
+    );
+    let with_secret = br#"{"messages":[{"role":"user","content":"leak CANARY-SECRET-9f8a7b6c"}]}"#;
+    assert!(egress_preflight(&grant, with_secret).is_err());
+    let clean = br#"{"messages":[{"role":"user","content":"public fixture source only"}]}"#;
+    assert!(egress_preflight(&grant, clean).is_ok());
+}
+
+#[test]
+fn egress_preflight_refuses_without_authorization_and_without_allowlist() {
+    let upstream = "http://127.0.0.1:1/v1/chat/completions".to_string();
+    // Explicit permit, allowlisted host: allowed.
+    let allowed = allow_remote_grant(upstream.clone(), "127.0.0.1".to_string(), vec![]);
+    assert!(egress_preflight(&allowed, br#"{"messages":[]}"#).is_ok());
+    // Not authorized for this synthetic source: refused even on allowlist.
+    let mut denied = allow_remote_grant(upstream.clone(), "127.0.0.1".to_string(), vec![]);
+    denied.permit_synthetic_source_egress = false;
+    assert!(egress_preflight(&denied, br#"{"messages":[]}"#).is_err());
+    // No allowlist in the effective policy: refused.
+    let denied = deny_remote_grant(upstream, "127.0.0.1".to_string());
+    assert!(egress_preflight(&denied, br#"{"messages":[]}"#).is_err());
+}
+
+#[test]
+fn egress_preflight_refuses_plain_http_to_non_loopback_upstream() {
+    // http is refused for non-loopback hosts even when authorized+allowlisted.
+    let upstream = "http://example.com/v1/chat/completions".to_string();
+    let grant = allow_remote_grant(upstream, "example.com".to_string(), vec![]);
+    assert!(egress_preflight(&grant, br#"{"messages":[]}"#).is_err());
+    // And an allowlist missing the scheme-matched host refuses the dial.
+    let upstream = "https://example.com/v1/chat/completions".to_string();
+    let grant = allow_remote_grant(upstream, "other.example.com".to_string(), vec![]);
+    assert!(egress_preflight(&grant, br#"{"messages":[]}"#).is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Committed live-pilot receipt: preserved historical evidence, accurately
+// classified; every link recomputable from the committed bytes
 // ---------------------------------------------------------------------------
 
 /// The receipt of the real, opt-in OpenRouter pilot run published in
-/// `docs/evidence/real-model-pilot-tokenbucket-2026-11-16.json`. This test
-/// re-derives everything from the committed bytes alone: the exact sealed
-/// envelope the live pilot produced must verify, and its repair must carry
-/// model-authored provenance. No network, no model, no session state.
+/// `docs/evidence/real-model-pilot-tokenbucket-2026-11-16.json`.
+///
+/// That run crossed the cloud boundary before the trust-boundary repair
+/// added egress authorization to the gateway and to the sealed provenance
+/// binding. It is preserved **unchanged** as historical experimental
+/// evidence and is explicitly NOT presented as a policy-compliant governed
+/// run (see `authorityAssessment` inside the receipt and the guide). The
+/// envelope therefore can never pass the strengthened verification again —
+/// that is the correct outcome, not a regression.
+///
+/// What this test proves from the committed bytes alone, with no network,
+/// no model and no session state:
+///   1. the raw proposal bytes re-hash to the recorded response digest;
+///   2. the parsed proposal re-derives the applied patch digest;
+///   3. the recorded raw proposal applied to the pinned fixture produces
+///      the recorded post-run tree digest and passes the pinned validator
+///      (an independent assessor replay, separate from the envelope's
+///      internal consistency check);
+///   4. the preserved envelope fails the repaired verification, with the
+///      provenance binding named.
 #[test]
-fn committed_live_pilot_envelope_verifies() {
+fn historical_live_pilot_receipt_is_consistent_but_not_policy_compliant() {
     let receipt: Value = serde_json::from_str(include_str!(
         "../docs/evidence/real-model-pilot-tokenbucket-2026-11-16.json"
     ))
     .expect("committed receipt parses");
     assert_eq!(receipt["taskOutcome"], "Repaired");
     assert_eq!(receipt["patched"], true);
+    assert_eq!(
+        receipt["authorityAssessment"],
+        "historical-ungoverned-egress"
+    );
+
+    // --- Link 1: raw proposal bytes -> response digest ---
+    let raw_proposal = receipt["attempts"][0]["proposal"]
+        .as_str()
+        .expect("raw proposal string recorded");
+    let response_digest = sha256_hex(raw_proposal.as_bytes());
+    assert_eq!(
+        receipt["attempts"][0]["modelResponseDigest"]
+            .as_str()
+            .unwrap(),
+        response_digest
+    );
+
+    // --- Link 2: parsed proposal -> patch digest ---
+    let edits =
+        common::model_pilot::parse_model_proposal(raw_proposal).expect("recorded proposal parses");
+    let digest = common::model_pilot::proposal_digest(&edits);
+    assert_eq!(
+        receipt["attempts"][0]["proposalDigest"].as_str().unwrap(),
+        digest
+    );
+
     let envelope: prometheos_lite::workflow::scenario::LiteTaskRunEvidence =
         serde_json::from_value(receipt["envelope"].clone()).expect("committed envelope parses");
-    envelope
-        .verify()
-        .expect("committed live-pilot envelope verifies");
-    assert_eq!(
-        envelope.task_outcome,
-        prometheos_lite::workflow::scenario::TaskOutcome::Repaired
-    );
-    assert_eq!(envelope.repair.origin, TaskRepairOrigin::ModelAuthored);
     let provenance = envelope
         .repair
         .model_provenance
         .as_ref()
         .expect("model-authored provenance bound");
-    assert_eq!(provenance.proposal_digest, envelope.repair.patch_digest);
+    assert_eq!(provenance.model_response_digest, response_digest);
+    assert_eq!(provenance.proposal_digest, digest);
     assert_eq!(provenance.attempt, 1);
+    assert_eq!(envelope.repair.patch_digest, digest);
+    assert_eq!(
+        envelope.repair.changed_files,
+        vec!["src/bucket.rs".to_string()]
+    );
+
+    // --- Link 3: independent assessor replay in a fresh workspace ---------
+    // Apply the recorded proposal to the pinned fixture bytes and require
+    // the pinned validator to pass and the tree digest to equal the
+    // recorded post-run digest. This does not rely on the envelope at all.
+    let temp = tempfile::tempdir().expect("assessor workspace");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/scenarios/rust-tokenbucket-bugfix/repo");
+    common::task_execution::stage_source_repository(
+        &fixture,
+        &temp.path().join("source"),
+        "https://repo.invalid/assessor-replay.git",
+    )
+    .expect("stage pinned fixture");
+    let verifier_workdir = &temp.path().join("source");
+    let (policy, file_set) = {
+        use prometheos_lite::harness::file_control::{FilePolicy, FileSet};
+        let mut policy = FilePolicy::strict();
+        policy.repo_root = verifier_workdir.clone();
+        policy.allowed_write_paths = vec![PathBuf::from("src/bucket.rs")];
+        let file_set = FileSet {
+            editable: vec![verifier_workdir.join("src/bucket.rs")],
+            readonly: vec![],
+            generated: vec![],
+            artifacts: vec![],
+            denied: vec![],
+            binary: vec![],
+        };
+        (policy, file_set)
+    };
+    let applied = common::task_execution::dispatch_resolved_route_block_on(
+        prometheos_lite::harness::patch_applier::apply_patch_with_rollback(
+            &edits, &file_set, &policy,
+        ),
+    )
+    .expect("recorded proposal applies");
+    assert!(applied.0.applied, "recorded proposal applies cleanly");
+    let pins = envelope
+        .scenario_run
+        .descriptor
+        .validation
+        .clone()
+        .expect("pins");
+    let target_dir = temp.path().join("validator-target");
+    let record = common::task_execution::run_validator(&pins, verifier_workdir, &target_dir);
+    assert_eq!(
+        record.exit_code,
+        Some(0),
+        "recorded proposal passes the pinned validator"
+    );
+    let tree_digest = prometheos_lite::workflow::scenario::task_run_tree_digest(verifier_workdir)
+        .expect("tree digest");
+    assert_eq!(
+        tree_digest, envelope.post_run_content_digest,
+        "recorded proposal reproduces the recorded post-run tree digest"
+    );
+
+    // --- Link 4: the preserved envelope fails repaired verification ------
+    assert!(
+        envelope.verify().is_err(),
+        "the preserved historical envelope (pre-repair provenance) must not verify"
+    );
 }
 
 // ---------------------------------------------------------------------------
 // Live, opt-in pilot (never runs by default)
 // ---------------------------------------------------------------------------
 
+/// Operator-granted authorization for ONE synthetic-source egress run.
+/// The gateway refuses to open an upstream connection unless this grant
+/// names the exact upstream and explicitly authorizes the synthetic
+/// fixture source — the authorization is checked at the outbound effect,
+/// before any bytes leave the process.
+pub struct GatewayEgressGrant {
+    /// Full upstream completions URL the gateway may dial.
+    pub upstream_url: String,
+    /// Effective network policy from the authority of the run being
+    /// gated; re-checked at the outbound boundary.
+    pub effective_network_policy: prometheos_lite::workflow::soma::contracts::NetworkPolicy,
+    /// Explicit per-run operator authorization for this synthetic
+    /// fixture source to be transmitted. False denies everything.
+    pub permit_synthetic_source_egress: bool,
+    /// Provider identity pinned for this run (must equal the descriptor's).
+    pub provider_identity: String,
+    /// Upstream model the gateway may request.
+    pub upstream_model: String,
+    /// Model identity the harness and the rest of Lite see (alias).
+    pub harness_visible_model: String,
+    /// Known secret values that must never leave this gateway.
+    pub known_secrets: Vec<String>,
+    /// Connections opened to the upstream. Incremented only after the
+    /// egress preflight passes.
+    pub would_dial: Arc<AtomicU64>,
+    /// Connections refused by the egress preflight.
+    pub refused: Arc<AtomicU64>,
+}
+
+/// Outbound effect boundary. Runs BEFORE the gateway opens any upstream
+/// connection; on any refusal it returns `Err(reason)` and the caller
+/// must NOT dial out.
+fn egress_preflight(grant: &GatewayEgressGrant, body: &[u8]) -> Result<(), &'static str> {
+    let url = grant.upstream_url.clone();
+    // Host pinning and scheme-vs-host consistency (host without port).
+    let host = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .map(|rest| rest.split('/').next().unwrap_or(""))
+        .map(|authority| authority.split(':').next().unwrap_or("").to_lowercase())
+        .unwrap_or_default();
+    if url.starts_with("http://") && host != "127.0.0.1" && host != "localhost" {
+        return Err("plain HTTP egress is refused; HTTPS is required for non-loopback upstreams");
+    }
+    if host.is_empty() {
+        return Err("upstream host unparseable");
+    }
+    // The effective network policy decides, not the URL shape.
+    let policy_permits = match grant.effective_network_policy.default {
+        prometheos_lite::workflow::soma::types::NetworkDefault::Allow => true,
+        prometheos_lite::workflow::soma::types::NetworkDefault::Deny => grant
+            .effective_network_policy
+            .allowlist
+            .as_ref()
+            .map(|list| list.iter().any(|entry| entry.eq_ignore_ascii_case(&host)))
+            .unwrap_or(false),
+    };
+    if !policy_permits {
+        return Err("effective network policy denies the upstream host");
+    }
+    // Explicit authorization for this synthetic source, separately.
+    if !grant.permit_synthetic_source_egress {
+        return Err("synthetic-source egress is not authorized for this run");
+    }
+    // No known secret may cross this boundary.
+    for secret in &grant.known_secrets {
+        if !secret.is_empty() && body.windows(secret.len()).any(|w| w == secret.as_bytes()) {
+            return Err("outbound message contains a known secret; refused");
+        }
+    }
+    Ok(())
+}
+
 fn spawn_openrouter_gateway(
-    upstream_model: &'static str,
-    harness_alias: &'static str,
-) -> (String, Arc<AtomicU64>, Arc<AtomicBool>) {
+    grant: GatewayEgressGrant,
+) -> (
+    String,
+    Arc<AtomicU64>,
+    Arc<AtomicU64>,
+    Arc<AtomicU64>,
+    Arc<AtomicBool>,
+) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("gateway binds loopback");
     let addr = listener.local_addr().expect("gateway addr");
     let url = format!("http://127.0.0.1:{}/v1", addr.port());
     let effects = Arc::new(AtomicU64::new(0));
+    let refused = grant.refused.clone();
+    let would_dial = grant.would_dial.clone();
     let stop = Arc::new(AtomicBool::new(false));
     let effects_thread = effects.clone();
     let stop_thread = stop.clone();
@@ -642,11 +1258,18 @@ fn spawn_openrouter_gateway(
             match listener.accept() {
                 Ok((stream, _)) => {
                     effects_thread.fetch_add(1, Ordering::SeqCst);
-                    let effects_conn = effects_thread.clone();
-                    thread::spawn(move || {
-                        let _ = effects_conn;
-                        handle_gateway_conn(stream, upstream_model, harness_alias);
-                    });
+                    let connection_grant = GatewayEgressGrant {
+                        upstream_url: grant.upstream_url.clone(),
+                        effective_network_policy: grant.effective_network_policy.clone(),
+                        permit_synthetic_source_egress: grant.permit_synthetic_source_egress,
+                        provider_identity: grant.provider_identity.clone(),
+                        upstream_model: grant.upstream_model.clone(),
+                        harness_visible_model: grant.harness_visible_model.clone(),
+                        known_secrets: grant.known_secrets.clone(),
+                        would_dial: grant.would_dial.clone(),
+                        refused: grant.refused.clone(),
+                    };
+                    thread::spawn(move || handle_gateway_conn(stream, connection_grant));
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(10));
@@ -655,10 +1278,10 @@ fn spawn_openrouter_gateway(
             }
         }
     });
-    (url, effects, stop)
+    (url, effects, refused, would_dial, stop)
 }
 
-fn handle_gateway_conn(mut stream: std::net::TcpStream, upstream_model: &str, harness_alias: &str) {
+fn handle_gateway_conn(mut stream: std::net::TcpStream, grant: GatewayEgressGrant) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
     let mut buf = Vec::with_capacity(8192);
     let mut chunk = [0u8; 8192];
@@ -705,7 +1328,7 @@ fn handle_gateway_conn(mut stream: std::net::TcpStream, upstream_model: &str, ha
         return;
     }
     let mut upstream_request = request.clone();
-    upstream_request["model"] = json!(upstream_model);
+    upstream_request["model"] = json!(grant.upstream_model);
     // Operator gateway policy: this upstream is a reasoning model; with
     // reasoning enabled it spends the whole token budget on reasoning and
     // returns null content, which the Lite harness refuses as an
@@ -713,15 +1336,32 @@ fn handle_gateway_conn(mut stream: std::net::TcpStream, upstream_model: &str, ha
     // harness itself is untouched.
     upstream_request["reasoning"] = json!({ "enabled": false });
 
-    let api_key = match std::env::var("OPENROUTER_API_KEY") {
-        Ok(key) if !key.is_empty() => key,
-        _ => return,
-    };
-    // Forward to OpenRouter; the upstream is asked for the free
-    // `cohere/north-mini-code:free` model. The model identity is rewritten
-    // to the harness-visible alias in the response so the harness's
-    // model-mismatch check passes and the alias stays on the wire
-    // inside Lite.
+    // ---- EGRESS PREFLIGHT: decide before any upstream effect -----------
+    if let Err(reason) = egress_preflight(&grant, body) {
+        grant.refused.fetch_add(1, Ordering::SeqCst);
+        let refusal_body = json!({ "error": "egress-refused", "reason": reason }).to_string();
+        let refusal = format!(
+            "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            refusal_body.len(),
+            refusal_body
+        );
+        let _ = stream.write_all(refusal.as_bytes());
+        let _ = stream.shutdown(std::net::Shutdown::Both);
+        return;
+    }
+    // The authorization holds; count the outbound effect.
+    grant.would_dial.fetch_add(1, Ordering::SeqCst);
+
+    // The key is attached when present. The offline mock-upstream tests run
+    // without it by design; the live path asserts its presence before ever
+    // reaching the gateway.
+    let api_key = std::env::var("OPENROUTER_API_KEY")
+        .ok()
+        .filter(|k| !k.is_empty());
+    // Forward to the pinned upstream; the model identity is rewritten to
+    // the harness-visible alias in the response so the harness's
+    // model-mismatch check passes and only the alias appears on the
+    // Lite-facing wire.
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -736,20 +1376,22 @@ fn handle_gateway_conn(mut stream: std::net::TcpStream, upstream_model: &str, ha
         Ok(client) => client,
         Err(_) => return,
     };
+    let upstream_url = grant.upstream_url.clone();
     let (status, mut response_body) = runtime.block_on(async move {
-        match client
-            .post("https://openrouter.ai/api/v1/chat/completions")
-            .bearer_auth(&api_key)
+        let builder = client
+            .post(&upstream_url)
             .header("Content-Type", "application/json")
             .header(
                 "HTTP-Referer",
                 "https://github.com/prometheosai/prometheos-lite",
             )
             .header("X-Title", "prometheos-lite pilot")
-            .json(&upstream_request)
-            .send()
-            .await
-        {
+            .json(&upstream_request);
+        let builder = match &api_key {
+            Some(key) => builder.bearer_auth(key),
+            None => builder,
+        };
+        match builder.send().await {
             Ok(response) => {
                 let status = response.status().as_u16();
                 (status, response.text().await.unwrap_or_default())
@@ -758,7 +1400,7 @@ fn handle_gateway_conn(mut stream: std::net::TcpStream, upstream_model: &str, ha
         }
     });
     if let Ok(mut parsed) = serde_json::from_str::<Value>(&response_body) {
-        parsed["model"] = json!(harness_alias);
+        parsed["model"] = json!(grant.harness_visible_model);
         response_body = parsed.to_string();
     }
     let response_text = format!(
@@ -778,7 +1420,7 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 fn live_openrouter_run_is_opt_in() {
     if std::env::var("PROMETHEOS_REAL_MODEL_PILOT").as_deref() != Ok("1") {
         eprintln!(
-            "SKIP: set PROMETHEOS_REAL_MODEL_PILOT=1 (and a configured OPENROUTER_API_KEY) to run the live pilot"
+            "SKIP: set PROMETHEOS_REAL_MODEL_PILOT=1 and PROMETHEOS_PILOT_SYNTHETIC_EGRESS_AUTHORIZATION=1 to run the live pilot"
         );
         return;
     }
@@ -788,9 +1430,31 @@ fn live_openrouter_run_is_opt_in() {
             .unwrap_or(false),
         "OPENROUTER_API_KEY must be configured in the environment for the live pilot"
     );
+    assert_eq!(
+        std::env::var("PROMETHEOS_PILOT_SYNTHETIC_EGRESS_AUTHORIZATION").as_deref(),
+        Ok("1"),
+        "the live pilot requires the explicit synthetic-source egress authorization"
+    );
     let alias = "nemotron-ultra-550b-free";
-    let (endpoint, effects, stop) =
-        spawn_openrouter_gateway("nvidia/nemotron-3-ultra-550b-a55b:free", alias);
+    let policy = NetworkPolicy {
+        default: NetworkDefault::Deny,
+        allowlist: Some(vec![common::model_pilot::LIVE_EGRESS_HOST.to_string()]),
+    };
+    let grant = GatewayEgressGrant {
+        upstream_url: format!(
+            "https://{}/api/v1/chat/completions",
+            common::model_pilot::LIVE_EGRESS_HOST
+        ),
+        effective_network_policy: policy,
+        permit_synthetic_source_egress: true,
+        provider_identity: "openrouter-via-loopback-gateway".to_string(),
+        upstream_model: "nvidia/nemotron-3-ultra-550b-a55b:free".to_string(),
+        harness_visible_model: alias.to_string(),
+        known_secrets: vec![prometheos_lite::workflow::redaction::SECRET_CANARY.to_string()],
+        would_dial: Arc::new(AtomicU64::new(0)),
+        refused: Arc::new(AtomicU64::new(0)),
+    };
+    let (endpoint, effects, refused, would_dial, stop) = spawn_openrouter_gateway(grant);
     let mut spawn = |_attempt: u32| PilotEndpoint {
         endpoint: endpoint.clone(),
         effects: effects.clone(),
@@ -799,9 +1463,13 @@ fn live_openrouter_run_is_opt_in() {
         LIVE_DESCRIPTOR,
         PILOT_EXAMPLE_PRICE_BOOK,
         110_000,
+        RouteProfile::Standard,
+        TaskRepairProvenanceKind::OperatorObservedLive,
         &mut spawn,
     );
     stop.store(true, Ordering::SeqCst);
+    let _ = refused.load(Ordering::SeqCst);
+    let _ = would_dial.load(Ordering::SeqCst);
 
     // Evidence transcript (contains no credentials; the model's public
     // task output only).
@@ -812,6 +1480,12 @@ fn live_openrouter_run_is_opt_in() {
         "route": "openrouter-via-loopback-gateway",
         "harnessVisibleModel": alias,
         "upstreamModel": "nvidia/nemotron-3-ultra-550b-a55b:free",
+        "egressAuthorization": {
+            "permitSyntheticSourceEgress": true,
+            "upstreamHost": common::model_pilot::LIVE_EGRESS_HOST,
+            "providerIdentity": "openrouter-via-loopback-gateway",
+            "effectiveNetworkPolicy": "deny + allowlist [openrouter.ai]",
+        },
         "capabilityEffects": run.capability_effects,
         "attempts": run.attempts.iter().map(|a| json!({
             "attempt": a.attempt,

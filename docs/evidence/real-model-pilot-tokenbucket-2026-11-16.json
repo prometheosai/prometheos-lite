@@ -489,5 +489,7 @@
   "sealError": null,
   "taskOutcome": "Repaired",
   "upstreamModel": "nvidia/nemotron-3-ultra-550b-a55b:free",
-  "validatorExitCode": 0
+  "validatorExitCode": 0,
+  "authorityAssessment": "historical-ungoverned-egress",
+  "preservationNote": "Preserved unchanged as historical experimental evidence from the opt-in pilot run of 2026-11-16. The run crossed the cloud boundary before the trust-boundary repair added egress authorization to the gateway and sealed-provenance bindings; it is NOT a policy-compliant governed run. Do not rewrite the envelope bytes or the raw proposal; classify accordingly. Verification of this envelope under the repaired binding rules fails by design; the links that remain independently recomputable are exercised in the committed-envelope preservation test."
 }

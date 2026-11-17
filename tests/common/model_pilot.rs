@@ -72,8 +72,8 @@ use prometheos_lite::workflow::route_resolution::{
 };
 use prometheos_lite::workflow::scenario::{
     self, LiteTaskRunEvidence, ModelPatchProvenance, ScenarioDescriptor, ScenarioOutcomeClass,
-    TaskRepairOrigin, TaskRepairRecord, TaskRepairWriteAuthority, TaskValidatorProvenance,
-    TaskValidatorRecord,
+    TaskRepairOrigin, TaskRepairProvenanceKind, TaskRepairRecord, TaskRepairWriteAuthority,
+    TaskValidatorProvenance, TaskValidatorRecord,
 };
 use prometheos_lite::workflow::soma::capability::Locality;
 use prometheos_lite::workflow::soma::capability::{
@@ -99,6 +99,12 @@ pub const MODEL_PILOT_SPEC: TaskExecutionSpec = TaskExecutionSpec {
 
 /// Bounded iteration: the model gets at most this many attempts.
 pub const MAX_ATTEMPTS: u32 = 3;
+/// The one host the operator may authorize for the live pilot's egress,
+/// by explicit per-run grant; everything else stays denied.
+pub const LIVE_EGRESS_HOST: &str = "openrouter.ai";
+/// The effective network allowlist granted to an authorized live run.
+/// Anything not listed here is refused.
+pub const LIVE_EGRESS_ALLOWLIST: &[&str] = &["openrouter.ai"];
 /// Cap on the validator output fed back to the model between attempts.
 const FEEDBACK_CAP: usize = 3_000;
 /// Timeout for one validator subprocess.
@@ -146,6 +152,9 @@ pub struct PilotAttempt {
     pub model_response_raw: Option<String>,
     /// The edits parsed from the model's proposal, when parsing succeeded.
     pub proposed_edits: Vec<EditOperation>,
+    /// Idempotency key of THIS attempt's routed dispatch (absent when the
+    /// dispatch was refused before effect).
+    pub idempotency_key: Option<String>,
 }
 
 /// The pre-fix proof: an actual validator run against a throwaway copy
@@ -529,6 +538,7 @@ fn route_candidate(descriptor: &ScenarioDescriptor) -> RouteCandidateV1 {
         provider_identity: descriptor.route.provider_identity.clone(),
         provider_locality: match descriptor.route.provider_locality.as_str() {
             "local" => Locality::Local,
+            "remote" => Locality::Remote,
             other => panic!("unsupported provider locality in fixture: {other}"),
         },
         model: Some(descriptor.route.model.clone()),
@@ -578,11 +588,16 @@ fn preflight_refusal(
 /// Run the model-authored pilot end to end. `spawn_endpoint` is called
 /// once per attempt with the 1-based attempt number and must return a
 /// loopback endpoint handle; `effects` is the caller's capability-effect
-/// counter for that endpoint (the runner aggregates them).
+/// counter for that endpoint (the runner aggregates them). `profile`
+/// selects the route profile; `provenance_kind` declares how the model
+/// response is observed — `CannedTest` for the offline suite,
+/// `OperatorObservedLive` only for the authorized real-model path.
 pub fn run_model_pilot(
     descriptor_text: &str,
     price_book: &str,
     dispatch_timeout_ms: u64,
+    profile: prometheos_lite::workflow::route_resolution::RouteProfile,
+    provenance_kind: TaskRepairProvenanceKind,
     spawn_endpoint: &mut dyn FnMut(u32) -> PilotEndpoint,
 ) -> ModelPilotRun {
     let spec = MODEL_PILOT_SPEC;
@@ -708,6 +723,11 @@ pub fn run_model_pilot(
 
     // ---- route setup (shared across attempts) ----------------------------
     let files = solver_visible_files(&worktree_root);
+    let locality_allowed: Vec<&str> = match descriptor.route.provider_locality.as_str() {
+        "local" => vec!["local"],
+        "remote" => vec!["local", "remote"],
+        other => panic!("unsupported provider locality in fixture: {other}"),
+    };
     let requirements: WorkRequirements = serde_json::from_value(json!({
         "id": "reqs-model-pilot",
         "schemaVersion": SUPPORTED_CAPABILITY_SCHEMA_VERSION,
@@ -715,12 +735,26 @@ pub fn run_model_pilot(
         "requiredSpecVersion": SUPPORTED_CAPABILITY_SCHEMA_VERSION,
         "degradationPermitted": descriptor.requirements.degradation_permitted,
         "forbidSubstitution": descriptor.requirements.forbid_substitution,
-        "requiredCapabilities": []
+        "requiredCapabilities": [],
+        "locality": { "allowedExecution": locality_allowed }
     }))
     .expect("requirements parse");
-    let authority: AuthorityProfile =
-        serde_json::from_str(r#"{"executionClass": "deterministic", "mutation": "none"}"#)
-            .expect("authority parses");
+    let authority: AuthorityProfile = match provenance_kind {
+        // An externally authorized live run carries an explicit,
+        // effective network policy permitting exactly the pinned host;
+        // everything else stays denied.
+        TaskRepairProvenanceKind::OperatorObservedLive => serde_json::from_value(json!({
+            "executionClass": "deterministic",
+            "mutation": "none",
+            "networkPolicy": { "default": "deny", "allowlist": LIVE_EGRESS_ALLOWLIST }
+        }))
+        .expect("authority parses"),
+        // The offline canned path has no external egress at all.
+        TaskRepairProvenanceKind::CannedTest => {
+            serde_json::from_str(r#"{"executionClass": "deterministic", "mutation": "none"}"#)
+                .expect("authority parses")
+        }
+    };
     let candidate = route_candidate(&descriptor);
     let request = RouteResolutionRequest {
         route_set_id: descriptor.route.route_set_id.clone(),
@@ -730,7 +764,7 @@ pub fn run_model_pilot(
         requirements: &requirements,
         authority_declared: &authority,
         authority_effective: &authority,
-        profile: prometheos_lite::workflow::route_resolution::RouteProfile::Standard,
+        profile,
         evaluated_at: descriptor.route.evaluated_at.clone(),
         workspace: Some(&workspace_manifest),
     };
@@ -876,6 +910,7 @@ pub fn run_model_pilot(
             failure: None,
             model_response_raw: None,
             proposed_edits: vec![],
+            idempotency_key: None,
         };
 
         match dispatch.as_ref() {
@@ -883,6 +918,7 @@ pub fn run_model_pilot(
                 let content = model_content_from_outcome(outcome).unwrap_or_default();
                 attempt.model_response_raw = Some(content.clone());
                 attempt.model_response_digest = Some(sha256_hex(content.as_bytes()));
+                attempt.idempotency_key = Some(outcome.attempt.idempotency_key.clone());
                 final_accounting = accounting;
                 match parse_model_proposal(&content) {
                     Ok(edits) => {
@@ -956,6 +992,7 @@ pub fn run_model_pilot(
                                                     attempt_number,
                                                     record,
                                                     staging_digest_ok,
+                                                    provenance_kind,
                                                 );
                                             }
                                             let mut merged = Vec::with_capacity(
@@ -1050,6 +1087,7 @@ pub fn run_model_pilot(
                 winning_attempt,
                 record,
                 staging_digest_ok,
+                provenance_kind,
             )
         }
         None => ModelPilotRun {
@@ -1097,6 +1135,7 @@ fn finish_run(
     winning_attempt: u32,
     validator_record: TaskValidatorRecord,
     staging_digest_ok: bool,
+    provenance_kind: TaskRepairProvenanceKind,
 ) -> ModelPilotRun {
     let dispatch_classification = scenario::classify_completed_run(
         true,
@@ -1129,6 +1168,14 @@ fn finish_run(
                 .model_response_digest
                 .clone()
                 .expect("winning attempt carries a response digest");
+            let raw_response = winning
+                .model_response_raw
+                .clone()
+                .expect("winning attempt carries the raw response");
+            let winning_idempotency_key = winning
+                .idempotency_key
+                .clone()
+                .expect("winning attempt carries the routed attempt idempotency key");
             let proposal_digest = winning
                 .proposal_digest
                 .clone()
@@ -1168,6 +1215,9 @@ fn finish_run(
                                 "{}@{}",
                                 outcome.attempt.harness_id, harness_revision
                             ),
+                            kind: Some(provenance_kind),
+                            raw_response: Some(raw_response),
+                            attempt_idempotency_key: Some(winning_idempotency_key),
                         }),
                     };
                     match LiteTaskRunEvidence::sealed(
