@@ -3,7 +3,7 @@
 - #156 E7/I07 Slice A - Lite-native classified failure -> minimized, redacted,
   versioned evaluation case, with the verified fix linked back to the
   originating failure (Lite-internal, experimental; not a Foundry claim).
-  PR #_PR_NUMBER_ (2026-11-17): a new `workflow::failure_case` module converts the
+  PR #312 (2026-11-17): a new `workflow::failure_case` module converts the
   pinned #136 `rust-bugfix-arithmetic` governed validation failure
   (`cargo test --offline`, exit 101, class `governed-product-outcome`) into a
   versioned Lite-internal case (`lite.evaluation.failure-case`, schema 1.0.0)
