@@ -1301,6 +1301,16 @@ fn build_remote_service_success(
     } else {
         json!(redactor.redact(content_str))
     };
+    // Capture the responder-issued response identifier, if the configured
+    // endpoint exposed one (e.g. the OpenAI-compatible top-level `id`).
+    // This is the responder's own id for this inference, never a locally
+    // derived hash. Bounded and length-capped; never a credential.
+    let response_id = parsed
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.chars().take(512).collect::<String>());
     let usage_raw = parsed.get("usage").cloned().unwrap_or(Value::Null);
     // Usage fields pass through verbatim as reported (strings, floats,
     // negatives included): the accounting layer is the fail-closed arbiter
@@ -1322,6 +1332,7 @@ fn build_remote_service_success(
         "latencyMs": latency_ms,
         "requestId": request_id,
         "correlationId": correlation_id,
+        "responseId": response_id,
     }))
 }
 

@@ -17,6 +17,8 @@
 //!   LITE_MODEL_REPAIR_ENV_FILE      optional .env path for OPENROUTER_API_KEY (falls back to <manifest>/.env)
 //!   LITE_MODEL_REPAIR_MAX_ATTEMPTS  attempt ceiling (default: 4)
 //!   LITE_MODEL_REPAIR_TIMEOUT_SECS  per-validator budget (default: 1200)
+//!   LITE_MODEL_REPAIR_REPOSITORY    source repository slug (default: prometheosai/prometheos-lite)
+//!   LITE_MODEL_REPAIR_ISSUE_NUMBER  tracked issue identity (default: 136; 0 disables)
 //!
 //! Provenance of the task: Lite's own merged security fix e62ffaa
 //! (PR #283, feat/154-slice-b-harness-selection) — a genuine HSEL-0008
@@ -43,7 +45,8 @@ use prometheos_lite::workflow::governance_compiler;
 use prometheos_lite::workflow::governance_permit::GovernancePermit;
 use prometheos_lite::workflow::model_repair::{
     ModelDescriptor, ModelProposeError, ModelProposer, ModelRepairSpec, ModelRepairStatus,
-    PromptContext, ValidatorSpec, batch_of, report_digest, tree_digest,
+    PromptContext, ProposedCompletion, SomaSourceBinding, ValidatorSpec, batch_of, report_digest,
+    tree_digest,
 };
 use prometheos_lite::workflow::node_contracts::NodeManifestV1;
 use prometheos_lite::workflow::node_runner::{CapabilityRegistry, NodeRunner};
@@ -324,7 +327,7 @@ impl ModelProposer for LiveProposer {
         self.descriptor.clone()
     }
 
-    fn propose(&mut self, prompt: &str) -> Result<String, ModelProposeError> {
+    fn propose(&mut self, prompt: &str) -> Result<ProposedCompletion, ModelProposeError> {
         let model = self.descriptor.model.clone();
         let step = HarnessStep {
             step_id: "model-repair-live-step".to_string(),
@@ -396,9 +399,12 @@ impl ModelProposer for LiveProposer {
                 _ => ModelProposeError::Unavailable(format!("{status}: {message}")),
             });
         }
-        let content = parsed
+        let inner = parsed
             .get("output")
-            .and_then(|o| o.get("content"))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let content = inner
+            .get("content")
             .map(|c| match c {
                 serde_json::Value::String(s) => s.clone(),
                 other => other.to_string(),
@@ -406,7 +412,32 @@ impl ModelProposer for LiveProposer {
             .ok_or_else(|| {
                 ModelProposeError::Unavailable("harness output lacks content".to_string())
             })?;
-        Ok(content)
+        // Responder-issued response id (e.g. OpenAI-compatible `id`), captured
+        // at the response boundary by the harness. Absent when the responder
+        // was silent — never synthesized, never substituted by a hash.
+        let provider_response_id = inner
+            .get("responseId")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.chars().take(512).collect::<String>());
+        let provider_response_id_source = provider_response_id
+            .as_ref()
+            .map(|_| "response-body:id via lite.harness.remote_service".to_string());
+        let local_request_id = inner
+            .get("requestId")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        // The remote-service harness does not surface response headers, so a
+        // gateway trace id cannot be captured here; recorded absent rather
+        // than inferred.
+        Ok(ProposedCompletion {
+            content,
+            provider_response_id,
+            provider_response_id_source,
+            gateway_trace_id: None,
+            local_request_id,
+        })
     }
 }
 
@@ -450,6 +481,28 @@ async fn main() -> Result<()> {
             .and_then(|v| v.parse().ok())
             .unwrap_or(1200),
     );
+    // SOMA source binding. The staged tree is a clone of this repository at
+    // the pinned commit, so the GitHub slug is recorded — configured by the
+    // operator, never derived from the model. The default issue number is
+    // the tracked milestone for this producer path (#136); operators may
+    // override or set 0 to record an explicitly empty binding.
+    let repository = std::env::var("LITE_MODEL_REPAIR_REPOSITORY")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "prometheosai/prometheos-lite".to_string());
+    let issue_number = match std::env::var("LITE_MODEL_REPAIR_ISSUE_NUMBER") {
+        Ok(v) => match v.parse::<u64>() {
+            Ok(0) => None,
+            Ok(n) => Some(n),
+            Err(_) => {
+                eprintln!(
+                    "warning: LITE_MODEL_REPAIR_ISSUE_NUMBER={v:?} is not a number; recording no issue binding"
+                );
+                None
+            }
+        },
+        Err(_) => Some(136),
+    };
 
     let work = tempfile::tempdir().context("tempdir")?;
     let worktree = work.path().join("pinned-src");
@@ -522,6 +575,11 @@ async fn main() -> Result<()> {
                 excerpt_start + 1,
                 excerpt_end
             ),
+        }),
+        source: Some(SomaSourceBinding {
+            repository,
+            repository_revision: base_sha.clone(),
+            issue_number,
         }),
     };
 

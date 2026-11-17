@@ -134,7 +134,18 @@ fn repair_spec(worktree: &Path, rev: &str) -> ModelRepairSpec {
         max_attempts: 4,
         validator_target_dir: None,
         prompt_context: None,
+        source: None,
     }
+}
+
+fn repair_spec_with_source(worktree: &Path, rev: &str) -> ModelRepairSpec {
+    let mut spec = repair_spec(worktree, rev);
+    spec.source = Some(prometheos_lite::workflow::model_repair::SomaSourceBinding {
+        repository: "prometheosai/prometheos-lite".to_string(),
+        repository_revision: rev.to_string(),
+        issue_number: Some(136),
+    });
+    spec
 }
 
 #[tokio::test]
@@ -508,4 +519,561 @@ fn report_serde_round_trip_and_digest() {
         prometheos_lite::workflow::model_repair::report_digest(&report),
         prometheos_lite::workflow::model_repair::report_digest(&parsed)
     );
+}
+
+// ---------------------------------------------------------------------------
+// Provider provenance and unique execution identity (PR #314 review)
+// ---------------------------------------------------------------------------
+
+fn completion_with_id(
+    content: &str,
+    id: &str,
+) -> prometheos_lite::workflow::model_repair::ProposedCompletion {
+    prometheos_lite::workflow::model_repair::ProposedCompletion {
+        content: content.to_string(),
+        provider_response_id: Some(id.to_string()),
+        provider_response_id_source: Some(
+            "response-body:id via lite.harness.remote_service".to_string(),
+        ),
+        gateway_trace_id: None,
+        local_request_id: Some("req-model-repair-live-step".to_string()),
+    }
+}
+
+// 1. Genuine provider id present: captured, sealed, verifiable, and sealable.
+#[tokio::test]
+async fn provider_id_present_is_captured_sealed_and_verify_passes() {
+    let (temp, rev) = stage_fixture();
+    let worktree = temp.path().to_path_buf();
+    let spec = repair_spec_with_source(&worktree, &rev);
+    let proposer = ScriptedProposer::with_completions(
+        descriptor(),
+        vec![Ok(completion_with_id(FIX_DIFF, "chatcmpl-test-0001"))],
+    );
+    let report =
+        prometheos_lite::workflow::model_repair::run_model_repair(&spec, proposer, None).await;
+    assert_eq!(report.status, ModelRepairStatus::Repaired);
+    let sealing = report.attempts.last().expect("attempt");
+    assert_eq!(
+        sealing.provider_response_id.as_deref(),
+        Some("chatcmpl-test-0001")
+    );
+    assert_eq!(
+        sealing.provider_response_id_source.as_deref(),
+        Some("response-body:id via lite.harness.remote_service")
+    );
+    assert!(report.execution_id.starts_with("exec-"));
+    assert!(report.execution_id.len() > 16);
+    assert!(report.sealable, "sealable with id + bindings: {report:?}");
+    assert!(report.sealability_reasons.is_empty());
+    assert!(report.verify().is_ok(), "sealed report verifies");
+}
+
+// 2. Provider id absent: recorded absent, report not sealable, verify still passes.
+#[tokio::test]
+async fn provider_id_absent_is_recorded_absent_and_not_sealable() {
+    let (temp, rev) = stage_fixture();
+    let worktree = temp.path().to_path_buf();
+    let spec = repair_spec_with_source(&worktree, &rev);
+    let proposer = ScriptedProposer::new(descriptor(), vec![Ok(FIX_DIFF.to_string())]);
+    let report =
+        prometheos_lite::workflow::model_repair::run_model_repair(&spec, proposer, None).await;
+    assert_eq!(report.status, ModelRepairStatus::Repaired);
+    assert!(
+        report
+            .attempts
+            .iter()
+            .all(|a| a.provider_response_id.is_none())
+    );
+    assert!(!report.sealable);
+    assert!(
+        report
+            .sealability_reasons
+            .iter()
+            .any(|r| r.contains("responder did not expose")),
+        "reason enumerates the missing provider id: {:?}",
+        report.sealability_reasons
+    );
+    // Verification is not sealability: integrity still holds.
+    assert!(report.verify().is_ok());
+}
+
+// 3. Gateway-only trace: recorded, no fabricated provider id, not sealable.
+#[tokio::test]
+async fn gateway_only_trace_is_recorded_without_fabrication() {
+    let (temp, rev) = stage_fixture();
+    let worktree = temp.path().to_path_buf();
+    let spec = repair_spec_with_source(&worktree, &rev);
+    let completion = prometheos_lite::workflow::model_repair::ProposedCompletion {
+        content: FIX_DIFF.to_string(),
+        provider_response_id: None,
+        provider_response_id_source: None,
+        gateway_trace_id: Some("gw-trace-abc123".to_string()),
+        local_request_id: Some("req-model-repair-live-step".to_string()),
+    };
+    let proposer = ScriptedProposer::with_completions(descriptor(), vec![Ok(completion)]);
+    let report =
+        prometheos_lite::workflow::model_repair::run_model_repair(&spec, proposer, None).await;
+    let sealing = report.attempts.last().expect("attempt");
+    assert_eq!(sealing.gateway_trace_id.as_deref(), Some("gw-trace-abc123"));
+    assert!(sealing.provider_response_id.is_none());
+    assert!(!report.sealable);
+}
+
+// 4. Two distinct executions of the same task share no identity.
+#[tokio::test]
+async fn two_distinct_executions_of_same_task_do_not_alias() {
+    let (temp, rev) = stage_fixture();
+    let worktree = temp.path().to_path_buf();
+    let spec_a = repair_spec_with_source(&worktree, &rev);
+    let spec_b = repair_spec_with_source(&worktree, &rev);
+    let proposer_a = ScriptedProposer::new(descriptor(), vec![Ok(FIX_DIFF.to_string())]);
+    let proposer_b = ScriptedProposer::new(descriptor(), vec![Ok(FIX_DIFF.to_string())]);
+    let report_a =
+        prometheos_lite::workflow::model_repair::run_model_repair(&spec_a, proposer_a, None).await;
+    let report_b =
+        prometheos_lite::workflow::model_repair::run_model_repair(&spec_b, proposer_b, None).await;
+    assert_ne!(report_a.execution_id, report_b.execution_id);
+    assert_ne!(report_a.events_sha256, report_b.events_sha256);
+    // Replays of the sealed reports preserve their identities.
+    let batch_a = batch_of(&report_a);
+    let batch_b = batch_of(&report_b);
+    assert_ne!(
+        batch_a.events[0].correlation_id,
+        batch_b.events[0].correlation_id
+    );
+    assert_ne!(batch_a.events[0].id, batch_b.events[0].id);
+}
+
+// 5. Multiple attempts in one execution share one execution identity.
+#[tokio::test]
+async fn multiple_attempts_share_one_execution_identity() {
+    let (temp, rev) = stage_fixture();
+    let worktree = temp.path().to_path_buf();
+    let spec = repair_spec_with_source(&worktree, &rev);
+    let proposer = ScriptedProposer::with_completions(
+        descriptor(),
+        vec![
+            Ok(completion_with_id(WRONG_DIFF, "p-attempt-1")),
+            Ok(completion_with_id(FIX_DIFF, "p-attempt-2")),
+        ],
+    );
+    let report =
+        prometheos_lite::workflow::model_repair::run_model_repair(&spec, proposer, None).await;
+    assert_eq!(report.status, ModelRepairStatus::Repaired);
+    assert_eq!(report.attempts.len(), 2);
+    assert_eq!(
+        report.attempts[0].provider_response_id.as_deref(),
+        Some("p-attempt-1")
+    );
+    assert_eq!(
+        report.attempts[1].provider_response_id.as_deref(),
+        Some("p-attempt-2")
+    );
+    let batch = batch_of(&report);
+    for event in &batch.events {
+        assert_eq!(event.correlation_id, report.execution_id);
+    }
+    // Sequences are 0..n and parents chain deterministically within the run.
+    for (index, event) in batch.events.iter().enumerate() {
+        assert_eq!(event.sequence, index as u64);
+        if index == 0 {
+            assert!(event.parents.is_empty());
+        } else {
+            assert_eq!(event.parents, vec![batch.events[index - 1].id.clone()]);
+        }
+        assert!(event.id.starts_with("evt-"));
+    }
+}
+
+// 6. Provider failure records a typed outcome with no fabricated id.
+#[tokio::test]
+async fn retried_provider_failure_never_fabricates_an_id() {
+    let (temp, rev) = stage_fixture();
+    let worktree = temp.path().to_path_buf();
+    let spec = repair_spec_with_source(&worktree, &rev);
+    let proposer = ScriptedProposer::new(
+        descriptor(),
+        vec![Err(ModelProposeError::Unavailable(
+            "endpoint refused connection".to_string(),
+        ))],
+    );
+    let report =
+        prometheos_lite::workflow::model_repair::run_model_repair(&spec, proposer, None).await;
+    assert_eq!(report.status, ModelRepairStatus::ProviderUnavailable);
+    assert_eq!(report.attempts.len(), 1);
+    assert_eq!(
+        report.attempts[0].refusal.as_deref(),
+        Some("provider-unavailable")
+    );
+    assert!(report.attempts[0].provider_response_id.is_none());
+    assert!(report.attempts[0].response_sha256.is_none());
+    assert!(!report.execution_id.is_empty());
+    assert!(report.verify().is_ok());
+}
+
+// 7. Replaying emission of a sealed report reproduces the identical batch.
+#[tokio::test]
+async fn work_event_batch_replay_preserves_identity_and_detects_duplicates() {
+    let (temp, rev) = stage_fixture();
+    let worktree = temp.path().to_path_buf();
+    let spec = repair_spec_with_source(&worktree, &rev);
+    let proposer = ScriptedProposer::new(descriptor(), vec![Ok(FIX_DIFF.to_string())]);
+    let report =
+        prometheos_lite::workflow::model_repair::run_model_repair(&spec, proposer, None).await;
+    let first = batch_of(&report);
+    let replay = batch_of(&report);
+    assert_eq!(
+        serde_json::to_vec(&first).unwrap(),
+        serde_json::to_vec(&replay).unwrap()
+    );
+    // Duplicate emissions share event ids — detectable, not silent.
+    assert_eq!(
+        first.events.iter().map(|e| &e.id).collect::<Vec<_>>(),
+        replay.events.iter().map(|e| &e.id).collect::<Vec<_>>()
+    );
+}
+
+// 8. Tampering with the identity or any bound field fails verification.
+#[tokio::test]
+async fn event_digest_and_identity_tampering_fail_verification() {
+    let (temp, rev) = stage_fixture();
+    let worktree = temp.path().to_path_buf();
+    // Tampered execution identity.
+    let spec = repair_spec_with_source(&worktree, &rev);
+    let proposer = ScriptedProposer::new(descriptor(), vec![Ok(FIX_DIFF.to_string())]);
+    let mut report =
+        prometheos_lite::workflow::model_repair::run_model_repair(&spec, proposer, None).await;
+    let original = report.execution_id.clone();
+    report.execution_id = "exec-00000000000000000000000000000000".to_string();
+    assert_ne!(report.execution_id, original);
+    assert!(
+        report.verify().is_err(),
+        "identity tamper must fail verification"
+    );
+
+    // Tampered attempt provider id.
+    let spec = repair_spec_with_source(&worktree, &rev);
+    let proposer = ScriptedProposer::with_completions(
+        descriptor(),
+        vec![Ok(completion_with_id(FIX_DIFF, "p-1"))],
+    );
+    let mut report =
+        prometheos_lite::workflow::model_repair::run_model_repair(&spec, proposer, None).await;
+    report.attempts[0].provider_response_id = Some("p-forged".to_string());
+    assert!(
+        report.verify().is_err(),
+        "provider id tamper must fail verification"
+    );
+}
+
+// 9. Report, events and provenance bind to one another (parent chain + ids).
+#[tokio::test]
+async fn report_events_and_identity_binding_is_consistent() {
+    let (temp, rev) = stage_fixture();
+    let worktree = temp.path().to_path_buf();
+    let spec = repair_spec_with_source(&worktree, &rev);
+    let proposer = ScriptedProposer::with_completions(
+        descriptor(),
+        vec![
+            Ok(completion_with_id(WRONG_DIFF, "p-attempt-1")),
+            Ok(completion_with_id(FIX_DIFF, "p-attempt-2")),
+        ],
+    );
+    let report =
+        prometheos_lite::workflow::model_repair::run_model_repair(&spec, proposer, None).await;
+    let batch = batch_of(&report);
+    assert_eq!(batch.events.len(), 3);
+    assert_eq!(report.attempts.len(), 2);
+    // Every event references the same run and the pinned revision.
+    for event in &batch.events {
+        assert_eq!(event.correlation_id, report.execution_id);
+        assert_eq!(event.repo_revision, report.base_revision);
+    }
+    let outcome = batch.events.last().expect("outcome event");
+    assert_eq!(outcome.event_type, "outcome");
+    assert_eq!(outcome.parents, vec![batch.events[1].id.clone()]);
+    // The sealed report's eventsDigest matches a re-derived batch.
+    let rederived = batch_of(&report);
+    let digest = {
+        use sha2::Digest;
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(serde_json::to_vec(&rederived).unwrap_or_default());
+        format!("{:x}", hasher.finalize())
+    };
+    assert_eq!(report.events_sha256.as_deref(), Some(digest.as_str()));
+}
+
+// 10. Source revision mismatch fails verification.
+#[tokio::test]
+async fn source_revision_mismatch_fails_verification() {
+    let (temp, rev) = stage_fixture();
+    let worktree = temp.path().to_path_buf();
+    let mut spec = repair_spec_with_source(&worktree, &rev);
+    spec.source = Some(prometheos_lite::workflow::model_repair::SomaSourceBinding {
+        repository: "prometheosai/prometheos-lite".to_string(),
+        repository_revision: "0000000000000000000000000000000000000001".to_string(),
+        issue_number: Some(136),
+    });
+    let proposer = ScriptedProposer::new(descriptor(), vec![Ok(FIX_DIFF.to_string())]);
+    let report =
+        prometheos_lite::workflow::model_repair::run_model_repair(&spec, proposer, None).await;
+    assert!(report.verify().is_err());
+}
+
+// 11. Missing tracked issue identity: not sealable, verify still passes,
+//     mapping reports the gap honestly.
+#[tokio::test]
+async fn missing_tracked_issue_identity_blocks_sealable_only() {
+    let (temp, rev) = stage_fixture();
+    let worktree = temp.path().to_path_buf();
+    let mut spec = repair_spec_with_source(&worktree, &rev);
+    spec.source = Some(prometheos_lite::workflow::model_repair::SomaSourceBinding {
+        repository: "prometheosai/prometheos-lite".to_string(),
+        repository_revision: rev.to_string(),
+        issue_number: None,
+    });
+    let proposer = ScriptedProposer::with_completions(
+        descriptor(),
+        vec![Ok(completion_with_id(FIX_DIFF, "p-1"))],
+    );
+    let report =
+        prometheos_lite::workflow::model_repair::run_model_repair(&spec, proposer, None).await;
+    assert!(report.verify().is_ok());
+    assert!(!report.sealable);
+    assert!(
+        report
+            .sealability_reasons
+            .iter()
+            .any(|r| r.contains("source.issueNumber")),
+        "reasons: {:?}",
+        report.sealability_reasons
+    );
+    let mapping = report.soma_field_mapping();
+    let issue = mapping
+        .iter()
+        .find(|row| row.path == "source.issueNumber")
+        .expect("issue row");
+    assert_eq!(issue.status, "gap");
+    assert_eq!(issue.value, None);
+}
+
+// 12. Absent provider identity leaves no trace in the serialized report.
+#[tokio::test]
+async fn no_synthetic_provider_id_appears_anywhere() {
+    let (temp, rev) = stage_fixture();
+    let worktree = temp.path().to_path_buf();
+    let spec = repair_spec_with_source(&worktree, &rev);
+    let proposer = ScriptedProposer::new(descriptor(), vec![Ok(FIX_DIFF.to_string())]);
+    let report =
+        prometheos_lite::workflow::model_repair::run_model_repair(&spec, proposer, None).await;
+    let json = serde_json::to_string(&report).expect("serialize");
+    for forged in [
+        "providerResponseId",
+        "providerResponseIdSource",
+        "localRequestId",
+        "gatewayTraceId",
+        "chatcmpl",
+        "gen-",
+    ] {
+        assert!(
+            !json.contains(forged),
+            "absent provenance must not appear in the report: {forged}"
+        );
+    }
+}
+
+// 13. Credentials never persist: canary secrets redact from every artifact.
+#[tokio::test]
+async fn credential_redaction_holds_across_attempts() {
+    use prometheos_lite::workflow::redaction::SECRET_CANARY;
+    let (temp, rev) = stage_fixture();
+    let worktree = temp.path().to_path_buf();
+    let spec = repair_spec_with_source(&worktree, &rev);
+    let leaky = format!("ok I will fix it: {SECRET_CANARY}\n```diff\n{FIX_DIFF}```");
+    let proposer = ScriptedProposer::new(descriptor(), vec![Ok(leaky)]);
+    let report =
+        prometheos_lite::workflow::model_repair::run_model_repair(&spec, proposer, None).await;
+    let json = serde_json::to_string(&report).expect("serialize");
+    assert!(
+        !json.contains(SECRET_CANARY),
+        "the canary must not persist anywhere in the report"
+    );
+}
+
+// 14. No unauthorized model dispatch: the hermetic suite never reaches the
+//     network, and the sealed report carries no endpoint configuration.
+#[tokio::test]
+async fn sealed_report_carries_no_endpoint_or_credential_configuration() {
+    let (temp, rev) = stage_fixture();
+    let worktree = temp.path().to_path_buf();
+    let spec = repair_spec_with_source(&worktree, &rev);
+    let proposer = ScriptedProposer::new(descriptor(), vec![Ok(FIX_DIFF.to_string())]);
+    let report =
+        prometheos_lite::workflow::model_repair::run_model_repair(&spec, proposer, None).await;
+    let json = serde_json::to_string(&report).expect("serialize");
+    let lower = json.to_lowercase();
+    for forbidden in [
+        "apikey",
+        "api_key",
+        "endpoint",
+        "openrouter",
+        "https://",
+        "bearer",
+        "authorization",
+    ] {
+        assert!(
+            !lower.contains(forbidden),
+            "sealed report must not carry endpoint/credential material: {forbidden}"
+        );
+    }
+    assert_eq!(report.model.provider, descriptor().provider);
+}
+
+// 15. Deterministic serialization, digests, and sealability are stable.
+#[tokio::test]
+async fn serialization_and_sealability_are_deterministic() {
+    let (temp, rev) = stage_fixture();
+    let worktree = temp.path().to_path_buf();
+    let spec = repair_spec_with_source(&worktree, &rev);
+    let proposer = ScriptedProposer::with_completions(
+        descriptor(),
+        vec![Ok(completion_with_id(FIX_DIFF, "p-deterministic"))],
+    );
+    let report =
+        prometheos_lite::workflow::model_repair::run_model_repair(&spec, proposer, None).await;
+    // Content-addressed digests re-derive from the same recorded inputs.
+    let json = serde_json::to_string(&report).expect("serialize");
+    let parsed: ModelRepairReport = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(parsed, report);
+    assert_eq!(
+        prometheos_lite::workflow::model_repair::report_digest(&report),
+        prometheos_lite::workflow::model_repair::report_digest(&parsed)
+    );
+    assert_eq!(report.sealable, parsed.sealable);
+    assert_eq!(report.sealability_reasons, parsed.sealability_reasons);
+    // Re-derivation from the parsed report agrees.
+    let (sealable, reasons) = prometheos_lite::workflow::model_repair::compute_sealability(&parsed);
+    assert_eq!(sealable, parsed.sealable);
+    assert_eq!(reasons, parsed.sealability_reasons);
+}
+
+// SOMA field mapping reports typed gaps without inventing values.
+#[test]
+fn soma_field_mapping_reports_present_rows_and_typed_gaps() {
+    let (temp, rev) = stage_fixture();
+    let worktree = temp.path().to_path_buf();
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let report: ModelRepairReport = runtime.block_on(async {
+        let proposer = ScriptedProposer::with_completions(
+            descriptor(),
+            vec![Ok(completion_with_id(FIX_DIFF, "p-mapping"))],
+        );
+        let spec = repair_spec_with_source(&worktree, &rev);
+        prometheos_lite::workflow::model_repair::run_model_repair(&spec, proposer, None).await
+    });
+    let mapping = report.soma_field_mapping();
+    for row in &mapping {
+        match row.status.as_str() {
+            "present" => assert!(
+                row.value.is_some(),
+                "present row carries value: {}",
+                row.path
+            ),
+            "gap" => {
+                assert!(
+                    row.value.is_none(),
+                    "gap must not carry a value: {}",
+                    row.path
+                );
+                assert!(row.note.is_some(), "gap must carry a reason: {}", row.path);
+            }
+            other => panic!("unknown mapping status {other}"),
+        }
+    }
+    let by_path = |p: &str| mapping.iter().find(|r| r.path == p).expect("row").clone();
+    assert_eq!(by_path("source.issueNumber").status, "present");
+    assert_eq!(by_path("source.issueNumber").value.as_deref(), Some("136"));
+    assert_eq!(by_path("source.repository").status, "present");
+    assert_eq!(by_path("model.providerRunId").status, "present");
+    assert_eq!(
+        by_path("model.providerRunId").value.as_deref(),
+        Some("p-mapping")
+    );
+    assert_eq!(by_path("model.harness").status, "present");
+    assert_eq!(by_path("provenance").status, "present");
+    assert_eq!(by_path("events").status, "present");
+    assert_eq!(by_path("workspace").status, "present");
+    assert_eq!(by_path("patch").status, "present");
+    assert_eq!(by_path("validation").status, "present");
+    assert_eq!(by_path("runDigest").status, "present");
+}
+
+#[test]
+fn soma_field_mapping_reports_gaps_without_fabrication() {
+    let (temp, rev) = stage_fixture();
+    let worktree = temp.path().to_path_buf();
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let report: ModelRepairReport = runtime.block_on(async {
+        let proposer = ScriptedProposer::new(descriptor(), vec![Ok(FIX_DIFF.to_string())]);
+        let spec = repair_spec_with_source(&worktree, &rev);
+        prometheos_lite::workflow::model_repair::run_model_repair(&spec, proposer, None).await
+    });
+    let mapping = report.soma_field_mapping();
+    let by_path = |p: &str| mapping.iter().find(|r| r.path == p).expect("row").clone();
+    // No provider id was exposed: the row is a typed gap, never synthesized.
+    assert_eq!(by_path("model.providerRunId").status, "gap");
+    assert_eq!(by_path("model.providerRunId").value, None);
+    assert_eq!(by_path("runDigest").status, "gap");
+    assert_eq!(by_path("runDigest").value, None);
+}
+
+// Full mapping with unconfigured source reports every gap honestly.
+#[test]
+fn soma_field_mapping_with_unconfigured_source_reports_all_gaps() {
+    let (temp, rev) = stage_fixture();
+    let worktree = temp.path().to_path_buf();
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let report: ModelRepairReport = runtime.block_on(async {
+        let proposer = ScriptedProposer::new(descriptor(), vec![Ok(FIX_DIFF.to_string())]);
+        let spec = repair_spec(&worktree, &rev);
+        prometheos_lite::workflow::model_repair::run_model_repair(&spec, proposer, None).await
+    });
+    let mapping = report.soma_field_mapping();
+    let by_path = |p: &str| mapping.iter().find(|r| r.path == p).expect("row").clone();
+    assert_eq!(by_path("source.issueNumber").status, "gap");
+    assert_eq!(by_path("source.repository").status, "gap");
+    assert_eq!(by_path("source.repositoryRevision").status, "gap");
+    assert_eq!(by_path("model.providerRunId").status, "gap");
+    assert_eq!(by_path("runDigest").status, "gap");
+}
+
+// Unparseable responses still seal with a unique execution identity.
+#[tokio::test]
+async fn unparseable_responses_and_empty_response_paths_have_identity() {
+    let (temp, rev) = stage_fixture();
+    let worktree = temp.path().to_path_buf();
+    let spec = repair_spec_with_source(&worktree, &rev);
+    let proposer = ScriptedProposer::new(
+        descriptor(),
+        vec![Ok(GARBAGE.to_string()), Ok(FIX_DIFF.to_string())],
+    );
+    let report =
+        prometheos_lite::workflow::model_repair::run_model_repair(&spec, proposer, None).await;
+    assert_eq!(report.status, ModelRepairStatus::Repaired);
+    assert!(report.verify().is_ok());
+    assert_eq!(batch_of(&report).events.len(), 3);
+
+    let (temp2, rev2) = stage_fixture();
+    let worktree2 = temp2.path().to_path_buf();
+    let empty = ScriptedProposer::new(descriptor(), vec![Ok(String::new())]);
+    let report2 = prometheos_lite::workflow::model_repair::run_model_repair(
+        &repair_spec(&worktree2, &rev2),
+        empty,
+        None,
+    )
+    .await;
+    assert_ne!(report2.status, ModelRepairStatus::Repaired);
+    assert!(!report2.execution_id.is_empty());
+    assert!(report2.verify().is_ok());
 }

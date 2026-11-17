@@ -147,6 +147,64 @@ pub struct ModelRepairSpec {
     /// Optional bounded excerpt replacing the full file in the prompt.
     /// When absent, the full repair-target file is sent (small files only).
     pub prompt_context: Option<PromptContext>,
+    /// Operator-configured SOMA source binding (repository + revision +
+    /// optional issue number). Absent unless configured; never derived
+    /// from the model or the task slug.
+    pub source: Option<SomaSourceBinding>,
+}
+
+/// Operator-configured binding of the staged worktree to a tracked
+/// repository and issue. Never derived from the model, the task slug or the
+/// staging path; absent when not configured.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SomaSourceBinding {
+    /// GitHub slug of the source repository (e.g. `prometheosai/prometheos-lite`).
+    pub repository: String,
+    /// Exact commit the staged worktree is pinned to (40/64-hex git sha).
+    pub repository_revision: String,
+    /// The tracked issue this repair is part of, when configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_number: Option<u64>,
+}
+
+/// The model's response plus the provenance observed at the response
+/// boundary. Never contains credentials.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProposedCompletion {
+    /// The model's response text (possibly fenced), post-redaction elsewhere.
+    pub content: String,
+    /// Responder-issued id from the response body's top-level `id`, when the
+    /// configured endpoint exposed one. Absent = the responder did not
+    /// expose one; it is never synthesized locally.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_response_id: Option<String>,
+    /// Provenance source of `provider_response_id`
+    /// (`response-body:id` from the configured harness).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_response_id_source: Option<String>,
+    /// Gateway-issued trace id, when a transport exposes one. The current
+    /// RemoteServiceHarness does not surface headers, so this is absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_trace_id: Option<String>,
+    /// Local request identifier used on the wire (`req-<step>`). Correlation
+    /// only; never provider-issued.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_request_id: Option<String>,
+}
+
+impl ProposedCompletion {
+    /// Test/helper constructor: scripted content without provenance.
+    pub fn with_content(content: impl Into<String>) -> Self {
+        Self {
+            content: content.into(),
+            provider_response_id: None,
+            provider_response_id_source: None,
+            gateway_trace_id: None,
+            local_request_id: None,
+        }
+    }
 }
 
 /// Pinned validator surface (command, argv, what exit code means done).
@@ -198,6 +256,20 @@ pub struct ModelRepairAttempt {
     /// `validator-rejected`, `provider-unavailable`, `dry-run-rejected`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refusal: Option<String>,
+    /// Responder-issued id of the inference this attempt dispatched, when
+    /// the configured endpoint exposed one. Absent = the provider did not
+    /// issue one (never synthesized).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_response_id: Option<String>,
+    /// Provenance source of `provider_response_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_response_id_source: Option<String>,
+    /// Gateway-issued trace id, when the transport exposes one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_trace_id: Option<String>,
+    /// Local request id on the wire (correlation; never provider-issued).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_request_id: Option<String>,
     pub wall_ms: u64,
 }
 
@@ -240,6 +312,13 @@ pub struct ModelRepairReport {
     pub validator: ValidatorSpec,
     pub status: ModelRepairStatus,
     pub attempts: Vec<ModelRepairAttempt>,
+    /// Unique per-execution identity of this run (UUID v4, `exec-<32hex>`).
+    /// Generated at run start; every attempt and every `WorkEvent` of this
+    /// run binds to it. Never derived from task/model/revision.
+    pub execution_id: String,
+    /// Operator-configured SOMA source binding, mirrored from the spec.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<SomaSourceBinding>,
     /// The pre-fix validator run. Present unless a pre-effect setup failure
     /// stopped before the baseline could execute. `ObservedSubprocess` exit
     /// code reproduces the pre-fix failing behavior.
@@ -263,6 +342,15 @@ pub struct ModelRepairReport {
     /// Digest binding the attached `WorkEventBatch` emission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub events_sha256: Option<String>,
+    /// True iff the report carries every field a strict
+    /// `soma.model-coding-run` v1.0.0 envelope requires, without inventing
+    /// values: execution identity, a provider-issued response/run id on the
+    /// sealing attempt, and a configured repository + revision + issue
+    /// binding. Computed at seal time; re-derived at verification.
+    pub sealable: bool,
+    /// Explicit reasons the report is not sealable for the strict path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sealability_reasons: Vec<String>,
 }
 
 impl ModelRepairReport {
@@ -325,8 +413,241 @@ impl ModelRepairReport {
                 return Err("repaired outcome requires tree and diff digests".to_string());
             }
         }
+        // Execution identity is load-bearing: tampering with it must break
+        // verification. Re-derive the bound events digest.
+        if self.execution_id.trim().is_empty() {
+            return Err("missing execution identity (executionId)".to_string());
+        }
+        if let Some(source) = &self.source
+            && !source.repository_revision.trim().is_empty()
+            && source.repository_revision != self.base_revision
+        {
+            return Err(format!(
+                "source repository revision {} does not match the pinned base revision {}",
+                source.repository_revision, self.base_revision
+            ));
+        }
+        let rederived = hex_sha256(&serde_json::to_vec(&batch_of(self)).unwrap_or_default());
+        match &self.events_sha256 {
+            Some(digest) if *digest == rederived => {}
+            Some(_) => {
+                return Err(
+                    "eventsDigest does not match the WorkEventBatch re-derived from this report"
+                        .to_string(),
+                );
+            }
+            None => return Err("missing events digest".to_string()),
+        }
+        let (sealable, reasons) = compute_sealability(self);
+        if sealable != self.sealable || reasons != self.sealability_reasons {
+            return Err("sealability does not match re-derivation from the report".to_string());
+        }
         Ok(())
     }
+}
+
+/// Compute (sealable, reasons) from the report. Deterministic.
+///
+/// `sealable` is true iff the report carries every field a strict
+/// `soma.model-coding-run` v1.0.0 envelope needs *without inventing
+/// values*: execution identity, a provider-issued response/run id on the
+/// sealing attempt, and a configured repository + revision + issue binding.
+/// Nothing else is required of the flag itself; patch/validation detail
+/// appears in [`soma_field_mapping`].
+pub fn compute_sealability(report: &ModelRepairReport) -> (bool, Vec<String>) {
+    let mut reasons = Vec::new();
+    if report.execution_id.trim().is_empty() {
+        reasons.push("missing execution identity (executionId)".to_string());
+    }
+    let source = report.source.as_ref();
+    let repository = source.map(|s| s.repository.trim()).unwrap_or("");
+    if repository.is_empty() {
+        reasons.push(
+            "no configured repository binding (source.repository); a task slug is not a repository"
+                .to_string(),
+        );
+    }
+    let revision = source.map(|s| s.repository_revision.trim()).unwrap_or("");
+    if revision.is_empty() {
+        reasons.push(
+            "no configured repository revision binding (source.repositoryRevision)".to_string(),
+        );
+    }
+    if source.and_then(|s| s.issue_number).is_none() {
+        reasons.push(
+            "no tracked issue identity configured (source.issueNumber); a task slug is not an issue number"
+                .to_string(),
+        );
+    }
+    let sealing = report.attempts.last();
+    let provider_id = sealing
+        .and_then(|a| a.provider_response_id.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if provider_id.is_none() {
+        reasons.push(
+            "the responder did not expose a response/run id on the sealing attempt; not sealable for the strict SOMA provenance path"
+                .to_string(),
+        );
+    }
+    (reasons.is_empty(), reasons)
+}
+
+impl ModelRepairReport {
+    /// SOMA field-level mapping of this report onto the
+    /// `soma.model-coding-run` v1.0.0 envelope fields. Rows with status
+    /// `gap` carry an explicit reason and never a synthesized value.
+    /// This is a derived view; it does not emit the envelope itself.
+    #[must_use]
+    pub fn soma_field_mapping(&self) -> Vec<SomaMappingField> {
+        let mut rows = Vec::new();
+        let source = self.source.as_ref();
+        let present = |path: &str, value: String, note: &str| SomaMappingField {
+            path: path.to_string(),
+            status: "present".to_string(),
+            value: Some(value),
+            note: Some(note.to_string()),
+        };
+        let gap = |path: &str, reason: &str| SomaMappingField {
+            path: path.to_string(),
+            status: "gap".to_string(),
+            value: None,
+            note: Some(reason.to_string()),
+        };
+
+        rows.push(match source.and_then(|s| s.issue_number) {
+            Some(n) => present("source.issueNumber", n.to_string(), "operator-configured; not verified by this module"),
+            None => gap("source.issueNumber", "no tracked issue identity configured; a task slug was not promoted to an issue number"),
+        });
+        rows.push(match source {
+            Some(s) if !s.repository.trim().is_empty() => present(
+                "source.repository",
+                s.repository.clone(),
+                "operator-configured binding; the staged tree's git origin matches this slug at the pinned revision",
+            ),
+            _ => gap("source.repository", "no repository binding configured; a synthetic/temp path is not a repository"),
+        });
+        rows.push(match source {
+            Some(s) if !s.repository_revision.trim().is_empty() => present(
+                "source.repositoryRevision",
+                s.repository_revision.clone(),
+                "git sha; staged tree at this revision verified by the run's pin checks",
+            ),
+            _ => gap(
+                "source.repositoryRevision",
+                "no revision binding configured",
+            ),
+        });
+
+        let sealing = self.attempts.last();
+        match sealing.and_then(|a| a.provider_response_id.as_deref()) {
+            Some(id) => rows.push(present(
+                "model.providerRunId",
+                id.to_string(),
+                sealing
+                    .and_then(|a| a.provider_response_id_source.as_deref())
+                    .unwrap_or("response-body:id"),
+            )),
+            None => rows.push(gap(
+                "model.providerRunId",
+                "the responder did not expose a response/run id; no local hash substitutes for it",
+            )),
+        }
+
+        rows.push(present(
+            "model.harness",
+            format!("{}@{}", self.model.harness_id, self.model.harness_revision),
+            "harness identity recorded from the harness registration, never from the model",
+        ));
+
+        let provider_note = match sealing.and_then(|a| a.provider_response_id.as_ref()) {
+            Some(_) => "lite-observed-run, modelAuthoredClaim: true, providerRunId present",
+            None => {
+                "lite-observed-run, modelAuthoredClaim: true, providerRunId absent — provenance not sealable for the strict path"
+            }
+        };
+        rows.push(present(
+            "provenance",
+            "lite-observed-run".to_string(),
+            provider_note,
+        ));
+
+        rows.push(match self.events_sha256 {
+            Some(ref digest) => present(
+                "events",
+                format!("WorkEventBatch 1.3.0, {} events, sha256 {}", self.attempts.len() + 1, digest),
+                "every event binds to executionId; replay preserves the identity; duplicates share the same ids",
+            ),
+            None => gap("events", "no events emission sealed"),
+        });
+
+        rows.push(match self.final_tree_digest {
+            Some(ref digest) => present(
+                "workspace",
+                format!("sha256 {digest}"),
+                "staged git worktree behind the pinned revision; writable scope limited to the repair target",
+            ),
+            None => gap("workspace", "pre-effect pin failure; workspace digest unavailable"),
+        });
+
+        rows.push(match self.final_diff_sha256 {
+            Some(ref digest) => present(
+                "patch",
+                format!("sha256 {digest}"),
+                "model-authored diff artifact; sealed and redacted",
+            ),
+            None => gap(
+                "patch",
+                "no accepted patch (run is not in a repaired outcome)",
+            ),
+        });
+
+        rows.push(match self.baseline_validator {
+            Some(ref receipt) => present(
+                "validation",
+                format!(
+                    "pinned validator, baseline exit {:?}, final attempt provenance {:?}",
+                    receipt.exit_code,
+                    self.attempts
+                        .last()
+                        .and_then(|a| a.validator.as_ref())
+                        .map(|v| format!("{:?}", v.provenance))
+                        .unwrap_or_else(|| "none".to_string())
+                ),
+                "validator receipts re-derived at verification; ObservedSubprocess required for repaired",
+            ),
+            None => gap("validation", "baseline validator receipt missing"),
+        });
+
+        let run_digest = if self.sealable {
+            present(
+                "runDigest",
+                "eligible for emission; envelope not emitted by this module".to_string(),
+                "sealable: every required field is present without invented values; the consumer recomputes runDigest",
+            )
+        } else {
+            gap(
+                "runDigest",
+                "not eligible: the report is not sealable; an envelope emitted from it would be invalid",
+            )
+        };
+        rows.push(run_digest);
+
+        rows
+    }
+}
+
+/// One row of the SOMA field mapping (see [`ModelRepairReport::soma_field_mapping`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SomaMappingField {
+    pub path: String,
+    /// `present` or `gap`.
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// Deterministic digest of the worktree tree (paths and blob ids; `.git`
@@ -407,23 +728,41 @@ pub trait ModelProposer {
     /// The descriptor recorded in the report (no credentials, ever).
     fn descriptor(&self) -> ModelDescriptor;
     /// Issue one proposal. The prompt is already bounded and redacted.
-    fn propose(&mut self, prompt: &str) -> Result<String, ModelProposeError>;
+    /// The returned [`ProposedCompletion`] carries whatever provider
+    /// provenance the response boundary observed — possibly none.
+    fn propose(&mut self, prompt: &str) -> Result<ProposedCompletion, ModelProposeError>;
 }
 
 /// Deterministic in-process scripted proposer for the hermetic suite.
 /// **Not** a stand-in for a live model run; it exists so the repair loop
 /// can be verified end to end offline.
 pub struct ScriptedProposer {
-    responses: std::collections::VecDeque<Result<String, ModelProposeError>>,
+    responses: std::collections::VecDeque<Result<ProposedCompletion, ModelProposeError>>,
     descriptor: ModelDescriptor,
     /// Every prompt observed by the double, in order.
     pub prompts: Vec<String>,
 }
 
 impl ScriptedProposer {
+    /// Scripted raw-string responses without provider provenance (content
+    /// only). Convenience wrapper for the common case.
     pub fn new(
         descriptor: ModelDescriptor,
         responses: Vec<Result<String, ModelProposeError>>,
+    ) -> Self {
+        Self::with_completions(
+            descriptor,
+            responses
+                .into_iter()
+                .map(|r| r.map(ProposedCompletion::with_content))
+                .collect(),
+        )
+    }
+
+    /// Scripted completions with full provider provenance control.
+    pub fn with_completions(
+        descriptor: ModelDescriptor,
+        responses: Vec<Result<ProposedCompletion, ModelProposeError>>,
     ) -> Self {
         Self {
             responses: responses.into(),
@@ -438,7 +777,7 @@ impl ModelProposer for ScriptedProposer {
         self.descriptor.clone()
     }
 
-    fn propose(&mut self, prompt: &str) -> Result<String, ModelProposeError> {
+    fn propose(&mut self, prompt: &str) -> Result<ProposedCompletion, ModelProposeError> {
         self.prompts.push(prompt.to_string());
         self.responses
             .pop_front()
@@ -721,6 +1060,7 @@ pub async fn run_model_repair(
     cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> ModelRepairReport {
     let started = Instant::now();
+    let execution_id = format!("exec-{}", uuid::Uuid::new_v4().simple());
     let mut report = ModelRepairReport {
         schema_version: MODEL_REPAIR_REPORT_SCHEMA.to_string(),
         kind: "model-authored-repair".to_string(),
@@ -732,6 +1072,8 @@ pub async fn run_model_repair(
         validator: spec.validator.clone(),
         status: ModelRepairStatus::SetupError,
         attempts: Vec::new(),
+        execution_id,
+        source: spec.source.clone(),
         baseline_validator: None,
         final_tree_digest: None,
         final_diff_sha256: None,
@@ -740,6 +1082,8 @@ pub async fn run_model_repair(
         wall_ms: 0,
         sealed_at: String::new(),
         events_sha256: None,
+        sealable: false,
+        sealability_reasons: Vec::new(),
     };
 
     // ---- Preflight pins: the staged target must match the pin exactly.
@@ -749,7 +1093,7 @@ pub async fn run_model_repair(
             report.attempts.push(setup_refusal(&reason));
             report.wall_ms = started.elapsed().as_millis() as u64;
             report.sealed_at = rfc3339_now();
-            return report;
+            return sealed_return(report);
         }
     };
     let target_bytes = match std::fs::read(&target_path) {
@@ -760,7 +1104,7 @@ pub async fn run_model_repair(
             )));
             report.wall_ms = started.elapsed().as_millis() as u64;
             report.sealed_at = rfc3339_now();
-            return report;
+            return sealed_return(report);
         }
     };
     let pinned_digest = hex_sha256(&target_bytes);
@@ -771,7 +1115,7 @@ pub async fn run_model_repair(
         )));
         report.wall_ms = started.elapsed().as_millis() as u64;
         report.sealed_at = rfc3339_now();
-        return report;
+        return sealed_return(report);
     }
     match tree_digest(&spec.worktree) {
         Ok(tree) if tree == spec.workspace_fingerprint => {}
@@ -782,13 +1126,13 @@ pub async fn run_model_repair(
             )));
             report.wall_ms = started.elapsed().as_millis() as u64;
             report.sealed_at = rfc3339_now();
-            return report;
+            return sealed_return(report);
         }
         Err(reason) => {
             report.attempts.push(setup_refusal(&reason));
             report.wall_ms = started.elapsed().as_millis() as u64;
             report.sealed_at = rfc3339_now();
-            return report;
+            return sealed_return(report);
         }
     }
 
@@ -835,8 +1179,7 @@ pub async fn run_model_repair(
             report.sealed_at = rfc3339_now();
             report.prompt_bytes_total = total_prompt_bytes;
             report.final_tree_digest = tree_digest(&spec.worktree).ok();
-            seal_report(&mut report);
-            return report;
+            return sealed_return(report);
         }
         if total_prompt_bytes >= MAX_PROMPT_BYTES_TOTAL {
             report.attempts.push(attempt_refusal(
@@ -905,23 +1248,35 @@ pub async fn run_model_repair(
                     rolled_back: false,
                     validator: None,
                     refusal: Some(refusal.to_string()),
+                    provider_response_id: None,
+                    provider_response_id_source: None,
+                    gateway_trace_id: None,
+                    local_request_id: None,
                     wall_ms: attempt_started.elapsed().as_millis() as u64,
                 });
                 report.status = status;
                 break;
             }
-            Ok(text) => {
+            Ok(completion) => {
+                let provider_response_id = completion.provider_response_id.clone();
+                let provider_response_id_source = completion.provider_response_id_source.clone();
+                let gateway_trace_id = completion.gateway_trace_id.clone();
+                let local_request_id = completion.local_request_id.clone();
+                let text = completion.content;
                 let bounded: String = if text.len() > MAX_RESPONSE_BYTES {
                     text.chars().take(MAX_RESPONSE_BYTES).collect()
                 } else {
                     text
                 };
+                // Evidence records only the redacted artifact; the raw
+                // provider text never reaches the report.
+                let bounded = redact(&bounded);
                 let response_sha = hex_sha256(bounded.as_bytes());
                 let response_bytes = bounded.len() as u64;
                 let response_excerpt = bounded.chars().take(MAX_DIFF_BYTES).collect::<String>();
 
                 // Parse + authorize (only the pinned repair target).
-                let edits = parse_edit_response(fence_strip(&redact(&bounded)));
+                let edits = parse_edit_response(fence_strip(&bounded));
                 let edits = match edits {
                     Ok(edits) if !edits.is_empty() => edits,
                     Ok(_) => {
@@ -937,6 +1292,10 @@ pub async fn run_model_repair(
                             rolled_back: false,
                             validator: None,
                             refusal: Some("unparseable-proposal".to_string()),
+                            provider_response_id: provider_response_id.clone(),
+                            provider_response_id_source: provider_response_id_source.clone(),
+                            gateway_trace_id: gateway_trace_id.clone(),
+                            local_request_id: local_request_id.clone(),
                             wall_ms: attempt_started.elapsed().as_millis() as u64,
                         });
                         feedback = Some(
@@ -958,6 +1317,10 @@ pub async fn run_model_repair(
                             rolled_back: false,
                             validator: None,
                             refusal: Some("unparseable-proposal".to_string()),
+                            provider_response_id: provider_response_id.clone(),
+                            provider_response_id_source: provider_response_id_source.clone(),
+                            gateway_trace_id: gateway_trace_id.clone(),
+                            local_request_id: local_request_id.clone(),
                             wall_ms: attempt_started.elapsed().as_millis() as u64,
                         });
                         feedback = Some(format!(
@@ -982,6 +1345,10 @@ pub async fn run_model_repair(
                                 rolled_back: false,
                                 validator: None,
                                 refusal: Some("unauthorized-proposal".to_string()),
+                                provider_response_id: provider_response_id.clone(),
+                                provider_response_id_source: provider_response_id_source.clone(),
+                                gateway_trace_id: gateway_trace_id.clone(),
+                                local_request_id: local_request_id.clone(),
                                 wall_ms: attempt_started.elapsed().as_millis() as u64,
                             });
                             report.status = ModelRepairStatus::UnauthorizedProposal;
@@ -1013,6 +1380,10 @@ pub async fn run_model_repair(
                             rolled_back: false,
                             validator: None,
                             refusal: Some(format!("dry-run-rejected: {reason}")),
+                            provider_response_id: provider_response_id.clone(),
+                            provider_response_id_source: provider_response_id_source.clone(),
+                            gateway_trace_id: gateway_trace_id.clone(),
+                            local_request_id: local_request_id.clone(),
                             wall_ms: attempt_started.elapsed().as_millis() as u64,
                         });
                         feedback = Some(format!(
@@ -1034,6 +1405,10 @@ pub async fn run_model_repair(
                             rolled_back: false,
                             validator: None,
                             refusal: Some(format!("dry-run-refused: {reason}")),
+                            provider_response_id: provider_response_id.clone(),
+                            provider_response_id_source: provider_response_id_source.clone(),
+                            gateway_trace_id: gateway_trace_id.clone(),
+                            local_request_id: local_request_id.clone(),
                             wall_ms: attempt_started.elapsed().as_millis() as u64,
                         });
                         feedback = Some(format!("patch preflight refused: {reason}"));
@@ -1058,6 +1433,10 @@ pub async fn run_model_repair(
                             rolled_back: false,
                             validator: None,
                             refusal: Some(format!("apply-refused: {reason}")),
+                            provider_response_id: provider_response_id.clone(),
+                            provider_response_id_source: provider_response_id_source.clone(),
+                            gateway_trace_id: gateway_trace_id.clone(),
+                            local_request_id: local_request_id.clone(),
                             wall_ms: attempt_started.elapsed().as_millis() as u64,
                         });
                         feedback = Some(format!("patch application refused: {reason}"));
@@ -1103,6 +1482,10 @@ pub async fn run_model_repair(
                     } else {
                         Some("validator-rejected".to_string())
                     },
+                    provider_response_id: provider_response_id.clone(),
+                    provider_response_id_source: provider_response_id_source.clone(),
+                    gateway_trace_id: gateway_trace_id.clone(),
+                    local_request_id: local_request_id.clone(),
                     wall_ms: attempt_started.elapsed().as_millis() as u64,
                 });
                 if ok {
@@ -1183,6 +1566,10 @@ fn setup_refusal(reason: &str) -> ModelRepairAttempt {
         rolled_back: true,
         validator: None,
         refusal: Some(format!("setup-error: {reason}")),
+        provider_response_id: None,
+        provider_response_id_source: None,
+        gateway_trace_id: None,
+        local_request_id: None,
         wall_ms: 0,
     }
 }
@@ -1200,6 +1587,10 @@ fn attempt_refusal(attempt: u32, class: &str) -> ModelRepairAttempt {
         rolled_back: false,
         validator: None,
         refusal: Some(class.to_string()),
+        provider_response_id: None,
+        provider_response_id_source: None,
+        gateway_trace_id: None,
+        local_request_id: None,
         wall_ms: 0,
     }
 }
@@ -1207,6 +1598,15 @@ fn attempt_refusal(attempt: u32, class: &str) -> ModelRepairAttempt {
 fn seal_report(report: &mut ModelRepairReport) {
     let events = batch_of(report);
     report.events_sha256 = Some(hex_sha256(&serde_json::to_vec(&events).unwrap_or_default()));
+    let (sealable, reasons) = compute_sealability(report);
+    report.sealable = sealable;
+    report.sealability_reasons = reasons;
+}
+
+/// Seal and return on early-exit paths.
+fn sealed_return(mut report: ModelRepairReport) -> ModelRepairReport {
+    seal_report(&mut report);
+    report
 }
 
 trait ModelRepairStatusExt {
@@ -1275,11 +1675,9 @@ fn redact(text: &str) -> String {
 /// SOMA verification (`soma_validate::event::WorkEventBatch::audit`).
 #[must_use]
 pub fn batch_of(report: &ModelRepairReport) -> WorkEventBatch {
-    let run_seed = format!(
-        "{}:{}:{}",
-        report.task_id, report.base_revision, report.model.model
-    );
-    let run_id = hex_sha256(run_seed.as_bytes());
+    // Per-execution identity: every event of this run binds to it; repeated
+    // executions of the same task/model/revision never share one.
+    let run_id = report.execution_id.clone();
     let actor = Actor {
         kind: ActorKind::Model,
         identity: report.model.model.clone(),
@@ -1306,6 +1704,15 @@ pub fn batch_of(report: &ModelRepairReport) -> WorkEventBatch {
                 ),
             ),
             ("applied".to_string(), json!(attempt.applied)),
+            (
+                "providerResponseId".to_string(),
+                json!(
+                    attempt
+                        .provider_response_id
+                        .clone()
+                        .unwrap_or_else(|| "absent".to_string())
+                ),
+            ),
             (
                 "validatorExit".to_string(),
                 attempt
