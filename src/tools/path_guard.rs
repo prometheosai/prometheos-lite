@@ -20,8 +20,12 @@ impl PathGuard {
     /// Rules:
     /// - No absolute paths
     /// - No `..` traversal
-    /// - No symlink escape
-    /// - Canonical final path must remain inside base directory
+    /// - No symlink escape (including the final component and every ancestor)
+    /// - Canonical resolved path must remain inside the base directory
+    ///
+    /// Non-existent targets are supported: the deepest existing ancestor is
+    /// canonicalized and checked instead, so nested fresh-directory writes
+    /// are not rejected merely because the parent does not exist yet.
     pub fn validate_path(&self, file_path: &str) -> Result<String> {
         // Reject absolute paths (Unix-style)
         if file_path.starts_with('/') {
@@ -41,35 +45,56 @@ impl PathGuard {
             anyhow::bail!("Parent directory traversal (..) not allowed: {}", file_path);
         }
 
+        // Reject NUL and non-printable control characters
+        if file_path.chars().any(|c| c.is_control()) {
+            anyhow::bail!("Control characters not allowed in paths: {:?}", file_path);
+        }
+
         // Ensure base directory exists
         std::fs::create_dir_all(&self.base_dir).context("Failed to create base directory")?;
 
         // Build full path inside base directory
-        let full_path = format!("{}/{}", self.base_dir, file_path);
-
-        // For file creation, canonicalize the parent directory first
-        let parent_path = Path::new(&full_path)
-            .parent()
-            .unwrap_or(Path::new(&self.base_dir));
-
-        let canonical_parent = parent_path
-            .canonicalize()
-            .context("Failed to canonicalize parent directory")?;
-
-        // Ensure canonicalized parent stays inside base directory
         let base_canonical = Path::new(&self.base_dir)
             .canonicalize()
             .context("Failed to canonicalize base directory")?;
+        let full_path = std::path::PathBuf::from(&self.base_dir).join(file_path);
 
-        if !canonical_parent.starts_with(&base_canonical) {
+        // Canonicalize the deepest existing ancestor (which may be the target
+        // itself), and verify it stays inside the canonical base directory.
+        let mut ancestor = full_path.as_path();
+        loop {
+            match ancestor.symlink_metadata() {
+                Ok(_) => break,
+                Err(_) => match ancestor.parent() {
+                    Some(parent) => ancestor = parent,
+                    None => break,
+                },
+            }
+        }
+        let canonical_ancestor = ancestor
+            .canonicalize()
+            .context("Failed to canonicalize ancestor directory")?;
+        if !canonical_ancestor.starts_with(&base_canonical) {
             anyhow::bail!(
                 "Path outside base directory not allowed: {}",
-                canonical_parent.display()
+                canonical_ancestor.display()
+            );
+        }
+
+        // If the final component itself exists (file or symlink), resolve it
+        // too and require it to stay inside the canonical base directory.
+        if let Ok(_) = full_path.symlink_metadata()
+            && let Ok(canonical_full) = full_path.canonicalize()
+            && !canonical_full.starts_with(&base_canonical)
+        {
+            anyhow::bail!(
+                "Path escapes base directory through a symlink: {}",
+                canonical_full.display()
             );
         }
 
         // Return the full path (not canonicalized since file may not exist yet)
-        Ok(full_path)
+        Ok(full_path.to_string_lossy().into_owned())
     }
 
     /// Check if a path is safe without canonicalizing (for pre-validation)
