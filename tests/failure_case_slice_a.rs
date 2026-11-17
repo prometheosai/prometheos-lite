@@ -62,7 +62,7 @@ use prometheos_lite::workflow::failure_replay::{
 };
 use prometheos_lite::workflow::redaction::SECRET_CANARY;
 use prometheos_lite::workflow::scenario::{
-    self, ScenarioOutcomeClass, TaskOutcome, TaskRepairOrigin, fixture_content_digest,
+    ScenarioOutcomeClass, TaskOutcome, TaskRepairOrigin, fixture_content_digest,
 };
 
 mod common;
@@ -216,7 +216,6 @@ fn copy_tree(source: &Path, dest: &Path) {
 /// incidental material that does not participate in the pinned failure.
 struct EnrichedFixture {
     root: PathBuf,
-    rel: String,
 }
 
 impl Drop for EnrichedFixture {
@@ -257,15 +256,7 @@ fn build_enriched_fixture() -> EnrichedFixture {
         "#[test]\nfn sum_is_addition() {\n    assert_eq!(fixture_buggy_sum::sum(2, 2), 4);\n}\n",
     )
     .expect("extra probe written");
-    let rel = scratch
-        .strip_prefix(repo_root())
-        .expect("scratch lives under the repo root")
-        .join("repo")
-        .components()
-        .map(|c| c.as_os_str().to_string_lossy().into_owned())
-        .collect::<Vec<_>>()
-        .join("/");
-    EnrichedFixture { root, rel }
+    EnrichedFixture { root }
 }
 
 fn repo_relative_forward_slash(root: &Path) -> String {
