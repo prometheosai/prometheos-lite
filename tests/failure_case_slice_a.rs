@@ -533,8 +533,8 @@ fn positive_end_to_end_pinned_failure_to_linked_fix() {
 
     // ---- Deterministic re-export: the same failure re-exports byte-for-byte,
     // arming no second effect ----------------------------------------------
-    let case_again = LiteFailureCase::sealed(chain, minimization, &known_secrets())
-        .expect("re-export seals");
+    let case_again =
+        LiteFailureCase::sealed(chain, minimization, &known_secrets()).expect("re-export seals");
     assert_eq!(case.content_digest, case_again.content_digest);
     assert_eq!(
         serde_json::to_string_pretty(&case).expect("serializes"),
