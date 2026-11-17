@@ -178,7 +178,7 @@ pub struct MinimizedReproduction {
 
 impl MinimizedReproduction {
     /// Fail-closed internal consistency check. `baseline_digest` is the
-    /// chain-pinned baseline the minimization must have started from.
+    /// chain-pinned baseline the minimized reproduction must reproduce under.
     pub fn validate(&self, baseline_digest: &str) -> Vec<String> {
         let mut defects = Vec::new();
         macro_rules! check_path {
