@@ -24,6 +24,7 @@ pub mod execution_graph;
 pub mod execution_harness;
 pub mod external_subject_harness;
 pub mod failure_case;
+pub mod failure_case_variants;
 pub mod failure_replay;
 pub mod governance;
 pub mod governance_compiler;
