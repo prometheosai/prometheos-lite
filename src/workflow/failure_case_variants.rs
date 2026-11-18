@@ -240,6 +240,33 @@ fn class_of(class: FailureReplayClass) -> &'static str {
     class.as_str()
 }
 
+/// Derive the failure signature pinned by the sealed case. Every field
+/// comes from the case's own pins — never from an ad hoc caller value.
+fn signature_from_case(case: &LiteFailureCase) -> FailureSignature {
+    FailureSignature {
+        validator_command: case.validator.command.clone(),
+        validator_args: case.validator.args.clone(),
+        validator_exit_code: case.validator.exit_code,
+        task_outcome: case.task_outcome,
+        classification: case.classification,
+        failure_class: case.failure_class,
+    }
+}
+
+/// Fail closed when the caller-supplied signature is not exactly the
+/// case's pinned failure evidence. The builder refuses otherwise, so a
+/// matrix for case A can never classify observations taken from an
+/// unrelated failure B.
+fn ensure_signature_matches_case(case: &LiteFailureCase, failure: &FailureSignature) -> Result<()> {
+    let derived = signature_from_case(case);
+    anyhow::ensure!(
+        derived == *failure,
+        "supplied failure signature does not match the case's pinned failure evidence \
+         (command/argv/exit/outcome/classification/failure class); refusing to build a matrix bound to the wrong failure"
+    );
+    Ok(())
+}
+
 impl ExpectedSignatureSummary {
     fn from_failure(expected: &FailureSignature) -> Self {
         Self {
@@ -321,6 +348,9 @@ pub fn classify_variant(
             } else if observed.task_outcome == Some(case.expected_result.task_outcome)
                 && observed.classification == Some(case.expected_result.classification)
                 && observed.validator_exit_code == Some(case.expected_result.validator_exit_code)
+                && observed.validator_command.as_deref()
+                    == Some(expected.validator_command.as_str())
+                && observed.validator_args == expected.validator_args
             {
                 VariantVerdict::RepairedFixObserved
             } else {
@@ -366,6 +396,13 @@ pub fn build_variant_matrix(
     failure: &FailureSignature,
     inputs: &[FailureCaseVariantReplayInput],
 ) -> Result<FailureCaseVariantMatrix> {
+    // Fail closed on an unsealed or tampered case, exactly like the
+    // dedup entry point.
+    case.verify()
+        .context("variant matrix builder refuses an unsealed or tampered failure case")?;
+    // Bind the supplied signature to the case's actual pinned failure.
+    ensure_signature_matches_case(case, failure)?;
+
     let mut seen = std::collections::BTreeSet::new();
     let mut replays = Vec::with_capacity(inputs.len());
     for input in inputs {
