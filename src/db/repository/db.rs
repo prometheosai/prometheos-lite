@@ -355,66 +355,32 @@ pub(crate) fn migrate_work_context_events_seq(conn: &Connection) -> anyhow::Resu
         .context("Failed to inspect work_context_events schema")?;
     if !has_seq {
         // Backfill must preserve every legacy row, including any event
-        // whose parent context row is absent (foreign-key enforcement
-        // varies by environment: the `bundled` rusqlite build enforces
-        // FKs, so a plain INSERT...SELECT would fail the migration on
-        // orphans instead of preserving them). Disable enforcement for
-        // the copy and restore the previous setting afterwards.
-        let fk_on: i64 = conn
-            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
-            .context("Failed to read foreign_keys pragma")?;
-        // Deterministic retry cleanup: any prior failed run may have
-        // left a straggler `_new` table; drop it before retrying the
-        // copy so the retry is non-retryable-state-free.
-        conn.execute("DROP TABLE IF EXISTS work_context_events_new", [])
-            .context("Failed to drop prior migration attempt's work_context_events_new")?;
-        if fk_on != 0 {
-            conn.execute("PRAGMA foreign_keys=OFF", [])
-                .context("Failed to suspend foreign_keys pragma")?;
-        }
-        // Atomic migration: a rusqlite transaction wraps
-        // create/copy/drop/rename. On error the transaction object's
-        // Drop issues ROLLBACK, so a failed migration leaves the
-        // original table fully intact (never an empty table) and the
-        // whole attempt is safely retryable. FK pragma changes are
-        // no-ops inside a transaction per SQLite, so the suspension
-        // above and the restoration below both happen outside it.
-        let migration_result = (|| -> rusqlite::Result<()> {
-            let tx = conn.unchecked_transaction()?;
-            tx.execute_batch(
-                    "CREATE TABLE work_context_events_new (
-                         seq INTEGER PRIMARY KEY AUTOINCREMENT,
-                         id TEXT UNIQUE NOT NULL,
-                         work_context_id TEXT NOT NULL,
-                         event_type TEXT NOT NULL,
-                         data TEXT NOT NULL,
-                         created_at TEXT NOT NULL,
-                         FOREIGN KEY (work_context_id) REFERENCES work_contexts(id) ON DELETE CASCADE
-                     );
-                     INSERT INTO work_context_events_new
-                         (id, work_context_id, event_type, data, created_at)
-                         SELECT id, work_context_id, event_type, data, created_at
-                         FROM work_context_events ORDER BY rowid ASC;
-                     DROP TABLE work_context_events;
-                     ALTER TABLE work_context_events_new RENAME TO work_context_events;",
-                )?;
-            tx.commit()
-        })();
-        // Guaranteed pragma restoration: runs unconditionally, on every
-        // success AND failure path, before any error is propagated. The
-        // FK setting never leaks out of a failed migration.
-        let restore_result = if fk_on != 0 {
-            Some(
-                conn.execute("PRAGMA foreign_keys=ON", [])
-                    .context("Failed to restore foreign_keys pragma"),
-            )
-        } else {
-            None
-        };
-        migration_result.context("work_context_events migration failed")?;
-        if let Some(restore) = restore_result {
-            restore?;
-        }
+        // whose parent context row is absent. The runner suspends the
+        // foreign_keys pragma around this step's transaction and drops a
+        // straggler `_new` before opening it (SQLite ignores the pragma
+        // inside a transaction), so orphaned events copy cleanly and the
+        // retried copy always starts from a clean slate. The runner's
+        // transaction also wraps the schema_migrations record, so the
+        // rebuild and its ledger entry commit atomically; on error the
+        // original table is left intact.
+        conn.execute_batch(
+            "CREATE TABLE work_context_events_new (
+                 seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                 id TEXT UNIQUE NOT NULL,
+                 work_context_id TEXT NOT NULL,
+                 event_type TEXT NOT NULL,
+                 data TEXT NOT NULL,
+                 created_at TEXT NOT NULL,
+                 FOREIGN KEY (work_context_id) REFERENCES work_contexts(id) ON DELETE CASCADE
+             );
+             INSERT INTO work_context_events_new
+                 (id, work_context_id, event_type, data, created_at)
+                 SELECT id, work_context_id, event_type, data, created_at
+                 FROM work_context_events ORDER BY rowid ASC;
+             DROP TABLE work_context_events;
+             ALTER TABLE work_context_events_new RENAME TO work_context_events;",
+        )
+        .context("work_context_events migration failed")?;
     }
     Ok(())
 }

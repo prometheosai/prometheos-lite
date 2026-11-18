@@ -168,7 +168,31 @@ fn bootstrap_legacy_db(path: &Path, events_ddl: &str, insert_provenance_columns:
 fn fresh_in_memory_db_migrates_to_current_version() {
     let db = Db::in_memory().expect("fresh in-memory db");
     let conn = db.conn();
-    assert_eq!(schema_versions(conn), vec![1, 2, 3, 4, 5, 6]);
+    let recorded: Vec<(i64, String)> = conn
+        .prepare("SELECT version, name FROM schema_migrations ORDER BY version")
+        .expect("ledger query")
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("ledger map")
+        .collect::<rusqlite::Result<Vec<(i64, String)>>>()
+        .expect("ledger collect");
+    let expected: Vec<(i64, String)> = [
+        (1, "baseline_schema"),
+        (2, "work_context_events_seq"),
+        (3, "work_context_events_provenance_columns"),
+        (4, "work_context_events_indexes"),
+        (5, "work_context_events_triggers"),
+        (6, "compatibility_schema"),
+    ]
+    .into_iter()
+    .map(|(v, n)| (v, n.to_string()))
+    .collect();
+    assert_eq!(recorded, expected);
+    assert_eq!(
+        conn.query_row("PRAGMA foreign_keys", [], |row| row.get::<_, i64>(0))
+            .expect("fk pragma"),
+        1,
+        "foreign_keys stays enforced after migration"
+    );
     assert_eq!(user_version(conn), SCHEMA_VERSION);
     assert!(column_names(conn, "work_context_events").contains(&"seq".to_string()));
     assert!(column_names(conn, "work_context_events").contains(&"provenance_json".to_string()));
@@ -312,4 +336,302 @@ fn failing_migration_rolls_back_and_is_retryable() {
         })
         .expect("events after retry");
     assert_eq!(events, 4);
+}
+
+#[test]
+fn future_user_version_is_rejected_and_not_lowered() {
+    let temp = TempDir::new().expect("tempdir");
+    let path = temp.path().join("future.db");
+    bootstrap_legacy_db(&path, modern_events_ddl(), true);
+    let error = {
+        let conn = Connection::open(&path).expect("open fixture");
+        conn.pragma_update(None, "user_version", 99)
+            .expect("stamp future user_version");
+        conn.execute("DROP TABLE IF EXISTS schema_migrations", [])
+            .expect("drop ledger for fixture realism");
+        match Db::new(path.to_str().expect("utf8 path")) {
+            Err(error) => error,
+            Ok(_) => panic!("a database newer than this binary must be refused"),
+        }
+    };
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("user_version 99"),
+        "names the future revision: {message}"
+    );
+    let conn = Connection::open(&path).expect("reopen fixture");
+    assert_eq!(
+        user_version(&conn),
+        99,
+        "older binary must not lower user_version"
+    );
+}
+
+#[test]
+fn unknown_future_migration_version_is_rejected() {
+    let temp = TempDir::new().expect("tempdir");
+    let path = temp.path().join("future-migration.db");
+    bootstrap_legacy_db(&path, modern_events_ddl(), true);
+    {
+        let db = Db::new(path.to_str().expect("utf8 path")).expect("fixture migrates");
+        drop(db);
+    }
+    {
+        let conn = Connection::open(&path).expect("open fixture");
+        conn.execute(
+            "INSERT INTO schema_migrations (version, name, applied_at) VALUES (7, 'future_step', '2027-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("stamp unknown future version");
+    }
+    let error = match Db::new(path.to_str().expect("utf8 path")) {
+        Err(error) => error,
+        Ok(_) => panic!("a version newer than the registry must be refused"),
+    };
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("unknown version 7"),
+        "names the unknown version: {message}"
+    );
+}
+
+#[test]
+fn migration_name_mismatch_is_rejected() {
+    let temp = TempDir::new().expect("tempdir");
+    let path = temp.path().join("name-mismatch.db");
+    bootstrap_legacy_db(&path, modern_events_ddl(), true);
+    {
+        let db = Db::new(path.to_str().expect("utf8 path")).expect("fixture migrates");
+        drop(db);
+    }
+    {
+        let conn = Connection::open(&path).expect("open fixture");
+        conn.execute(
+            "UPDATE schema_migrations SET name = 'bogus' WHERE version = 3",
+            [],
+        )
+        .expect("corrupt recorded name");
+    }
+    let error = match Db::new(path.to_str().expect("utf8 path")) {
+        Err(error) => error,
+        Ok(_) => panic!("a name mismatch must be refused"),
+    };
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("version 3"),
+        "names the mismatched version: {message}"
+    );
+    assert!(
+        message.contains("name mismatch"),
+        "explains the problem: {message}"
+    );
+}
+
+#[test]
+fn invalid_history_gap_is_rejected() {
+    let temp = TempDir::new().expect("tempdir");
+    let path = temp.path().join("history-gap.db");
+    bootstrap_legacy_db(&path, modern_events_ddl(), true);
+    {
+        let db = Db::new(path.to_str().expect("utf8 path")).expect("fixture migrates");
+        drop(db);
+    }
+    {
+        let conn = Connection::open(&path).expect("open fixture");
+        conn.execute("DELETE FROM schema_migrations WHERE version = 3", [])
+            .expect("punch a hole in the ledger");
+    }
+    let error = match Db::new(path.to_str().expect("utf8 path")) {
+        Err(error) => error,
+        Ok(_) => panic!("a gap in the ledger must be refused"),
+    };
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("missing versions [3]"),
+        "names the missing version: {message}"
+    );
+}
+
+#[test]
+fn seq_column_of_wrong_type_is_rejected() {
+    let temp = TempDir::new().expect("tempdir");
+    let path = temp.path().join("seq-wrong-type.db");
+    let conn = Connection::open(&path).expect("open fixture");
+    conn.execute_batch(minimal_work_contexts_ddl())
+        .expect("contexts");
+    conn.execute_batch(
+        "CREATE TABLE work_context_events (
+             seq TEXT PRIMARY KEY,
+             id TEXT NOT NULL,
+             work_context_id TEXT NOT NULL,
+             event_type TEXT NOT NULL,
+             data TEXT NOT NULL,
+             created_at TEXT NOT NULL
+         )",
+    )
+    .expect("corrupt events shape");
+    drop(conn);
+    let error = match Db::new(path.to_str().expect("utf8 path")) {
+        Err(error) => error,
+        Ok(_) => panic!("a non-INTEGER seq cursor must be refused"),
+    };
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("seq") && message.contains("not INTEGER"),
+        "explains the refusal: {message}"
+    );
+}
+
+#[test]
+fn seq_column_missing_primary_key_is_rejected() {
+    let temp = TempDir::new().expect("tempdir");
+    let path = temp.path().join("seq-no-pk.db");
+    let conn = Connection::open(&path).expect("open fixture");
+    conn.execute_batch(minimal_work_contexts_ddl())
+        .expect("contexts");
+    conn.execute_batch(
+        "CREATE TABLE work_context_events (
+             seq INTEGER,
+             id TEXT NOT NULL,
+             work_context_id TEXT NOT NULL,
+             event_type TEXT NOT NULL,
+             data TEXT NOT NULL,
+             created_at TEXT NOT NULL
+         )",
+    )
+    .expect("corrupt events shape");
+    drop(conn);
+    let error = match Db::new(path.to_str().expect("utf8 path")) {
+        Err(error) => error,
+        Ok(_) => panic!("a non-primary-key seq cursor must be refused"),
+    };
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("seq") && message.contains("primary key"),
+        "explains the refusal: {message}"
+    );
+}
+
+#[test]
+fn partial_history_converges_without_data_loss() {
+    let temp = TempDir::new().expect("tempdir");
+    let path = temp.path().join("partial-history.db");
+    bootstrap_legacy_db(&path, modern_events_ddl(), true);
+    {
+        let db = Db::new(path.to_str().expect("utf8 path")).expect("fixture migrates");
+        drop(db);
+    }
+    // Simulate an older binary that had applied v1..v3 but recorded only v1..v3,
+    // then a crash before later steps: delete later steps from the ledger.
+    {
+        let conn = Connection::open(&path).expect("open fixture");
+        conn.execute("DELETE FROM schema_migrations WHERE version >= 4", [])
+            .expect("punch later steps out of the ledger");
+    }
+    let db = Db::new(path.to_str().expect("utf8 path")).expect("partial history converges");
+    let conn = db.conn();
+    assert_eq!(schema_versions(conn), vec![1, 2, 3, 4, 5, 6]);
+    let events: i64 = conn
+        .query_row("SELECT COUNT(*) FROM work_context_events", [], |row| {
+            row.get(0)
+        })
+        .expect("count events");
+    assert_eq!(events, 4);
+}
+
+#[test]
+fn v2_failure_is_atomic_and_fk_is_restored() {
+    let temp = TempDir::new().expect("tempdir");
+    let path = temp.path().join("v2-atomic.db");
+    // Legacy shape without UNIQUE on id and a duplicate id, so the
+    // rebuild's UNIQUE(_new.id) fails deterministically mid-migration.
+    {
+        let conn = Connection::open(&path).expect("open fixture");
+        conn.execute_batch("PRAGMA foreign_keys = OFF;")
+            .expect("fixture fk");
+        conn.execute_batch(
+            "CREATE TABLE work_context_events (
+                 id TEXT,
+                 work_context_id TEXT NOT NULL,
+                 event_type TEXT NOT NULL,
+                 data TEXT NOT NULL,
+                 created_at TEXT NOT NULL
+             );
+             INSERT INTO work_context_events VALUES
+                 ('dup-id', 'ctx-f', 'context_created', '{\"a\":1}', '2026-09-01T00:00:00+00:00'),
+                 ('dup-id', 'ctx-f', 'status_changed', '{\"a\":2}', '2026-09-02T00:00:00+00:00');",
+        )
+        .expect("legacy fixture");
+    }
+    let error = match Db::new(path.to_str().expect("utf8 path")) {
+        Err(error) => error,
+        Ok(_) => panic!("duplicate ids must fail the rebuild"),
+    };
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("migration v2"),
+        "migration v2 is named: {message}"
+    );
+    let conn = Connection::open(&path).expect("reopen fixture");
+    assert_eq!(schema_versions(&conn), vec![1], "only v1 is recorded");
+    let events: i64 = conn
+        .query_row("SELECT COUNT(*) FROM work_context_events", [], |row| {
+            row.get(0)
+        })
+        .expect("original table intact");
+    assert_eq!(events, 2);
+    let stragglers: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'work_context_events_new'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("straggler probe");
+    assert_eq!(stragglers, 0, "no _new table may survive");
+    // Retry with a deduplicated fixture converges; the surviving Db forces
+    // foreign_keys ON and verifies it at open.
+    {
+        let conn = Connection::open(&path).expect("dedupe fixture");
+        conn.execute(
+            "DELETE FROM work_context_events WHERE rowid IN (SELECT MAX(rowid) FROM work_context_events)",
+            [],
+        )
+        .expect("dedupe");
+    }
+    let db = Db::new(path.to_str().expect("utf8 path")).expect("retry converges");
+    assert_eq!(schema_versions(db.conn()), vec![1, 2, 3, 4, 5, 6]);
+    assert_eq!(
+        db.conn()
+            .query_row("PRAGMA foreign_keys", [], |row| row.get::<_, i64>(0))
+            .expect("fk pragma"),
+        1,
+        "foreign_keys stays enforced after a successful open"
+    );
+}
+
+#[test]
+fn orphan_only_legacy_db_rebuilds_events() {
+    let temp = TempDir::new().expect("tempdir");
+    let path = temp.path().join("orphan-only.db");
+    // No work_contexts table at all; journal rows may reference anything.
+    let conn = Connection::open(&path).expect("open fixture");
+    conn.execute_batch("PRAGMA foreign_keys = OFF;")
+        .expect("fixture fk");
+    conn.execute_batch(legacy_events_ddl()).expect("events");
+    conn.execute(
+        "INSERT INTO work_context_events (id, work_context_id, event_type, data, created_at)
+         VALUES ('evt-1', 'ctx-missing', 'context_created', '{\"a\":1}', '2026-09-01T00:00:00+00:00')",
+        [],
+    )
+    .expect("seed orphan");
+    drop(conn);
+    let db = Db::new(path.to_str().expect("utf8 path")).expect("orphan-only fixture migrates");
+    let conn = db.conn();
+    let events: i64 = conn
+        .query_row("SELECT COUNT(*) FROM work_context_events", [], |row| {
+            row.get(0)
+        })
+        .expect("count events");
+    assert_eq!(events, 1, "orphan event preserved");
+    assert_eq!(schema_versions(conn), vec![1, 2, 3, 4, 5, 6]);
 }
