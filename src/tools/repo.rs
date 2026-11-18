@@ -14,6 +14,38 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// True when the leaf exists and its own type is a symlink or junction
+/// (reparse point that can redirect reads/writes through the link).
+fn is_leaf_reparse_point(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|meta| meta.file_type().is_symlink())
+        .unwrap_or(false)
+}
+
+/// Open `full_path` for writing, fail-closed after validation:
+/// - If the leaf exists: refuse when the leaf is a symlink/junction (it could
+///   have been swapped between validation and this call); truncate the file.
+/// - If the leaf does not exist: `create_new` fails if the leaf appeared
+///   (or was swapped in) after validation — no file is created anywhere.
+fn open_write_fail_closed(full_path: &Path) -> Result<std::fs::File> {
+    // Never follow a link that landed at the leaf between validation and this open.
+    if is_leaf_reparse_point(full_path) {
+        anyhow::bail!("leaf is a symlink/junction after validation; refusing to follow the link");
+    }
+    let existed_before = std::fs::symlink_metadata(full_path).is_ok();
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true);
+    if existed_before {
+        opts.truncate(true);
+    } else {
+        // Fresh target: create_new fails if the leaf was created or swapped
+        // in between validation and this call, refusing the effect entirely.
+        opts.create_new(true);
+    }
+    opts.open(full_path)
+        .context("failed to open file for writing")
+}
+
 /// RepoTool trait for repository operations
 pub trait RepoTool: Send + Sync {
     fn name(&self) -> &'static str;
@@ -222,6 +254,14 @@ impl Tool for RepoReadFileTool {
             }));
         }
 
+        // Read-path double-check: refuse if a reparse point appeared at the
+        // leaf between validation and the read effect.
+        if is_leaf_reparse_point(&full_path) {
+            return Ok(serde_json::json!({
+                "error": format!("Leaf is a symlink/junction after validation: {}", full_path.display()),
+                "success": false
+            }));
+        }
         let content = tokio::fs::read_to_string(&full_path)
             .await
             .context("Failed to read file")?;
@@ -447,15 +487,32 @@ impl Tool for WriteFileTool {
 
         let full_path = std::path::PathBuf::from(&safe_path);
 
-        // Create parent directories if they don't exist
+        // Create parent directories if they don't exist. Every segment was
+        // already validated inside the base, so parents created here are
+        // inside the repo by construction.
         if let Some(parent) = full_path.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
                 .context("Failed to create parent directories")?;
         }
 
-        tokio::fs::write(&full_path, content)
-            .await
+        // Fail closed if a reparse point landed at the leaf between
+        // validation and this write: open would follow whatever link landed
+        // there. `create_new` (on fresh leaves) also fails when the name was
+        // swapped in after validation.
+        let writer = match open_write_fail_closed(&full_path) {
+            Ok(file) => file,
+            Err(err) => {
+                return Ok(serde_json::json!({
+                    "error": format!("Fail-closed open refused ({}): {}", full_path.display(), err),
+                    "success": false
+                }));
+            }
+        };
+        use std::io::Write as _;
+        let mut writer = writer;
+        writer
+            .write_all(content.as_bytes())
             .context("Failed to write file")?;
 
         Ok(serde_json::json!({
@@ -564,6 +621,15 @@ impl Tool for PatchFileTool {
             }));
         }
 
+        // Read-path double-check before any effect is attempted.
+        if is_leaf_reparse_point(&full_path) {
+            return Ok(serde_json::json!({
+                "error": format!("Leaf is a symlink/junction after validation: {}", full_path.display()),
+                "success": false,
+                "validation": "failed"
+            }));
+        }
+
         // Read original content
         let original_content = tokio::fs::read_to_string(&full_path)
             .await
@@ -571,13 +637,26 @@ impl Tool for PatchFileTool {
 
         // Apply patch. When system `patch` succeeds, it modifies the file in-place.
         // Only write content ourselves when using the simplified fallback path.
+        // Re-check the leaf immediately before the effect: a link swapped at
+        // the leaf after validation must stop every write path, including
+        // the system-patch branch.
+        if is_leaf_reparse_point(&full_path) {
+            return Ok(serde_json::json!({
+                "error": format!("Leaf is a symlink/junction after validation: {}", full_path.display()),
+                "success": false,
+                "validation": "failed"
+            }));
+        }
         if self.apply_patch_with_system(diff).is_err() {
             if self.allow_fallback {
                 let patched_content = self
                     .apply_patch_simplified(&original_content, diff)
                     .context("Failed to apply patch with fallback")?;
-                tokio::fs::write(&full_path, &patched_content)
-                    .await
+                let mut writer = open_write_fail_closed(&full_path)
+                    .context("Failed to open file for writing")?;
+                use std::io::Write as _;
+                writer
+                    .write_all(patched_content.as_bytes())
                     .context("Failed to write patched file")?;
             } else {
                 anyhow::bail!(

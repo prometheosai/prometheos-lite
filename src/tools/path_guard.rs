@@ -20,8 +20,11 @@ impl PathGuard {
     /// Rules:
     /// - No absolute paths
     /// - No `..` traversal
-    /// - No symlink escape (including the final component and every ancestor)
-    /// - Canonical resolved path must remain inside the base directory
+    /// - No symlink/junction escape (including the final component and every
+    ///   ancestor). Any existing reparse point must resolve, and the resolved
+    ///   target must stay inside the base directory; an unresolvable reparse
+    ///   point is an error, not a safe nonexistence.
+    /// - The normalized resolved path must remain inside the base directory.
     ///
     /// Non-existent targets are supported: the deepest existing ancestor is
     /// canonicalized and checked instead, so nested fresh-directory writes
@@ -30,6 +33,12 @@ impl PathGuard {
         // Reject absolute paths (Unix-style)
         if file_path.starts_with('/') {
             anyhow::bail!("Absolute paths not allowed: {}", file_path);
+        }
+        // Reject Windows-style rooted paths:
+        //  - `\segment` (current-drive rooted, invalid as a repo-relative input)
+        //  - `\\host\share` (UNC)
+        if file_path.starts_with('\\') {
+            anyhow::bail!("Rooted paths are not allowed: {}", file_path);
         }
 
         // Reject Windows-style absolute paths (e.g., C:\)
@@ -53,43 +62,56 @@ impl PathGuard {
         // Ensure base directory exists
         std::fs::create_dir_all(&self.base_dir).context("Failed to create base directory")?;
 
-        // Build full path inside base directory
+        // Build the full path inside base; the guard works with the canonical
+        // base, while this buffer carries the caller's exact join result back.
         let base_canonical = Path::new(&self.base_dir)
             .canonicalize()
             .context("Failed to canonicalize base directory")?;
         let full_path = std::path::PathBuf::from(&self.base_dir).join(file_path);
 
-        // Canonicalize the deepest existing ancestor (which may be the target
-        // itself), and verify it stays inside the canonical base directory.
-        let mut ancestor = full_path.as_path();
-        loop {
-            match ancestor.symlink_metadata() {
-                Ok(_) => break,
-                Err(_) => match ancestor.parent() {
-                    Some(parent) => ancestor = parent,
-                    None => break,
-                },
+        // Resolve every component under the base. An existing reparse point
+        // must resolve strictly inside; a segment whose reparse target cannot
+        // be resolved fails closed instead of being treated as nonexistent.
+        let mut cur = base_canonical.clone();
+        for component in Path::new(file_path).components() {
+            let segment = std::path::PathBuf::from(component.as_os_str());
+            cur = cur.join(&segment);
+            match std::fs::symlink_metadata(&cur) {
+                Ok(meta) => {
+                    if meta.file_type().is_symlink() {
+                        let resolved = cur.canonicalize().with_context(|| {
+                            format!(
+                                "Failed to resolve symlink/junction reference '{}'",
+                                cur.display()
+                            )
+                        })?;
+                        if !resolved.starts_with(&base_canonical) {
+                            anyhow::bail!(
+                                "Path escapes base directory through a symlink: {}",
+                                resolved.display()
+                            );
+                        }
+                        cur = resolved;
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // Fresh segment: no reparse point to follow; continue.
+                }
+                Err(e) => {
+                    anyhow::bail!("Failed to inspect path segment '{}': {e}", cur.display());
+                }
             }
         }
-        let canonical_ancestor = ancestor
-            .canonicalize()
-            .context("Failed to canonicalize ancestor directory")?;
-        if !canonical_ancestor.starts_with(&base_canonical) {
-            anyhow::bail!(
-                "Path outside base directory not allowed: {}",
-                canonical_ancestor.display()
-            );
-        }
 
-        // If the final component itself exists (file or symlink), resolve it
-        // too and require it to stay inside the canonical base directory.
-        if let Ok(_) = full_path.symlink_metadata()
-            && let Ok(canonical_full) = full_path.canonicalize()
-            && !canonical_full.starts_with(&base_canonical)
+        // Every existing component resolved strictly inside the base; the
+        // target itself either exists (and is inside) or does not.
+        let full_parent = full_path.parent().unwrap_or(Path::new(&self.base_dir));
+        if let Ok(canonical_parent) = full_parent.canonicalize()
+            && !canonical_parent.starts_with(&base_canonical)
         {
             anyhow::bail!(
                 "Path escapes base directory through a symlink: {}",
-                canonical_full.display()
+                canonical_parent.display()
             );
         }
 
