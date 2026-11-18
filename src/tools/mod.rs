@@ -17,6 +17,8 @@ pub use interrupt::{InterruptContext, InterruptStatus};
 pub use metadata::ToolMetadata;
 pub use path_guard::PathGuard;
 pub use permissions::{ToolPermission, ToolPolicy};
+#[doc(hidden)] // test support: exercised by tests/security_regression_slice_a.rs
+pub use repo::open_write_fail_closed;
 pub use repo::{
     GitDiffTool, ListTreeTool, PatchFileTool, RepoReadFileTool, RepoTool, SearchFilesTool,
     WriteFileTool,

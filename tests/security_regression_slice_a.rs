@@ -690,19 +690,21 @@ fn junction_or_symlink(source: &Path, target: &Path) -> bool {
             .output();
         if let Ok(out) = out
             && out.status.success()
-            && source.exists()
+            && reparse_entry_present(source)
         {
             return true;
         }
         if target.is_dir() {
             std::os::windows::fs::symlink_dir(target, source).is_ok()
+                && reparse_entry_present(source)
         } else {
             std::os::windows::fs::symlink_file(target, source).is_ok()
+                && reparse_entry_present(source)
         }
     }
     #[cfg(unix)]
     {
-        std::os::unix::fs::symlink(target, source).is_ok()
+        std::os::unix::fs::symlink(target, source).is_ok() && reparse_entry_present(source)
     }
 }
 
@@ -931,10 +933,22 @@ fn security_permission_ledger_curdir_normalization_cannot_escape_grant() {
 // E. Dangling (unresolvable) reparse points and swap-before-effect fail-closed
 // ---------------------------------------------------------------------------
 
+/// Non-dereferencing check: is there a directory entry at `link` and is it a
+/// symlink/junction (reparse point)? Never follows the link target, so a
+/// *dangling* junction is still detected as present.
+fn reparse_entry_present(link: &Path) -> bool {
+    std::fs::symlink_metadata(link)
+        .map(|meta| meta.file_type().is_symlink())
+        .unwrap_or(false)
+}
+
 /// Create a reparse point at `link` targeting `target`. On Windows `mklink /J`
 /// creates a MOUNT_POINT junction to a possibly nonexistent directory (no
 /// elevation); falls back to symlink where permitted. Returns false when
-/// neither is permitted.
+/// neither is permitted — in which case the caller must skip loudly rather
+/// than count the test as evidence. When creation succeeds, the caller MUST
+/// observe `reparse_entry_present(link) == true` and exercise the security
+/// assertions; a successful creation that cannot be observed fails the test.
 fn dangling_reparse(link: &Path, target: &Path) -> bool {
     #[cfg(windows)]
     {
@@ -945,21 +959,29 @@ fn dangling_reparse(link: &Path, target: &Path) -> bool {
             .output();
         if let Ok(out) = out
             && out.status.success()
-            && link.exists()
         {
+            if reparse_entry_present(link) {
+                return true;
+            }
+            // The creation command claimed success but no reparse entry is
+            // observable — treat as failure so the test cannot pass vacuously.
+            eprintln!(
+                "mklink /J reported success but no reparse entry is visible at {}",
+                link.display()
+            );
+            return false;
+        }
+        if std::os::windows::fs::symlink_dir(target, link).is_ok() && reparse_entry_present(link) {
             return true;
         }
-        if std::os::windows::fs::symlink_dir(target, link).is_ok() {
-            return true;
-        }
-        if std::os::windows::fs::symlink_file(target, link).is_ok() {
+        if std::os::windows::fs::symlink_file(target, link).is_ok() && reparse_entry_present(link) {
             return true;
         }
         false
     }
     #[cfg(unix)]
     {
-        std::os::unix::fs::symlink(target, link).is_ok()
+        std::os::unix::fs::symlink(target, link).is_ok() && reparse_entry_present(link)
     }
 }
 
@@ -974,9 +996,16 @@ async fn security_repo_dangling_symlink_final_component_write_and_patch_refused(
     let outside_target = outside.path().join("dangling_victim.txt");
     let link = repo.join("dangling.txt");
     if !dangling_reparse(&link, &outside_target) {
-        eprintln!("SKIP: reparse point creation not permitted on this host");
+        eprintln!(
+            "SKIP: reparse point creation not permitted on this host; security assertions NOT exercised"
+        );
         return;
     }
+    assert!(
+        reparse_entry_present(&link),
+        "successful dangling-junction creation must be observable without dereferencing"
+    );
+    eprintln!("dangling reparse point created; exercising security assertions");
 
     let out = WriteFileTool::new(repo.clone())
         .call(serde_json::json!({"path": "dangling.txt", "content": "owned"}))
@@ -1019,9 +1048,16 @@ async fn security_repo_dangling_ancestor_symlink_read_refused() {
     let nonexistent = outside.path().join("nonexistent_ancestor");
     let link = repo.join("escape");
     if !dangling_reparse(&link, &nonexistent) {
-        eprintln!("SKIP: reparse point creation not permitted on this host");
+        eprintln!(
+            "SKIP: reparse point creation not permitted on this host; security assertions NOT exercised"
+        );
         return;
     }
+    assert!(
+        reparse_entry_present(&link),
+        "successful dangling-junction creation must be observable without dereferencing"
+    );
+    eprintln!("dangling reparse point created; exercising security assertions");
 
     let tool = RepoReadFileTool::new(repo.clone());
     let out = tool
@@ -1038,41 +1074,105 @@ async fn security_repo_dangling_ancestor_symlink_read_refused() {
     );
 }
 
+/// Install a reparse point at `link` that redirects to the *file* `target`.
+/// Prefers a true file symlink (strongest redirect semantics); falls back to
+/// `mklink /J` where symlinks are not permitted. Returns false when neither
+/// is permitted, in which case the caller must skip loudly. On success the
+/// caller can rely on `reparse_entry_present(link) == true`.
+fn swap_leaf_with_file_reparse(link: &Path, target: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        if std::os::windows::fs::symlink_file(target, link).is_ok() && reparse_entry_present(link) {
+            return true;
+        }
+        let out = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output();
+        if let Ok(out) = out
+            && out.status.success()
+            && reparse_entry_present(link)
+        {
+            return true;
+        }
+        false
+    }
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, link).is_ok() && reparse_entry_present(link)
+    }
+}
+
 #[tokio::test]
 async fn security_repo_swap_after_validation_write_fails_closed() {
     let base = tempdir();
     let repo = base.path().join("repo");
     let outside = tempdir();
     std::fs::create_dir_all(&repo).unwrap();
-    std::fs::write(outside.path().join("victim.txt"), "outside-of-repo").unwrap();
-    std::fs::write(repo.join("seed.txt"), "seed").unwrap();
+    let victim = outside.path().join("victim.txt");
+    std::fs::write(&victim, "outside-of-repo").unwrap();
 
     let tool = WriteFileTool::new(repo.clone());
-    // Validate a non-existent path resolves safely inside the repo.
+    // The tool's own validation accepts the fresh target (it does not exist).
     let guard = prometheos_lite::tools::PathGuard::new(repo.to_string_lossy().into_owned());
-    guard
+    let validated = guard
         .validate_path("swapped.txt")
         .expect("a fresh target inside the repo validates");
 
-    // Swap the target with a link to an outside file BEFORE the effect.
+    // The attacker wins the race: AFTER validation, the leaf is swapped for a
+    // reparse point to the outside victim, BEFORE the write effect runs. This
+    // reproduces the exact state the post-validation protection defends.
     let link = repo.join("swapped.txt");
-    if !junction_or_symlink(&link, &outside.path().join("victim.txt")) {
-        eprintln!("SKIP: reparse point creation not permitted on this host");
+    if !swap_leaf_with_file_reparse(&link, &victim) {
+        eprintln!(
+            "SKIP: reparse point creation not permitted on this host; security assertions NOT exercised"
+        );
         return;
     }
+    assert!(
+        reparse_entry_present(&link),
+        "the swapped leaf must be observable as a reparse point after the swap"
+    );
+    eprintln!("leaf swapped to reparse point after validation; exercising security assertions");
 
-    // The effect must fail closed with zero unauthorized side effects.
+    // Defense in depth: the tool's own validation also refuses the swapped
+    // path (first line of defense — but NOT the protection under test here).
     let out = tool
         .call(serde_json::json!({"path": "swapped.txt", "content": "owned"}))
         .await
         .expect("write");
     assert_eq!(
         out["success"], false,
-        "a swap-before-effect must fail closed: {out}"
+        "a swapped path must also fail the tool's validation: {out}"
     );
     assert_eq!(
-        std::fs::read_to_string(outside.path().join("victim.txt")).unwrap(),
+        std::fs::read_to_string(&victim).unwrap(),
         "outside-of-repo",
-        "the outside victim file is untouched by a swap-before-effect write"
+        "the outside victim must be unchanged after the refused call"
+    );
+
+    // The boundary under test: the SAME production fail-closed open that
+    // WriteFileTool calls after validation and before the filesystem effect.
+    // Validation has already happened (above, on the pre-swap state); the leaf
+    // has since been swapped — exactly the post-validation/pre-effect window.
+    let boundary_result =
+        prometheos_lite::tools::open_write_fail_closed(&PathBuf::from(&validated));
+    assert!(
+        boundary_result.is_err(),
+        "the post-validation fail-closed open must refuse the swapped leaf"
+    );
+
+    // No unauthorized filesystem effects: the outside victim is untouched,
+    // the swapped leaf is still the attacker's reparse point (nothing was
+    // written or created), and no regular file appeared in the repo.
+    assert_eq!(
+        std::fs::read_to_string(&victim).unwrap(),
+        "outside-of-repo",
+        "the outside victim file is untouched by the post-validation refusal"
+    );
+    assert!(
+        reparse_entry_present(&link),
+        "the swap must leave no effect behind other than the attacker's own link"
     );
 }

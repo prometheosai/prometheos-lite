@@ -27,7 +27,12 @@ fn is_leaf_reparse_point(path: &Path) -> bool {
 ///   have been swapped between validation and this call); truncate the file.
 /// - If the leaf does not exist: `create_new` fails if the leaf appeared
 ///   (or was swapped in) after validation — no file is created anywhere.
-fn open_write_fail_closed(full_path: &Path) -> Result<std::fs::File> {
+///
+/// Exported `#[doc(hidden)]` so the security regression suite can exercise
+/// the exact post-validation boundary under a controlled swap. Not a public
+/// API contract.
+#[doc(hidden)]
+pub fn open_write_fail_closed(full_path: &Path) -> Result<std::fs::File> {
     // Never follow a link that landed at the leaf between validation and this open.
     if is_leaf_reparse_point(full_path) {
         anyhow::bail!("leaf is a symlink/junction after validation; refusing to follow the link");
