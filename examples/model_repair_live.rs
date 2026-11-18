@@ -626,22 +626,36 @@ async fn main() -> Result<()> {
         evidence_dir.join("work-events.json"),
         serde_json::to_vec_pretty(&batch).context("batch serializes")?,
     )?;
-    if let Some(diff) = &report.final_diff_excerpt {
+    // The FULL diff artifact is persisted for verification. The bounded
+    // excerpt in the report is diagnostic only and is NEVER replayed.
+    if let Some(diff) = &report.final_diff {
         std::fs::write(evidence_dir.join("final.diff"), diff)?;
     }
 
-    // Hidden acceptance: only now, never shown to the model.
+    // Hidden acceptance: only now, never shown to the model. The patch
+    // replayed here is the COMPLETE, digest-bound full diff — never the
+    // truncated excerpt. A missing, truncated or digest-mismatched artifact
+    // refuses the run instead of silently applying a partial patch.
+    let repair_diff = match report.status {
+        ModelRepairStatus::Repaired => {
+            let full = report.final_diff.as_ref().context(
+                "a repaired outcome must carry the complete finalDiff (the excerpt is not a patch)",
+            )?;
+            let digest = prometheos_lite::workflow::model_repair::sha256_hex(full.as_bytes());
+            anyhow::ensure!(
+                report.final_diff_sha256.as_deref() == Some(digest.as_str()),
+                "finalDiff bytes do not match the bound finalDiffSha256; refusing hidden acceptance"
+            );
+            Some(full.clone())
+        }
+        _ => None,
+    };
     let hidden = hidden_acceptance(
         Path::new(manifest_dir),
         &base_sha,
         HIDDEN_SHA,
         HIDDEN_TEST,
-        if report.status == ModelRepairStatus::Repaired {
-            report.final_diff_excerpt.clone()
-        } else {
-            None
-        }
-        .as_deref(),
+        repair_diff.as_deref(),
         &work.path().join("overlay-check"),
     )?;
     std::fs::write(
