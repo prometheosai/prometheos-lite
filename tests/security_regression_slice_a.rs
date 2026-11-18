@@ -672,3 +672,257 @@ fn security_frontend_build_config_carries_no_executable_payload() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// D. Junction reparse points, normalization and ledger boundary hardening
+// ---------------------------------------------------------------------------
+
+/// Create a junction on Windows (MOUNT_POINT reparse point; no elevation
+/// required) or a symlink elsewhere. Returns false when neither is
+/// permitted, in which case the caller must skip, not fabricate.
+fn junction_or_symlink(source: &Path, target: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        let out = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(source)
+            .arg(target)
+            .output();
+        if let Ok(out) = out
+            && out.status.success()
+            && source.exists()
+        {
+            return true;
+        }
+        if target.is_dir() {
+            std::os::windows::fs::symlink_dir(target, source).is_ok()
+        } else {
+            std::os::windows::fs::symlink_file(target, source).is_ok()
+        }
+    }
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, source).is_ok()
+    }
+}
+
+fn repo_with_escaping_junction() -> Option<(tempfile::TempDir, tempfile::TempDir, PathBuf)> {
+    let base = tempdir();
+    let repo = base.path().join("repo");
+    let outside = tempdir();
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::write(outside.path().join("victim.txt"), "outside-of-repo").unwrap();
+    let link = repo.join("escape");
+    if !junction_or_symlink(&link, outside.path()) {
+        eprintln!("SKIP: junction creation not permitted on this host");
+        return None;
+    }
+    let victim_path = outside.path().join("victim.txt");
+    Some((base, outside, victim_path))
+}
+
+#[tokio::test]
+async fn security_repo_junction_read_write_patch_refused() {
+    let Some((base, _outside, victim_path)) = repo_with_escaping_junction() else {
+        return; // environment cannot build a junction; see SKIP log
+    };
+    let repo = base.path().join("repo");
+
+    let out = RepoReadFileTool::new(repo.clone())
+        .call(serde_json::json!({"path": "escape/victim.txt"}))
+        .await
+        .expect("read");
+    assert_eq!(
+        out["success"], false,
+        "junction read must be refused: {out}"
+    );
+    assert!(!out.to_string().contains("outside-of-repo"));
+
+    let out = WriteFileTool::new(repo.clone())
+        .call(serde_json::json!({"path": "escape/evil.txt", "content": "owned"}))
+        .await
+        .expect("write");
+    assert_eq!(
+        out["success"], false,
+        "junction write must be refused: {out}"
+    );
+
+    let out = PatchFileTool::new(repo)
+        .call(serde_json::json!({
+            "path": "escape/victim.txt",
+            "diff": "--- a/escape/victim.txt\n+++ b/escape/victim.txt\n@@ -1 +1 @@\n-outside-of-repo\n+owned\n"
+        }))
+        .await
+        .expect("patch");
+    assert_eq!(
+        out["success"], false,
+        "junction patch must be refused: {out}"
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(&victim_path).unwrap(),
+        "outside-of-repo",
+        "the outside victim file is untouched through the junction"
+    );
+}
+
+#[tokio::test]
+async fn security_repo_junction_list_and_search_skip() {
+    let Some((base, _outside, _victim)) = repo_with_escaping_junction() else {
+        return; // environment cannot build a junction; see SKIP log
+    };
+    let repo = base.path().join("repo");
+
+    let out = ListTreeTool::new(repo.clone())
+        .call(serde_json::json!({"root": ""}))
+        .await
+        .expect("list tree");
+    let out_s = out.to_string();
+    assert!(
+        !out_s.contains("victim.txt"),
+        "junction contents must not be listed: {out}"
+    );
+
+    let out = SearchFilesTool::new(repo)
+        .call(serde_json::json!({"query": "outside-of-repo"}))
+        .await
+        .expect("search");
+    assert_eq!(
+        out["count"].as_u64().unwrap_or(1),
+        0,
+        "junction contents must not be read: {out}"
+    );
+}
+
+#[test]
+fn security_path_guard_rooted_and_drive_relative_shapes_refused() {
+    use prometheos_lite::tools::PathGuard;
+    let base = tempdir();
+    let guard = PathGuard::new(base.path().to_string_lossy().to_string());
+    for hostile in [
+        r"\rooted-segment",
+        r"C:\absolute\path",
+        r"C:/absolute/path",
+        r"C:drive-relative",
+        r"\\invalid-host-zz\share\file.txt",
+        r"/absolute/unix",
+        "..\\escape.txt",
+        "a/../../escape.txt",
+    ] {
+        assert!(
+            guard.validate_path(hostile).is_err(),
+            "rooted/traversal shape must be refused: {hostile:?}"
+        );
+    }
+    // Dot segments inside the repo are legitimate.
+    assert!(guard.validate_path("./nested/fresh.txt").is_ok());
+    assert!(guard.validate_path("nested/./fresh.txt").is_ok());
+    assert!(guard.validate_path("nested/fresh.txt").is_ok());
+}
+
+#[test]
+fn security_permission_ledger_sibling_prefix_is_not_granted() {
+    let mut ledger = PermissionLedger::new();
+    ledger.grant(PermissionGrant {
+        permission: Permission::Write,
+        scope: PermissionScope::Directory,
+        path: Some(PathBuf::from("repo/src")),
+        pattern: None,
+        allow: true,
+        reason: "directory grant".to_string(),
+    });
+    // A sibling that merely shares the string prefix must not be covered.
+    for hostile in ["repo/src2/main.rs", "repo/src-evil/main.rs", "repo/srcxyz"] {
+        let result = ledger.check(Permission::Write, Path::new(hostile));
+        assert!(
+            !result.granted,
+            "sibling prefix must not be granted: {hostile}"
+        );
+    }
+    // Component boundary: the grant covers the directory and its children.
+    assert!(
+        ledger
+            .check(Permission::Write, Path::new("repo/src/main.rs"))
+            .granted
+    );
+    assert!(
+        ledger
+            .check(Permission::Write, Path::new("repo/src/deep/nested.rs"))
+            .granted
+    );
+    assert!(
+        ledger
+            .check(Permission::Write, Path::new("repo/src"))
+            .granted
+    );
+}
+
+#[test]
+fn security_permission_ledger_deny_wins_regardless_of_grant_order() {
+    for deny_first in [true, false] {
+        let mut ledger = PermissionLedger::new();
+        let allow = PermissionGrant {
+            permission: Permission::Read,
+            scope: PermissionScope::Directory,
+            path: Some(PathBuf::from("repo/src")),
+            pattern: None,
+            allow: true,
+            reason: "allow".to_string(),
+        };
+        let deny = PermissionGrant {
+            permission: Permission::Read,
+            scope: PermissionScope::Directory,
+            path: Some(PathBuf::from("repo/src/secret")),
+            pattern: None,
+            allow: false,
+            reason: "deny".to_string(),
+        };
+        if deny_first {
+            ledger.grant(deny);
+            ledger.grant(allow);
+        } else {
+            ledger.grant(allow);
+            ledger.grant(deny);
+        }
+        let result = ledger.check(Permission::Read, Path::new("repo/src/secret/key.txt"));
+        assert!(
+            !result.granted,
+            "explicit deny must win regardless of grant order (deny_first={deny_first}): {result:?}"
+        );
+        // The sibling outside the deny scope still follows the allow.
+        let ok = ledger.check(Permission::Read, Path::new("repo/src/public.rs"));
+        assert!(
+            ok.granted,
+            "allow outside the deny scope still applies: {ok:?}"
+        );
+    }
+}
+
+#[test]
+fn security_permission_ledger_curdir_normalization_cannot_escape_grant() {
+    let mut ledger = PermissionLedger::new();
+    ledger.grant(PermissionGrant {
+        permission: Permission::Write,
+        scope: PermissionScope::Directory,
+        path: Some(PathBuf::from("repo/src")),
+        pattern: None,
+        allow: true,
+        reason: "directory grant".to_string(),
+    });
+    // Dot segments that resolve back inside the grant are fine.
+    let ok = ledger.check(Permission::Write, Path::new("repo/./src/main.rs"));
+    assert!(ok.granted, "in-grant dot segments normalize: {ok:?}");
+    // Dot segments that resolve outside the grant must be denied, even
+    // though the raw string starts with the granted prefix.
+    for hostile in [
+        "repo/./src/../../secret.txt",
+        "repo/src/./../../secret.txt",
+        "repo/src/../src/../../secret.txt",
+    ] {
+        let result = ledger.check(Permission::Write, Path::new(hostile));
+        assert!(
+            !result.granted,
+            "dot-segment traversal must not borrow the prefix grant: {hostile}"
+        );
+    }
+}
