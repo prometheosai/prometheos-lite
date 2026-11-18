@@ -158,42 +158,54 @@ fn apply_record_commit(conn: &Connection, migration: &Migration) -> Result<()> {
 }
 
 fn run_migration(conn: &Connection, migration: &Migration) -> Result<()> {
-    if !migration.suspend_fk_outside {
-        return apply_record_commit(conn, migration);
-    }
-    let fk_on: i64 = conn
-        .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
-        .context("failed to read foreign_keys pragma")?;
-    if fk_on != 0 {
-        conn.execute("PRAGMA foreign_keys=OFF", [])
-            .context("failed to suspend foreign_keys pragma")?;
-    }
-    // Persisted before the transaction so an aborted attempt still
-    // converges on retry; deliberately not covered by the rollback.
-    if let Some(pre) = migration.pre_tx {
-        if let Err(error) = pre(conn) {
-            let restore = if fk_on != 0 {
-                let _ = conn.execute("PRAGMA foreign_keys=ON", []);
-            };
-            return Err(error).context("pre-transaction migration phase failed");
+    if migration.suspend_fk_outside {
+        let fk_on: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+            .context("failed to read foreign_keys pragma")?;
+        if fk_on != 0 {
+            conn.execute("PRAGMA foreign_keys=OFF", [])
+                .context("failed to suspend foreign_keys pragma")?;
         }
-    }
-    // DDL and the ledger record commit atomically inside the transaction;
-    // the FK pragma is restored on every path afterwards.
-    let outcome = apply_record_commit(conn, migration);
-    let restore_result = if fk_on != 0 {
-        Some(
-            conn.execute("PRAGMA foreign_keys=ON", [])
-                .context("failed to restore foreign_keys pragma"),
-        )
+        // Persisted before the transaction so an aborted attempt still
+        // converges on retry; deliberately not covered by the rollback.
+        if let Some(pre) = migration.pre_tx {
+            if let Err(error) = pre(conn) {
+                let restore = if fk_on != 0 {
+                    Some(conn.execute("PRAGMA foreign_keys=ON", []))
+                } else {
+                    None
+                };
+                return match restore {
+                    Some(Err(restore_error)) => Err(error).context(format!(
+                        "pre-transaction migration phase failed; foreign_keys restoration also failed: {restore_error:#}"
+                    )),
+                    _ => Err(error).context("pre-transaction migration phase failed"),
+                };
+            }
+        }
+        // DDL and the ledger record commit atomically inside the transaction;
+        // the FK pragma is restored on every path afterwards. Restoration
+        // errors are never swallowed: on the success path they fail the open,
+        // on the failure path both errors are preserved.
+        let outcome = apply_record_commit(conn, migration);
+        let restore = if fk_on != 0 {
+            Some(
+                conn.execute("PRAGMA foreign_keys=ON", [])
+                    .context("failed to restore foreign_keys pragma"),
+            )
+        } else {
+            None
+        };
+        match (outcome, restore) {
+            (Ok(()), Some(Err(restore_error))) => Err(restore_error),
+            (Ok(()), _) => Ok(()),
+            (Err(error), Some(Err(restore_error))) => Err(error).context(format!(
+                "migration failed; foreign_keys restoration also failed: {restore_error:#}"
+            )),
+            (Err(error), _) => Err(error),
+        }
     } else {
-        None
-    };
-    match (outcome, restore_result) {
-        (Ok(()), Some(Err(error))) => Err(error),
-        (Ok(()), _) => Ok(()),
-        // The original failure dominates; the restore was still attempted.
-        (Err(error), _) => Err(error),
+        apply_record_commit(conn, migration)
     }
 }
 
@@ -305,6 +317,16 @@ pub(crate) fn migrate(conn: &Connection) -> Result<()> {
             )
         })?;
     }
+    // A connection whose FK enforcement state is not healthy must not be
+    // treated as ready for use: re-verify after every migration.
+    let fk_enforced: i64 = conn
+        .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+        .context("failed to read foreign_keys pragma after migration")?;
+    anyhow::ensure!(
+        fk_enforced == 1,
+        "foreign_keys pragma is off after schema migration (state unreadable or corrupted); \
+         refusing to hand out the connection"
+    );
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)
         .context("failed to set user_version")?;
     Ok(())

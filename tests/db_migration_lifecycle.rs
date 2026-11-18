@@ -635,3 +635,73 @@ fn orphan_only_legacy_db_rebuilds_events() {
     assert_eq!(events, 1, "orphan event preserved");
     assert_eq!(schema_versions(conn), vec![1, 2, 3, 4, 5, 6]);
 }
+
+#[test]
+fn pre_transaction_cleanup_failure_is_fail_closed_and_retryable() {
+    let temp = TempDir::new().expect("tempdir");
+    let path = temp.path().join("pre-tx.db");
+    bootstrap_legacy_db(&path, legacy_events_ddl(), false);
+    // A view where the straggler _new table should live: DROP TABLE IF EXISTS
+    // fails, the pre-transaction phase aborts, nothing is committed or recorded.
+    {
+        let conn = Connection::open(&path).expect("create conflicting view");
+        conn.execute_batch("CREATE VIEW work_context_events_new AS SELECT 1 AS dummy")
+            .expect("create conflicting view");
+    }
+    let error = match Db::new(path.to_str().expect("utf8 path")) {
+        Err(error) => error,
+        Ok(_) => panic!("a failing pre-transaction phase must be refused"),
+    };
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("migration v2"),
+        "pre-transaction failure is attributed: {message}"
+    );
+    assert_eq!(
+        schema_versions(&Connection::open(&path).expect("reopen")),
+        vec![1]
+    );
+    // The view is still there; FK must be enforced again after the failure.
+    let conn = Connection::open(&path).expect("reopen for pragma check");
+    assert_eq!(
+        conn.query_row("PRAGMA foreign_keys", [], |row| row.get::<_, i64>(0))
+            .expect("fk pragma"),
+        1
+    );
+    let straggler_view: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'work_context_events_new'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("view probe");
+    assert_eq!(straggler_view, 1);
+    // Removing the blocker converges.
+    {
+        let conn = Connection::open(&path).expect("remove view");
+        conn.execute_batch("DROP VIEW work_context_events_new")
+            .expect("drop view");
+    }
+    let db = Db::new(path.to_str().expect("utf8 path")).expect("retry converges");
+    assert_eq!(schema_versions(db.conn()), vec![1, 2, 3, 4, 5, 6]);
+    let events: i64 = db
+        .conn()
+        .query_row("SELECT COUNT(*) FROM work_context_events", [], |row| {
+            row.get(0)
+        })
+        .expect("count events");
+    assert_eq!(events, 4);
+}
+
+#[test]
+fn post_migration_connection_enforces_fk() {
+    // Every Db handed out by this crate must have FK enforcement active; the
+    // runner re-verifies after migrations as the last step.
+    let db = Db::in_memory().expect("fresh db");
+    assert_eq!(
+        db.conn()
+            .query_row("PRAGMA foreign_keys", [], |row| row.get::<_, i64>(0))
+            .expect("fk pragma"),
+        1
+    );
+}
