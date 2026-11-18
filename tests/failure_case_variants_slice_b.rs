@@ -8,7 +8,8 @@
 //! certification or score claim is produced.
 
 use prometheos_lite::workflow::failure_case::{
-    FAILURE_CASE_NAMESPACE, FAILURE_CASE_SCHEMA_VERSION, FailureCaseExpected, FailureCaseRedaction,
+    FAILURE_CASE_NAMESPACE, FAILURE_CASE_SCANNER_ID, FAILURE_CASE_SCHEMA_VERSION,
+    FAILURE_CASE_VERIFICATION_SCOPE, FailureCaseExpected, FailureCaseRedaction,
     FailureCaseSourcePin, FailureSignature, LiteFailureCase, MINIMIZATION_ALGORITHM,
     MinimizedReproduction, ReplaySignature,
 };
@@ -31,14 +32,15 @@ fn h(input: &str) -> String {
 }
 
 fn minimal_case() -> LiteFailureCase {
-    LiteFailureCase {
+    let identity = h("fixture-failure-identity");
+    let mut case = LiteFailureCase {
         schema_version: FAILURE_CASE_SCHEMA_VERSION.to_string(),
         namespace: FAILURE_CASE_NAMESPACE.to_string(),
         version: "1.0.0".to_string(),
-        case_id: format!("case-{}", &h("failed-case")[..32]),
+        case_id: format!("lite-failure-case-{}", &identity[..16]),
         title: "fixture classified failure".to_string(),
         evaluated_at: "2026-01-01T00:00:00Z".to_string(),
-        failure_identity: h("fixture-failure-identity"),
+        failure_identity: identity,
         source: FailureCaseSourcePin {
             scenario_id: "rust-bugfix-arithmetic-001".to_string(),
             scenario_digest: h("scenario"),
@@ -76,7 +78,7 @@ fn minimal_case() -> LiteFailureCase {
             algorithm: MINIMIZATION_ALGORITHM.to_string(),
             required_paths: vec!["src/lib.rs".to_string()],
             original_tree_digest: h("original-tree"),
-            minimized_tree_digest: h("minimized-tree"),
+            minimized_tree_digest: h("baseline"),
             removed_paths: Vec::new(),
             rejected_candidates: Vec::new(),
             steps: Vec::new(),
@@ -85,7 +87,7 @@ fn minimal_case() -> LiteFailureCase {
         fix_evidence_digest: h("fix"),
         chain_evidence_digest: h("chain"),
         redaction: FailureCaseRedaction {
-            scanner: "test-scanner".to_string(),
+            scanner: FAILURE_CASE_SCANNER_ID.to_string(),
             known_secrets_registered: 1,
             canary_scanned: true,
             leaked_secrets: 0,
@@ -98,10 +100,12 @@ fn minimal_case() -> LiteFailureCase {
             fixture_only: true,
             redaction: "none-needed".to_string(),
         },
-        verification_scope: FAILURE_CASE_VARIANT_MATRIX_VERIFICATION_SCOPE.to_string(),
+        verification_scope: FAILURE_CASE_VERIFICATION_SCOPE.to_string(),
         external_evaluation_format: ExternalEvaluationFormat::unsupported(),
         content_digest: None,
-    }
+    };
+    case.content_digest = Some(case.compute_digest().expect("case digest computes"));
+    case
 }
 
 fn pinned_failure() -> FailureSignature {
@@ -381,4 +385,203 @@ fn axis_serializations_are_stable_kebab_case() {
     ] {
         assert!(json.contains(needle), "missing {needle}: {json}");
     }
+}
+
+#[test]
+fn observe_fix_with_unrelated_successful_command_cannot_repair() {
+    let mut unrelated = observed(true, TaskOutcome::Repaired, 0);
+    unrelated.validator_command = Some("echo".to_string());
+    let inputs = vec![variant(
+        "variant-context-fix",
+        FailureCaseVariantAxis::Context,
+        VariantExpectation::ObserveFix,
+        unrelated,
+    )];
+    let matrix = build(&inputs).expect("matrix builds");
+    assert_eq!(matrix.replays[0].verdict, VariantVerdict::Drifted);
+    assert_ne!(matrix.verdict, VariantMatrixVerdict::AllConforming);
+    assert_eq!(matrix.verdict, VariantMatrixVerdict::NoneConforming);
+}
+
+#[test]
+fn observe_fix_with_swapped_arguments_cannot_repair() {
+    let mut swapped = observed(true, TaskOutcome::Repaired, 0);
+    swapped.validator_args = vec!["--offline".to_string(), "test".to_string()];
+    let inputs = vec![variant(
+        "variant-context-fix",
+        FailureCaseVariantAxis::Context,
+        VariantExpectation::ObserveFix,
+        swapped,
+    )];
+    let matrix = build(&inputs).expect("matrix builds");
+    assert_eq!(matrix.replays[0].verdict, VariantVerdict::Drifted);
+    assert_eq!(matrix.verdict, VariantMatrixVerdict::NoneConforming);
+}
+
+#[test]
+fn observe_fix_with_missing_command_cannot_repair() {
+    let mut missing = observed(true, TaskOutcome::Repaired, 0);
+    missing.validator_command = None;
+    let inputs = vec![variant(
+        "variant-context-fix",
+        FailureCaseVariantAxis::Context,
+        VariantExpectation::ObserveFix,
+        missing,
+    )];
+    let matrix = build(&inputs).expect("matrix builds");
+    assert_eq!(matrix.replays[0].verdict, VariantVerdict::Drifted);
+    assert_eq!(matrix.verdict, VariantMatrixVerdict::NoneConforming);
+}
+
+#[test]
+fn observe_fix_all_unrelated_success_never_yields_all_conforming() {
+    let mut unrelated_a = observed(true, TaskOutcome::Repaired, 0);
+    unrelated_a.validator_command = Some("echo".to_string());
+    let mut unrelated_b = observed(true, TaskOutcome::Repaired, 0);
+    unrelated_b.validator_args = vec!["--test".to_string()];
+    let inputs = vec![
+        variant(
+            "variant-model-alt-a",
+            FailureCaseVariantAxis::Model,
+            VariantExpectation::ObserveFix,
+            unrelated_a,
+        ),
+        variant(
+            "variant-harness-alt-b",
+            FailureCaseVariantAxis::Harness,
+            VariantExpectation::ObserveFix,
+            unrelated_b,
+        ),
+    ];
+    let matrix = build(&inputs).expect("matrix builds");
+    assert!(
+        matrix
+            .replays
+            .iter()
+            .all(|r| r.verdict == VariantVerdict::Drifted),
+        "unrelated successful commands must never count as this case fixing: {:?}",
+        matrix.replays
+    );
+    assert_ne!(matrix.verdict, VariantMatrixVerdict::AllConforming);
+}
+
+#[test]
+fn observe_fix_matches_pinned_validator_positive_control() {
+    let matching = observed(true, TaskOutcome::Repaired, 0);
+    let inputs = vec![variant(
+        "variant-context-fix",
+        FailureCaseVariantAxis::Context,
+        VariantExpectation::ObserveFix,
+        matching,
+    )];
+    let matrix = build(&inputs).expect("matrix builds");
+    assert_eq!(
+        matrix.replays[0].verdict,
+        VariantVerdict::RepairedFixObserved
+    );
+    assert_eq!(matrix.verdict, VariantMatrixVerdict::AllConforming);
+}
+
+#[test]
+fn build_refuses_signature_from_a_different_failure_args() {
+    let case = minimal_case();
+    let mut other = pinned_failure();
+    other.validator_args = vec!["check".to_string()];
+    let inputs = vec![variant(
+        "variant-context-fix",
+        FailureCaseVariantAxis::Context,
+        VariantExpectation::ReproduceFailure,
+        observed(true, TaskOutcome::RepairFailed, 101),
+    )];
+    let err = failure_case_variants::build_variant_matrix(&case, &other, &inputs)
+        .expect_err("must reject the unrelated signature");
+    assert!(format!("{err:#}").contains("pinned failure evidence"));
+}
+
+#[test]
+fn build_refuses_signature_from_a_different_failure_exit() {
+    let case = minimal_case();
+    let mut other = pinned_failure();
+    other.validator_exit_code = 42;
+    let inputs = vec![variant(
+        "variant-model-alt-a",
+        FailureCaseVariantAxis::Model,
+        VariantExpectation::ReproduceFailure,
+        observed(true, TaskOutcome::RepairFailed, 101),
+    )];
+    let err = failure_case_variants::build_variant_matrix(&case, &other, &inputs)
+        .expect_err("must reject the unrelated signature");
+    assert!(format!("{err:#}").contains("pinned failure evidence"));
+}
+
+#[test]
+fn build_refuses_signature_from_a_different_failure_class() {
+    let case = minimal_case();
+    let mut other = pinned_failure();
+    other.classification = ScenarioOutcomeClass::InfrastructureError;
+    let inputs = vec![variant(
+        "variant-model-alt-a",
+        FailureCaseVariantAxis::Model,
+        VariantExpectation::ReproduceFailure,
+        observed(true, TaskOutcome::RepairFailed, 101),
+    )];
+    let err = failure_case_variants::build_variant_matrix(&case, &other, &inputs)
+        .expect_err("must reject the unrelated signature");
+    assert!(format!("{err:#}").contains("pinned failure evidence"));
+}
+
+#[test]
+fn build_refuses_tampered_case() {
+    let mut tampered = minimal_case();
+    tampered.validator.exit_code = 1; // no longer matches contentDigest
+    let inputs = vec![variant(
+        "variant-model-alt-a",
+        FailureCaseVariantAxis::Model,
+        VariantExpectation::ReproduceFailure,
+        observed(true, TaskOutcome::RepairFailed, 101),
+    )];
+    let failure = FailureSignature {
+        validator_command: tampered.validator.command.clone(),
+        validator_args: tampered.validator.args.clone(),
+        validator_exit_code: 1,
+        task_outcome: tampered.task_outcome,
+        classification: tampered.classification,
+        failure_class: tampered.failure_class,
+    };
+    let err = failure_case_variants::build_variant_matrix(&tampered, &failure, &inputs)
+        .expect_err("a tampered case must fail closed");
+    assert!(format!("{err:#}").contains("unsealed or tampered"));
+}
+
+#[test]
+fn build_refuses_unsealed_case() {
+    let mut unsealed = minimal_case();
+    unsealed.content_digest = None;
+    let inputs = vec![variant(
+        "variant-model-alt-a",
+        FailureCaseVariantAxis::Model,
+        VariantExpectation::ReproduceFailure,
+        observed(true, TaskOutcome::RepairFailed, 101),
+    )];
+    let failure = pinned_failure();
+    let err = failure_case_variants::build_variant_matrix(&unsealed, &failure, &inputs)
+        .expect_err("an unsealed case must fail closed");
+    assert!(format!("{err:#}").contains("unsealed or tampered"));
+}
+
+#[test]
+fn build_accepts_a_verified_case_and_matching_signature_positive_control() {
+    let case = minimal_case();
+    let failure = pinned_failure();
+    let inputs = vec![variant(
+        "variant-model-alt-a",
+        FailureCaseVariantAxis::Model,
+        VariantExpectation::ReproduceFailure,
+        observed(true, TaskOutcome::RepairFailed, 101),
+    )];
+    let matrix = failure_case_variants::build_variant_matrix(&case, &failure, &inputs)
+        .expect("sealed case + matching signature builds");
+    assert_eq!(matrix.verdict, VariantMatrixVerdict::AllConforming);
+    assert_eq!(matrix.case_id, case.case_id);
+    assert_eq!(matrix.failure_identity, case.failure_identity);
 }
