@@ -10,45 +10,33 @@
 
 use crate::flow::Tool;
 use crate::tools::PathGuard;
-use anyhow::{Context, Result};
-use std::path::{Path, PathBuf};
+use anyhow::{Context, Result, bail};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
+#[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
+#[cfg(windows)]
+use std::os::windows::io::FromRawHandle;
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+#[cfg(test)]
+use std::sync::Mutex;
 
-/// True when the leaf exists and its own type is a symlink or junction
-/// (reparse point that can redirect reads/writes through the link).
-fn is_leaf_reparse_point(path: &Path) -> bool {
-    std::fs::symlink_metadata(path)
-        .map(|meta| meta.file_type().is_symlink())
-        .unwrap_or(false)
-}
-
-/// Open `full_path` for writing, fail-closed after validation:
-/// - If the leaf exists: refuse when the leaf is a symlink/junction (it could
-///   have been swapped between validation and this call); truncate the file.
-/// - If the leaf does not exist: `create_new` fails if the leaf appeared
-///   (or was swapped in) after validation — no file is created anywhere.
-///
-/// Exported `#[doc(hidden)]` so the security regression suite can exercise
-/// the exact post-validation boundary under a controlled swap. Not a public
-/// API contract.
-#[doc(hidden)]
+/// Fail-closed open anchored at the filesystem root of `full_path`; strictly
+/// stronger than a bare pathname open. Exercises the same production
+/// fail-closed write path used by `WriteFileTool` after validation (reparse
+/// refusal, verified-open-then-truncate). Not a public API contract; retained
+/// so the in-crate post-validation boundary test can exercise it directly.
+#[cfg(test)]
 fn open_write_fail_closed(full_path: &Path) -> Result<std::fs::File> {
-    // Never follow a link that landed at the leaf between validation and this open.
-    if is_leaf_reparse_point(full_path) {
-        anyhow::bail!("leaf is a symlink/junction after validation; refusing to follow the link");
-    }
-    let existed_before = std::fs::symlink_metadata(full_path).is_ok();
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true);
-    if existed_before {
-        opts.truncate(true);
-    } else {
-        // Fresh target: create_new fails if the leaf was created or swapped
-        // in between validation and this call, refusing the effect entirely.
-        opts.create_new(true);
-    }
-    opts.open(full_path)
-        .context("failed to open file for writing")
+    let root = full_path
+        .ancestors()
+        .last()
+        .context("failed to determine filesystem root")?
+        .to_path_buf();
+    open_write_verified(&root, full_path)
 }
 
 /// RepoTool trait for repository operations
@@ -198,6 +186,7 @@ impl ListTreeTool {
 
 /// Read file tool - reads file contents
 pub struct RepoReadFileTool {
+    repo_path: PathBuf,
     path_guard: PathGuard,
 }
 
@@ -205,6 +194,7 @@ impl RepoReadFileTool {
     pub fn new(repo_path: PathBuf) -> Self {
         let base_dir = repo_path.to_string_lossy().to_string();
         Self {
+            repo_path,
             path_guard: PathGuard::new(base_dir),
         }
     }
@@ -251,24 +241,22 @@ impl Tool for RepoReadFileTool {
         };
 
         let full_path = std::path::PathBuf::from(&safe_path);
+        let base = self.repo_path.clone();
 
-        if !full_path.exists() {
-            return Ok(serde_json::json!({
-                "error": format!("File not found: {}", full_path.display()),
-                "success": false
-            }));
-        }
-
-        // Read-path double-check: refuse if a reparse point appeared at the
-        // leaf between validation and the read effect.
-        if is_leaf_reparse_point(&full_path) {
-            return Ok(serde_json::json!({
-                "error": format!("Leaf is a symlink/junction after validation: {}", full_path.display()),
-                "success": false
-            }));
-        }
-        let content = tokio::fs::read_to_string(&full_path)
-            .await
+        // Effect decided on an opened handle, never on a re-checked pathname.
+        let file = match open_read_verified(&base, &full_path) {
+            Ok(file) => file,
+            Err(err) => {
+                return Ok(serde_json::json!({
+                    "error": format!("Fail-closed read refused: {err:#}"),
+                    "success": false
+                }));
+            }
+        };
+        let mut file = file;
+        let mut content = String::new();
+        use std::io::Read as _;
+        file.read_to_string(&mut content)
             .context("Failed to read file")?;
 
         Ok(serde_json::json!({
@@ -429,6 +417,7 @@ impl SearchFilesTool {
 
 /// Write file tool - writes content to a file
 pub struct WriteFileTool {
+    repo_path: PathBuf,
     path_guard: PathGuard,
 }
 
@@ -436,6 +425,7 @@ impl WriteFileTool {
     pub fn new(repo_path: PathBuf) -> Self {
         let base_dir = repo_path.to_string_lossy().to_string();
         Self {
+            repo_path,
             path_guard: PathGuard::new(base_dir),
         }
     }
@@ -491,33 +481,21 @@ impl Tool for WriteFileTool {
         };
 
         let full_path = std::path::PathBuf::from(&safe_path);
+        let base = self.repo_path.clone();
 
-        // Create parent directories if they don't exist. Every segment was
-        // already validated inside the base, so parents created here are
-        // inside the repo by construction.
-        if let Some(parent) = full_path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .context("Failed to create parent directories")?;
-        }
-
-        // Fail closed if a reparse point landed at the leaf between
-        // validation and this write: open would follow whatever link landed
-        // there. `create_new` (on fresh leaves) also fails when the name was
-        // swapped in after validation.
-        let writer = match open_write_fail_closed(&full_path) {
+        // Effect decided on an opened handle, never on a re-checked pathname.
+        let file = match open_write_verified(&base, &full_path) {
             Ok(file) => file,
             Err(err) => {
                 return Ok(serde_json::json!({
-                    "error": format!("Fail-closed open refused ({}): {}", full_path.display(), err),
+                    "error": format!("Fail-closed write refused: {err:#}"),
                     "success": false
                 }));
             }
         };
         use std::io::Write as _;
-        let mut writer = writer;
-        writer
-            .write_all(content.as_bytes())
+        let mut file = file;
+        file.write_all(content.as_bytes())
             .context("Failed to write file")?;
 
         Ok(serde_json::json!({
@@ -532,7 +510,6 @@ impl Tool for WriteFileTool {
 pub struct PatchFileTool {
     repo_path: PathBuf,
     path_guard: PathGuard,
-    allow_fallback: bool,
 }
 
 impl PatchFileTool {
@@ -541,19 +518,15 @@ impl PatchFileTool {
         Self {
             repo_path,
             path_guard: PathGuard::new(base_dir),
-            allow_fallback: false, // Production default: no fallback
         }
     }
 
-    /// Create a PatchFileTool with simplified fallback allowed (dev-only)
-    /// This should NOT be used in production as the simplified patcher is less robust
+    /// Retained for API compatibility: historically this allowed the
+    /// simplified, in-repo diff applier. The tool now always uses the
+    /// bounded, self-contained unified-diff applier; both constructors
+    /// behave identically.
     pub fn with_fallback_allowed(repo_path: PathBuf) -> Self {
-        let base_dir = repo_path.to_string_lossy().to_string();
-        Self {
-            repo_path,
-            path_guard: PathGuard::new(base_dir),
-            allow_fallback: true,
-        }
+        Self::new(repo_path)
     }
 }
 
@@ -607,15 +580,7 @@ impl Tool for PatchFileTool {
         };
 
         let full_path = std::path::PathBuf::from(&safe_path);
-
-        // Validate file exists
-        if !full_path.exists() {
-            return Ok(serde_json::json!({
-                "error": format!("File not found: {}", full_path.display()),
-                "success": false,
-                "validation": "failed"
-            }));
-        }
+        let base = self.repo_path.clone();
 
         // Validate diff target and format against the requested path.
         if let Err(err) = self.validate_diff_for_path(diff, path) {
@@ -626,49 +591,52 @@ impl Tool for PatchFileTool {
             }));
         }
 
-        // Read-path double-check before any effect is attempted.
-        if is_leaf_reparse_point(&full_path) {
-            return Ok(serde_json::json!({
-                "error": format!("Leaf is a symlink/junction after validation: {}", full_path.display()),
-                "success": false,
-                "validation": "failed"
-            }));
-        }
+        // Verified read through a handled, reparse-free chain.
+        let original_content = {
+            let file = match open_read_verified(&base, &full_path) {
+                Ok(file) => file,
+                Err(err) => {
+                    return Ok(serde_json::json!({
+                        "error": format!("Fail-closed read refused: {err:#}"),
+                        "success": false,
+                        "validation": "failed"
+                    }));
+                }
+            };
+            let mut file = file;
+            let mut content = String::new();
+            use std::io::Read as _;
+            file.read_to_string(&mut content)
+                .context("Failed to read original file")?;
+            content
+        };
 
-        // Read original content
-        let original_content = tokio::fs::read_to_string(&full_path)
-            .await
-            .context("Failed to read original file")?;
-
-        // Apply patch. When system `patch` succeeds, it modifies the file in-place.
-        // Only write content ourselves when using the simplified fallback path.
-        // Re-check the leaf immediately before the effect: a link swapped at
-        // the leaf after validation must stop every write path, including
-        // the system-patch branch.
-        if is_leaf_reparse_point(&full_path) {
-            return Ok(serde_json::json!({
-                "error": format!("Leaf is a symlink/junction after validation: {}", full_path.display()),
-                "success": false,
-                "validation": "failed"
-            }));
-        }
-        if self.apply_patch_with_system(diff).is_err() {
-            if self.allow_fallback {
-                let patched_content = self
-                    .apply_patch_simplified(&original_content, diff)
-                    .context("Failed to apply patch with fallback")?;
-                let mut writer = open_write_fail_closed(&full_path)
-                    .context("Failed to open file for writing")?;
-                use std::io::Write as _;
-                writer
-                    .write_all(patched_content.as_bytes())
-                    .context("Failed to write patched file")?;
-            } else {
-                anyhow::bail!(
-                    "System patch command not available and fallback is disabled for production safety"
-                );
+        // Apply the unified diff in memory (no external patch(1)).
+        let patched_content = match apply_unified_diff(&original_content, diff) {
+            Ok(patched) => patched,
+            Err(err) => {
+                return Ok(serde_json::json!({
+                    "error": format!("Patch refused: {err:#}"),
+                    "success": false,
+                    "validation": "failed"
+                }));
             }
-        }
+        };
+
+        // Verified, self-contained write through the same containment.
+        use std::io::Write as _;
+        let mut file = match open_write_verified(&base, &full_path) {
+            Ok(file) => file,
+            Err(err) => {
+                return Ok(serde_json::json!({
+                    "error": format!("Fail-closed write refused: {err:#}"),
+                    "success": false,
+                    "validation": "failed"
+                }));
+            }
+        };
+        file.write_all(patched_content.as_bytes())
+            .context("Failed to write patched file")?;
 
         Ok(serde_json::json!({
             "path": path,
@@ -783,139 +751,6 @@ impl PatchFileTool {
         }
 
         Ok(stripped.replace('\\', "/"))
-    }
-
-    fn apply_patch_with_system(&self, diff: &str) -> Result<String> {
-        // Use the system 'patch' command for reliable diff application
-        let mut child = Command::new("patch")
-            .arg("-p1") // Strip first directory component
-            .arg("--dry-run") // First validate the patch
-            .current_dir(&self.repo_path) // Execute in repo directory
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .context("Failed to spawn patch command")?;
-
-        // Write diff to stdin
-        if let Some(mut stdin) = child.stdin.take() {
-            use std::io::Write;
-            stdin
-                .write_all(diff.as_bytes())
-                .context("Failed to write diff to patch")?;
-        }
-
-        let output = child
-            .wait_with_output()
-            .context("Failed to execute patch validation")?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("Patch validation failed: {}", stderr);
-        }
-
-        // Apply the patch for real
-        let mut child = Command::new("patch")
-            .arg("-p1")
-            .current_dir(&self.repo_path) // Execute in repo directory
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .context("Failed to spawn patch command")?;
-
-        if let Some(mut stdin) = child.stdin.take() {
-            use std::io::Write;
-            stdin
-                .write_all(diff.as_bytes())
-                .context("Failed to write diff to patch")?;
-        }
-
-        let output = child
-            .wait_with_output()
-            .context("Failed to execute patch")?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("Patch application failed: {}", stderr);
-        }
-
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
-    }
-
-    fn apply_patch_simplified(&self, original: &str, diff: &str) -> Result<String> {
-        // Simplified diff application - handles basic unified diffs
-        // DEV-ONLY: This is a fallback when system patch is not available
-        // NOT PRODUCTION READY - use system patch command in production
-        let mut result_lines: Vec<&str> = original.lines().collect();
-        let diff_lines: Vec<&str> = diff.lines().collect();
-        let mut i = 0;
-
-        while i < diff_lines.len() {
-            let line = diff_lines[i];
-
-            if line.starts_with("@@") {
-                // Parse hunk header: @@ -old_start,old_count +new_start,new_count @@
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 3 {
-                    let old_info = parts[1]; // -old_start,old_count
-                    let new_info = parts[2]; // +new_start,new_count
-
-                    let old_parts: Vec<&str> =
-                        old_info.trim_start_matches('-').split(',').collect();
-                    let old_start: usize = old_parts[0].parse().unwrap_or(1);
-                    let old_count: usize = if old_parts.len() > 1 {
-                        old_parts[1].parse().unwrap_or(1)
-                    } else {
-                        1
-                    };
-
-                    let new_parts: Vec<&str> =
-                        new_info.trim_start_matches('+').split(',').collect();
-                    let _new_start: usize = new_parts[0].parse().unwrap_or(1);
-
-                    let mut old_idx = old_start - 1;
-                    let mut new_lines = Vec::new();
-
-                    i += 1;
-                    while i < diff_lines.len()
-                        && !diff_lines[i].starts_with("@@")
-                        && !diff_lines[i].starts_with("---")
-                        && !diff_lines[i].starts_with("+++")
-                    {
-                        let diff_line = diff_lines[i];
-
-                        if diff_line.starts_with(' ') {
-                            // Context line - keep original
-                            if old_idx < result_lines.len() {
-                                new_lines.push(result_lines[old_idx]);
-                            }
-                            old_idx += 1;
-                        } else if diff_line.starts_with('-') {
-                            // Remove line
-                            old_idx += 1;
-                        } else if let Some(stripped) = diff_line.strip_prefix('+') {
-                            // Add line
-                            new_lines.push(stripped);
-                        }
-
-                        i += 1;
-                    }
-
-                    // Replace the old lines with new lines
-                    let replace_start = old_start - 1;
-                    if replace_start + old_count <= result_lines.len() {
-                        result_lines.splice(replace_start..replace_start + old_count, new_lines);
-                    }
-
-                    continue;
-                }
-            }
-
-            i += 1;
-        }
-
-        Ok(result_lines.join("\n"))
     }
 
     fn count_changes(&self, diff: &str) -> usize {
@@ -1296,6 +1131,1178 @@ mod tests {
         assert!(
             reparse_entry_present(&link),
             "the swap must leave no effect behind other than the attacker's own link"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bounded unified-diff application
+// ---------------------------------------------------------------------------
+
+/// A parsed hunk: `-<start>[,<count>]`, its body lines with prefixes stripped,
+/// and `+<start>[,<count>]`'s body lines with prefixes stripped.
+#[derive(Debug, Clone)]
+struct Hunk {
+    old_start: usize,
+    old_lines: Vec<String>,
+    new_lines: Vec<String>,
+}
+
+/// Parse a unified diff for exactly one file.
+///
+/// Accepted grammar (deliberately strict): optional `--- a/<path>` and
+/// `+++ b/<path>` headers, then one or more `@@ -old[,n] +new[,m] @@` hunk
+/// headers, each followed by `<n>` body lines: `' '` context, `'-'` removal,
+/// `'+'` addition, and `'\'` ("No newline at end of file", ignored). Anything
+/// else is refused. Empty diffs are refused.
+fn apply_unified_diff(original: &str, diff: &str) -> Result<String> {
+    if diff.trim().is_empty() {
+        bail!("empty diff");
+    }
+    let original_trailing_newline = original.ends_with('\n');
+    let original_lines: Vec<String> = original.lines().map(str::to_string).collect();
+    let diff_lines: Vec<&str> = diff.lines().collect();
+    let mut index = 0;
+    // Skip the optional --- / +++ header lines.
+    while index < diff_lines.len()
+        && (diff_lines[index].starts_with("--- ") || diff_lines[index].starts_with("+++ "))
+    {
+        index += 1;
+    }
+    let mut hunks: Vec<Hunk> = Vec::new();
+    while index < diff_lines.len() {
+        let header = diff_lines[index];
+        if !header.starts_with("@@ ") {
+            bail!(
+                "unexpected line before hunk header: {:?}",
+                header.chars().take(80).collect::<String>()
+            );
+        }
+        let (old_start, mut old_count, new_count) = parse_hunk_header(header)?;
+        index += 1;
+        let mut old_lines = Vec::with_capacity(old_count);
+        let mut new_lines = Vec::with_capacity(new_count);
+        let mut old_seen = 0usize;
+        while index < diff_lines.len() && !diff_lines[index].starts_with("@@ ") {
+            let line = diff_lines[index];
+            if line.starts_with("\\") {
+                // "\ No newline at end of file" marker — tolerated, ignored.
+                index += 1;
+                continue;
+            }
+            if line.is_empty() {
+                // Tolerate trailing newline-free lines inside a hunk body.
+                bail!("empty line inside hunk body; use a explicit '-'/+'/' ' line");
+            }
+            match line.as_bytes()[0] {
+                b' ' => {
+                    let body = line[1..].to_string();
+                    old_lines.push(body.clone());
+                    new_lines.push(body);
+                    old_seen += 1;
+                }
+                b'-' => {
+                    old_lines.push(line[1..].to_string());
+                    old_seen += 1;
+                }
+                b'+' => {
+                    new_lines.push(line[1..].to_string());
+                }
+                _ => bail!(
+                    "invalid line inside hunk body: {:?}",
+                    line.chars().take(80).collect::<String>()
+                ),
+            }
+            index += 1;
+        }
+        if old_count == 0 && old_seen == 0 {
+            // A pure insertion hunk has no context; keep the single position.
+            old_count = 0;
+        }
+        if old_seen != old_count {
+            bail!(
+                "hunk header announces {old_count} removed/context lines but body has {old_seen}"
+            );
+        }
+        if new_lines.len() != new_count {
+            bail!(
+                "hunk header announces {new_count} added/context lines but body has {}",
+                new_lines.len()
+            );
+        }
+        hunks.push(Hunk {
+            old_start,
+            old_lines,
+            new_lines,
+        });
+    }
+    if hunks.is_empty() {
+        bail!("diff contains no hunks");
+    }
+
+    // Apply hunks sequentially, allowing the file to grow/shrink via delta.
+    let mut out: Vec<String> = Vec::with_capacity(original_lines.len());
+    let mut cursor = 0usize;
+    let mut delta: isize = 0;
+    for hunk in &hunks {
+        let preferred = (hunk.old_start as isize - 1 + delta) as usize;
+        let pos = find_position(&original_lines, cursor, preferred, &hunk.old_lines)?;
+        out.extend_from_slice(&original_lines[cursor..pos]);
+        cursor = pos + hunk.old_lines.len();
+        delta += hunk.new_lines.len() as isize - hunk.old_lines.len() as isize;
+        out.extend(hunk.new_lines.iter().cloned());
+    }
+    out.extend_from_slice(&original_lines[cursor..]);
+    let mut result = out.join("\n");
+    // Preserve the original file's trailing-newline convention; a unified
+    // diff carries line semantics, not whole-file EOL semantics, so the
+    // faithful default is to keep whatever the original had.
+    if original_trailing_newline && !out.is_empty() {
+        result.push('\n');
+    }
+    Ok(result)
+}
+
+fn parse_hunk_header(header: &str) -> Result<(usize, usize, usize)> {
+    let inner = header
+        .strip_prefix("@@ ")
+        .and_then(|rest| rest.split(" @@").next())
+        .ok_or_else(|| anyhow::anyhow!("invalid hunk header: {header:?}"))?;
+    let parts: Vec<&str> = inner.split_whitespace().collect();
+    if parts.len() != 2 {
+        bail!("invalid hunk header: {header:?}");
+    }
+    let old_start = parse_hunk_range(parts[0], '-')?;
+    let new_count = parse_hunk_count(parts[1], '+')?;
+    let old_count = parse_hunk_count(parts[0], '-')?;
+    Ok((old_start, old_count, new_count))
+}
+
+fn parse_hunk_range(part: &str, sign: char) -> Result<usize> {
+    let stripped = part
+        .strip_prefix(sign)
+        .ok_or_else(|| anyhow::anyhow!("invalid hunk range {part:?}"))?;
+    let start = stripped.split(',').next().unwrap_or("");
+    start
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid hunk start {start:?}"))
+}
+
+fn parse_hunk_count(part: &str, sign: char) -> Result<usize> {
+    let stripped = part
+        .strip_prefix(sign)
+        .ok_or_else(|| anyhow::anyhow!("invalid hunk range {part:?}"))?;
+    match stripped.split(',').nth(1) {
+        None => Ok(1),
+        Some(count) => count
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid hunk count {count:?}")),
+    }
+}
+
+fn find_position(
+    original: &[String],
+    cursor: usize,
+    preferred: usize,
+    needle: &[String],
+) -> Result<usize> {
+    let matches = |pos: usize| -> bool {
+        pos + needle.len() <= original.len() && original[pos..pos + needle.len()] == needle[..]
+    };
+    if matches(preferred) {
+        return Ok(preferred);
+    }
+    let end = original.len().saturating_sub(needle.len());
+    for pos in cursor..=end {
+        if matches(pos) {
+            return Ok(pos);
+        }
+    }
+    bail!(
+        "hunk does not apply: expected lines not found at any position at or after line {}",
+        cursor + 1
+    )
+}
+
+/// Classification of a path's leaf component. Inspection errors other than
+/// `NotFound` are fatal, never silently treated as nonexistent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LeafClass {
+    Ordinary,
+    ReparsePoint,
+    NotFound,
+}
+
+fn leaf_class(path: &Path) -> Result<LeafClass> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                Ok(LeafClass::ReparsePoint)
+            } else {
+                Ok(LeafClass::Ordinary)
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(LeafClass::NotFound),
+        Err(e) => Err(e).with_context(|| format!("failed to inspect {}", path.display())),
+    }
+}
+
+/// TEST-ONLY deterministic interposition between validation and the
+/// effect. Not for production use. The hook is one-shot and consumed only
+/// when the observed path matches the armed name.
+#[cfg(test)]
+type HookEntry = (String, Box<dyn FnOnce(&Path) + Send>);
+
+#[cfg(test)]
+static HOOKS: Mutex<Vec<HookEntry>> = Mutex::new(Vec::new());
+
+/// Arm a one-shot hook for a leaf file name. The next interposition
+/// whose path ends with `leaf_name` runs the armed closure exactly once.
+/// Multiple armed hooks may coexist; each fires only for its own leaf.
+#[cfg(test)]
+fn arm(leaf_name: &str, hook: impl FnOnce(&Path) + Send + 'static) {
+    HOOKS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push((leaf_name.to_string(), Box::new(hook)));
+}
+
+/// If an armed hook matches `path`, run it exactly once and drop it.
+#[cfg(test)]
+fn interpose_after_validation(path: &Path) {
+    let matched = {
+        let mut hooks = HOOKS.lock().unwrap_or_else(|e| e.into_inner());
+        let position = hooks
+            .iter()
+            .position(|(leaf, _)| path.ends_with(leaf.as_str()));
+        position.map(|position| hooks.swap_remove(position))
+    };
+    if let Some((_, hook)) = matched {
+        hook(path);
+    }
+}
+
+#[cfg(not(test))]
+fn interpose_after_validation(_path: &Path) {}
+
+/// Split `full_path` into its canonical base plus the normal components
+/// below it. Rejects absolute/prefix/parent components (defense in depth).
+fn split_relative(base: &Path, full_path: &Path) -> Result<(PathBuf, Vec<std::ffi::OsString>)> {
+    let base_canon = base
+        .canonicalize()
+        .with_context(|| format!("base {} is not resolvable", base.display()))?;
+    let rel = full_path
+        .strip_prefix(base)
+        .with_context(|| format!("{} escapes base {}", full_path.display(), base.display()))?;
+    let mut out = Vec::new();
+    for component in rel.components() {
+        match component {
+            Component::Normal(seg) => out.push(seg.to_os_string()),
+            Component::CurDir => {}
+            other => bail!("unsupported path component {other:?} in target"),
+        }
+    }
+    Ok((base_canon, out))
+}
+
+/// Walk every component of `segments` from the base handle, opening each
+/// one and verifying it is a plain, non-reparse directory. Returns the chain
+/// of open handles (kept alive so the resolution cannot drift) and the path
+/// of the deepest opened directory.
+fn walk_dir_chain(
+    base: &Path,
+    segments: &[std::ffi::OsString],
+) -> Result<(Vec<std::fs::File>, PathBuf)> {
+    let canon = base.canonicalize()?;
+    let mut handles: Vec<std::fs::File> = vec![open_dir(&canon)?];
+    let mut cur = canon.clone();
+    for segment in segments {
+        let child = cur.join(segment);
+        let md = std::fs::symlink_metadata(&child)
+            .with_context(|| format!("failed to inspect component {}", child.display()))?;
+        if md.file_type().is_symlink() {
+            bail!(
+                "component {} is a symlink/reparse point; refusing",
+                child.display()
+            );
+        }
+        if !md.file_type().is_dir() {
+            bail!("component {} is not a directory; refusing", child.display());
+        }
+        let handle = open_child_dir(handles.last().expect("base handle"), &cur, segment)
+            .with_context(|| format!("failed to open {}", child.display()))?;
+        verify_plain_directory(&handle, &child)?;
+        cur = child;
+        handles.push(handle);
+    }
+    Ok((handles, cur))
+}
+
+/// Create missing directories along `segments` relative to the verified
+/// base, then re-walk from scratch to produce a fresh verified chain.
+/// Nothing is written at this stage; an attacker can only rename empty
+/// directories or introduce reparse points, both of which fail the re-walk.
+fn create_dir_chain(
+    base: &Path,
+    segments: &[std::ffi::OsString],
+) -> Result<(Vec<std::fs::File>, PathBuf)> {
+    // Find where the existing chain stops; create the whole remainder.
+    let missing_from = (|| -> std::io::Result<Option<usize>> {
+        for index in 0..segments.len() {
+            let child = segments[..=index]
+                .iter()
+                .fold(base.to_path_buf(), |acc, seg| acc.join(seg));
+            match std::fs::symlink_metadata(&child) {
+                Ok(_) => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Some(index)),
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(None)
+    })()
+    .with_context(|| "failed to inspect directory chain")?;
+    if let Some(_start) = missing_from {
+        let missing: PathBuf = segments
+            .iter()
+            .fold(base.to_path_buf(), |acc, seg| acc.join(seg));
+        std::fs::create_dir_all(&missing)
+            .with_context(|| format!("failed to create directory {}", missing.display()))?;
+    }
+    // Re-verify from scratch: a reparse point or swap introduced during
+    // creation fails here, before a single byte is written.
+    walk_dir_chain(base, segments)
+}
+
+/// Open `full_path` for writing under `base`, verifying every ancestor and
+/// the leaf on handles. Fresh leaves are created atomically; existing leaves
+/// are truncated only after the opened handle is verified as a plain file.
+/// The returned handle is pinned to the verified object for its lifetime.
+fn open_write_verified(base: &Path, full_path: &Path) -> Result<std::fs::File> {
+    interpose_after_validation(full_path);
+    let (base_canon, segments) = split_relative(base, full_path)?;
+    let mut dir_segments = segments.clone();
+    let leaf = dir_segments
+        .pop()
+        .context("open_write_verified requires a leaf component")?;
+
+    let (_handles, leaf_parent) = create_dir_chain(&base_canon, &dir_segments)?;
+    let leaf_path = leaf_parent.join(&leaf);
+
+    match leaf_class(&leaf_path)? {
+        LeafClass::ReparsePoint => bail!(
+            "leaf {} is a symlink/reparse point; refusing to write",
+            leaf_path.display()
+        ),
+        LeafClass::Ordinary => open_write_ordinary(&base_canon, &dir_segments, &leaf),
+        LeafClass::NotFound => open_fresh_leaf_write(&base_canon, &dir_segments, &leaf),
+    }
+}
+
+/// Open `full_path` for reading under `base`, verifying every component on
+/// handles. The leaf must be a plain, non-reparse regular file.
+fn open_read_verified(base: &Path, full_path: &Path) -> Result<std::fs::File> {
+    interpose_after_validation(full_path);
+    let (base_canon, segments) = split_relative(base, full_path)?;
+    let mut dir_segments = segments.clone();
+    let leaf = dir_segments
+        .pop()
+        .context("open_read_verified requires a leaf component")?;
+    let (handles, _leaf_parent) = walk_dir_chain(&base_canon, &dir_segments)?;
+    let _ = handles;
+    open_leaf_read(&base_canon, &dir_segments, &leaf)
+}
+
+#[cfg(test)]
+mod engine_unit_tests {
+    use super::*;
+
+    #[test]
+    fn leaf_class_reports_not_found() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("absent.txt");
+        assert_eq!(leaf_class(&path).expect("classify"), LeafClass::NotFound);
+    }
+
+    #[test]
+    fn split_relative_rejects_parent_components() {
+        let base = tempfile::tempdir().expect("tempdir");
+        let target = base.path().join("..").join("escape.txt");
+        assert!(split_relative(base.path(), &target).is_err());
+    }
+}
+
+#[cfg(windows)]
+const FILE_ATTRIBUTE_DIRECTORY: u32 = winapi::um::winnt::FILE_ATTRIBUTE_DIRECTORY;
+
+#[cfg(windows)]
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = winapi::um::winnt::FILE_ATTRIBUTE_REPARSE_POINT;
+
+#[cfg(windows)]
+const GENERIC_READ: u32 = 0x80000000;
+
+#[cfg(windows)]
+const GENERIC_WRITE: u32 = 0x40000000;
+
+#[cfg(windows)]
+const SYNCHRONIZE: u32 = 0x00100000;
+
+#[cfg(windows)]
+const FILE_OPEN_REPARSE_POINT: u32 = 0x00200000;
+
+#[cfg(windows)]
+const FILE_DIRECTORY_FILE: u32 = 0x00000001;
+
+#[cfg(windows)]
+const FILE_NON_DIRECTORY_FILE: u32 = 0x00000040;
+
+#[cfg(windows)]
+const FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x00000020;
+
+#[cfg(windows)]
+const FILE_OPEN: u32 = 0x00000001;
+
+#[cfg(windows)]
+const FILE_CREATE: u32 = 0x00000002;
+
+#[cfg(windows)]
+const FILE_SHARE_READ: u32 = 0x00000001;
+
+#[cfg(windows)]
+const FILE_SHARE_WRITE: u32 = 0x00000002;
+
+#[cfg(windows)]
+const FILE_SHARE_DELETE: u32 = 0x00000004;
+
+// NtCreateFile signature (x64). Declared here because winapi does not
+// ship an NtCreateFile binding; no dependency is added.
+#[repr(C)]
+#[allow(non_snake_case)]
+#[cfg(windows)]
+struct IO_STATUS_BLOCK {
+    Status: winapi::ctypes::c_long,
+    Information: usize,
+}
+
+#[link(name = "ntdll")]
+#[cfg(windows)]
+unsafe extern "system" {
+    fn NtCreateFile(
+        FileHandle: *mut winapi::shared::ntdef::HANDLE,
+        DesiredAccess: winapi::ctypes::c_ulong,
+        ObjectAttributes: *mut winapi::shared::ntdef::OBJECT_ATTRIBUTES,
+        IoStatusBlock: *mut IO_STATUS_BLOCK,
+        AllocationSize: winapi::shared::ntdef::PLARGE_INTEGER,
+        FileAttributes: winapi::ctypes::c_ulong,
+        ShareAccess: winapi::ctypes::c_ulong,
+        CreateDisposition: winapi::ctypes::c_ulong,
+        CreateOptions: winapi::ctypes::c_ulong,
+        EaBuffer: *mut winapi::ctypes::c_void,
+        EaLength: winapi::ctypes::c_ulong,
+    ) -> winapi::ctypes::c_long;
+}
+
+#[cfg(windows)]
+const STATUS_SUCCESS: winapi::ctypes::c_long = 0;
+
+#[cfg(windows)]
+const STATUS_NOT_FOUND: winapi::ctypes::c_long = 0xC0000034u32 as winapi::ctypes::c_long;
+
+#[cfg(windows)]
+fn nt_string(segment: &std::ffi::OsStr) -> Vec<u16> {
+    segment.encode_wide().collect()
+}
+
+/// Convert an absolute Windows path into an absolute NT path (`\??\C:...`).
+#[cfg(windows)]
+fn to_nt_path(path: &Path) -> Result<Vec<u16>> {
+    let absolute = path
+        .canonicalize()
+        .with_context(|| format!("canonicalize {}", path.display()))?;
+    let absolute = absolute
+        .to_str()
+        .with_context(|| format!("absolute path {} is not valid UTF-8", absolute.display()))?;
+    // canonicalize() on Windows returns `\\?\C:\...`; strip that prefix so
+    // the result is `\??\C:\...` exactly once.
+    let absolute = absolute
+        .strip_prefix(r"\\?\")
+        .context("canonical path lacks the \\?\\ prefix")?;
+    let nt = format!("\\??\\{absolute}");
+    Ok(nt.encode_utf16().collect())
+}
+
+#[cfg(windows)]
+fn attrs(handle: &std::fs::File) -> Result<u32> {
+    let mut info: winapi::um::fileapi::BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    let raw_handle = handle.as_raw_handle() as *mut winapi::ctypes::c_void;
+    let ok = unsafe { winapi::um::fileapi::GetFileInformationByHandle(raw_handle, &mut info) };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error()).context("GetFileInformationByHandle failed");
+    }
+    Ok(info.dwFileAttributes)
+}
+
+#[cfg(windows)]
+const SHARE: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+
+#[cfg(windows)]
+fn nt_create_file(
+    name: &[u16],
+    root: winapi::shared::ntdef::HANDLE,
+    desired_access: u32,
+    create_disposition: u32,
+    is_directory: bool,
+) -> (
+    winapi::ctypes::c_long,
+    Option<winapi::shared::ntdef::HANDLE>,
+) {
+    let mut unicode = winapi::shared::ntdef::UNICODE_STRING {
+        Length: (name.len() * 2) as u16,
+        MaximumLength: (name.len() * 2) as u16,
+        Buffer: name.as_ptr() as *mut u16,
+    };
+    let mut attrs: winapi::shared::ntdef::OBJECT_ATTRIBUTES = unsafe { std::mem::zeroed() };
+    unsafe {
+        winapi::shared::ntdef::InitializeObjectAttributes(
+            &mut attrs,
+            &mut unicode,
+            winapi::shared::ntdef::OBJ_CASE_INSENSITIVE,
+            root,
+            std::ptr::null_mut(),
+        );
+    }
+    let mut io = IO_STATUS_BLOCK {
+        Status: 0,
+        Information: 0,
+    };
+    let mut handle: winapi::shared::ntdef::HANDLE = std::ptr::null_mut();
+    let opts = if is_directory {
+        FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT
+    } else {
+        FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT
+    };
+    let status = unsafe {
+        NtCreateFile(
+            &mut handle,
+            desired_access,
+            &mut attrs,
+            &mut io,
+            std::ptr::null_mut(),
+            0,
+            SHARE,
+            create_disposition,
+            opts,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if status != STATUS_SUCCESS {
+        return (status, None);
+    }
+    (status, Some(handle))
+}
+
+#[cfg(windows)]
+fn from_nt_handle(raw: winapi::shared::ntdef::HANDLE, path: &Path) -> Result<std::fs::File> {
+    if raw.is_null() || raw as usize == usize::MAX {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("nt handle invalid for {}", path.display()));
+    }
+    // SAFETY: `raw` is owned by the caller (nt_create_file success) and the
+    // File takes ownership.
+    Ok(unsafe { std::fs::File::from_raw_handle(raw as _) })
+}
+
+#[cfg(windows)]
+fn open_dir(path: &Path) -> Result<std::fs::File> {
+    let nt = to_nt_path(path)?;
+    // Root open: directory, FILE_READ_DATA | SYNCHRONIZE.
+    let (status, raw) = nt_create_file(
+        &nt,
+        std::ptr::null_mut(),
+        GENERIC_READ | SYNCHRONIZE,
+        FILE_OPEN,
+        true,
+    );
+    if status != STATUS_SUCCESS {
+        return Err(std::io::Error::from_raw_os_error(status))
+            .with_context(|| format!("failed to open base directory {}", path.display()));
+    }
+    let handle = from_nt_handle(raw.unwrap(), path)?;
+    let a = attrs(&handle)?;
+    if a & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        bail!("base {} is a reparse point; refusing", path.display());
+    }
+    if a & FILE_ATTRIBUTE_DIRECTORY == 0 {
+        bail!("base {} is not a directory; refusing", path.display());
+    }
+    Ok(handle)
+}
+
+#[cfg(windows)]
+fn open_child_dir(
+    parent: &std::fs::File,
+    _parent_path: &Path,
+    segment: &std::ffi::OsStr,
+) -> Result<std::fs::File> {
+    let name = nt_string(segment);
+    let parent_raw = parent.as_raw_handle() as winapi::shared::ntdef::HANDLE;
+    let (status, raw) = nt_create_file(
+        &name,
+        parent_raw,
+        GENERIC_READ | SYNCHRONIZE,
+        FILE_OPEN,
+        true,
+    );
+    if status != STATUS_SUCCESS {
+        return Err(std::io::Error::from_raw_os_error(status))
+            .with_context(|| format!("open {} failed", segment.to_string_lossy()));
+    }
+    let handle = from_nt_handle(
+        raw.unwrap(),
+        Path::new(segment.to_str().unwrap_or("<non-unicode>")),
+    )?;
+    let a = attrs(&handle)?;
+    if a & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        bail!(
+            "component {} is a reparse point; refusing",
+            segment.to_string_lossy()
+        );
+    }
+    if a & FILE_ATTRIBUTE_DIRECTORY == 0 {
+        bail!(
+            "component {} is not a directory; refusing",
+            segment.to_string_lossy()
+        );
+    }
+    Ok(handle)
+}
+
+#[cfg(windows)]
+fn verify_plain_directory(handle: &std::fs::File, path: &Path) -> Result<()> {
+    let a = attrs(handle)?;
+    if a & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        bail!("component {} is a reparse point; refusing", path.display());
+    }
+    if a & FILE_ATTRIBUTE_DIRECTORY == 0 {
+        bail!("component {} is not a directory; refusing", path.display());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn open_relative_file(
+    parent: &std::fs::File,
+    leaf: &std::ffi::OsStr,
+    desired_access: u32,
+    create_disposition: u32,
+) -> Result<std::fs::File> {
+    let name = nt_string(leaf);
+    let parent_raw = parent.as_raw_handle() as winapi::shared::ntdef::HANDLE;
+    let (status, raw) = nt_create_file(
+        &name,
+        parent_raw,
+        desired_access | SYNCHRONIZE,
+        create_disposition,
+        false,
+    );
+    if status != STATUS_SUCCESS {
+        if status == STATUS_NOT_FOUND {
+            return Err(std::io::Error::from_raw_os_error(status))
+                .with_context(|| format!("leaf {} not found", leaf.to_string_lossy()));
+        }
+        return Err(std::io::Error::from_raw_os_error(status))
+            .with_context(|| format!("open {} failed", leaf.to_string_lossy()));
+    }
+    from_nt_handle(raw.unwrap(), Path::new(leaf))
+}
+
+#[cfg(windows)]
+fn open_leaf_read(
+    base: &Path,
+    dir: &[std::ffi::OsString],
+    leaf: &std::ffi::OsString,
+) -> Result<std::fs::File> {
+    let (handles, _) = walk_dir_chain(base, dir)?;
+    let parent = handles.last().expect("walk yields base handle");
+    let handle = open_relative_file(parent, leaf.as_os_str(), GENERIC_READ, FILE_OPEN)?;
+    let a = attrs(&handle)?;
+    if a & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        bail!("leaf is a reparse point; refusing to read");
+    }
+    if a & FILE_ATTRIBUTE_DIRECTORY != 0 {
+        bail!("leaf is a directory; refusing to read as file");
+    }
+    Ok(handle)
+}
+
+#[cfg(windows)]
+fn open_write_ordinary(
+    base: &Path,
+    dir: &[std::ffi::OsString],
+    leaf: &std::ffi::OsString,
+) -> Result<std::fs::File> {
+    let (handles, _) = walk_dir_chain(base, dir)?;
+    let parent = handles.last().expect("walk yields base handle");
+    let handle = open_relative_file(
+        parent,
+        leaf.as_os_str(),
+        GENERIC_READ | GENERIC_WRITE,
+        FILE_OPEN,
+    )?;
+    let a = attrs(&handle)?;
+    if a & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        bail!("leaf is a reparse point; refusing to write");
+    }
+    if a & FILE_ATTRIBUTE_DIRECTORY != 0 {
+        bail!("leaf is a directory; refusing to write");
+    }
+    // Truncate only after the object has been verified.
+    handle.set_len(0).context("truncate after verified open")?;
+    Ok(handle)
+}
+
+#[cfg(windows)]
+fn open_fresh_leaf_write(
+    base: &Path,
+    dir: &[std::ffi::OsString],
+    leaf: &std::ffi::OsString,
+) -> Result<std::fs::File> {
+    let (handles, _) = walk_dir_chain(base, dir)?;
+    let parent = handles.last().expect("walk yields base handle");
+    let handle = open_relative_file(
+        parent,
+        leaf.as_os_str(),
+        GENERIC_READ | GENERIC_WRITE,
+        FILE_CREATE,
+    )?;
+    let a = attrs(&handle)?;
+    if a & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        bail!("leaf is a reparse point; refusing to write");
+    }
+    if a & FILE_ATTRIBUTE_DIRECTORY != 0 {
+        bail!("leaf is a directory; refusing to write");
+    }
+    Ok(handle)
+}
+
+#[cfg(unix)]
+fn open_dir(path: &Path) -> Result<std::fs::File> {
+    let before = std::fs::symlink_metadata(path)?;
+    if before.file_type().is_symlink() {
+        bail!("base {} is a symlink; refusing", path.display());
+    }
+    if !before.file_type().is_dir() {
+        bail!("base {} is not a directory; refusing", path.display());
+    }
+    let file = std::fs::File::open(path).with_context(|| format!("open dir {}", path.display()))?;
+    let meta = file.metadata()?;
+    if meta.dev() != before.dev() || meta.ino() != before.ino() {
+        bail!("base {} was swapped between check and open", path.display());
+    }
+    if !meta.file_type().is_dir() {
+        bail!("base {} is not a directory; refusing", path.display());
+    }
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn open_child_dir(
+    parent: &std::fs::File,
+    parent_path: &Path,
+    segment: &std::ffi::OsStr,
+) -> Result<std::fs::File> {
+    let _ = parent;
+    let path = parent_path.join(segment);
+    let before = std::fs::symlink_metadata(&path)?;
+    if before.file_type().is_symlink() {
+        bail!("component {} is a symlink; refusing", path.display());
+    }
+    if !before.file_type().is_dir() {
+        bail!("component {} is not a directory; refusing", path.display());
+    }
+    let file =
+        std::fs::File::open(&path).with_context(|| format!("open dir {}", path.display()))?;
+    let meta = file.metadata()?;
+    if meta.dev() != before.dev() || meta.ino() != before.ino() {
+        bail!(
+            "component {} was swapped between check and open",
+            path.display()
+        );
+    }
+    if !meta.file_type().is_dir() {
+        bail!("component {} is not a directory; refusing", path.display());
+    }
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn verify_plain_directory(handle: &std::fs::File, path: &Path) -> Result<()> {
+    let _ = path;
+    let meta = handle.metadata()?;
+    if !meta.file_type().is_dir() {
+        bail!("component is not a directory; refusing");
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn open_leaf_read(
+    base: &Path,
+    dir: &[std::ffi::OsString],
+    leaf: &std::ffi::OsString,
+) -> Result<std::fs::File> {
+    let (handles, leaf_parent) = walk_dir_chain(base, dir)?;
+    let _ = handles;
+    let leaf_path = leaf_parent.join(leaf);
+    let before = std::fs::symlink_metadata(&leaf_path)?;
+    if before.file_type().is_symlink() {
+        bail!("leaf is a symlink; refusing to read");
+    }
+    if !before.file_type().is_file() {
+        bail!("leaf is not a regular file; refusing to read");
+    }
+    let file = std::fs::File::open(&leaf_path)?;
+    let meta = file.metadata()?;
+    if meta.dev() != before.dev() || meta.ino() != before.ino() {
+        bail!("leaf was swapped between check and open");
+    }
+    if !meta.file_type().is_file() {
+        bail!("leaf is not a regular file; refusing to read");
+    }
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn open_write_ordinary(
+    base: &Path,
+    dir: &[std::ffi::OsString],
+    leaf: &std::ffi::OsString,
+) -> Result<std::fs::File> {
+    let (handles, leaf_parent) = walk_dir_chain(base, dir)?;
+    let _ = handles;
+    let leaf_path = leaf_parent.join(leaf);
+    let before = std::fs::symlink_metadata(&leaf_path)?;
+    if before.file_type().is_symlink() {
+        bail!("leaf is a symlink; refusing to write");
+    }
+    if !before.file_type().is_file() {
+        bail!("leaf is not a regular file; refusing to write");
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&leaf_path)?;
+    let meta = file.metadata()?;
+    if meta.dev() != before.dev() || meta.ino() != before.ino() {
+        bail!("leaf was swapped between check and open");
+    }
+    if !meta.file_type().is_file() {
+        bail!("leaf is not a regular file; refusing to write");
+    }
+    file.set_len(0).context("truncate after verified open")?;
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn open_fresh_leaf_write(
+    base: &Path,
+    dir: &[std::ffi::OsString],
+    leaf: &std::ffi::OsString,
+) -> Result<std::fs::File> {
+    let (handles, leaf_parent) = walk_dir_chain(base, dir)?;
+    let _ = handles;
+    let leaf_path = leaf_parent.join(leaf);
+    use std::os::unix::fs::OpenOptionsExt;
+    let _ = OpenOptionsExt::mode;
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&leaf_path)?;
+    let meta = file.metadata()?;
+    if !meta.file_type().is_file() {
+        bail!("leaf is not a regular file; refusing to write");
+    }
+    Ok(file)
+}
+
+// ---------------------------------------------------------------------------
+// Adversarial validation-effect swap interposition tests (the review's live
+// race). These exercise the deterministic test-only hook between tool
+// validation and the filesystem effect; they exist inside the crate so no
+// new public surface is required. The outside sentinel must never change.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod adversarial_tests {
+    use super::*;
+    use crate::flow::Tool;
+
+    /// Non-dereferencing check: is there a directory entry at `link` and is it a
+    /// symlink/junction (reparse point)? Never follows the target.
+    fn reparse_entry_present(link: &Path) -> bool {
+        std::fs::symlink_metadata(link)
+            .map(|meta| meta.file_type().is_symlink())
+            .unwrap_or(false)
+    }
+
+    /// Plant a reparse point at `link` targeting `target`. Prefers a true file
+    /// symlink; falls back to a directory junction (`mklink /J`) where file
+    /// symlinks are not permitted (Windows without elevation). Returns false
+    /// when neither is permitted; callers then skip loudly instead of counting
+    /// the test as evidence.
+    fn junction_or_symlink(source: &Path, target: &Path) -> bool {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target, source).is_ok() && reparse_entry_present(source)
+        }
+        #[cfg(windows)]
+        {
+            if target.is_dir() {
+                if std::os::windows::fs::symlink_dir(target, source).is_ok()
+                    && reparse_entry_present(source)
+                {
+                    return true;
+                }
+                let out = std::process::Command::new("cmd")
+                    .args(["/c", "mklink", "/J"])
+                    .arg(source)
+                    .arg(target)
+                    .output();
+                if let Ok(out) = out
+                    && out.status.success()
+                    && reparse_entry_present(source)
+                {
+                    return true;
+                }
+                false
+            } else {
+                std::os::windows::fs::symlink_file(target, source).is_ok()
+                    && reparse_entry_present(source)
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn existing_leaf_swap_during_validation_write_fails_closed() {
+        let base = tempfile::tempdir().expect("tempdir");
+        let repo = base.path().join("repo");
+        let outside = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join("existing-write.txt"), "repo-original").unwrap();
+        let victim_dir = outside.path().join("victim-dir");
+        std::fs::create_dir_all(&victim_dir).unwrap();
+        std::fs::write(victim_dir.join("sentinel.txt"), "outside-original").unwrap();
+
+        let repo_clone = repo.clone();
+        let outside_clone = outside.path().to_path_buf();
+        arm("existing-write.txt", move |_path| {
+            let victim = outside_clone.join("victim-dir");
+            let link = repo_clone.join("existing-write.txt");
+            let _ = std::fs::remove_file(&link);
+            let _ = junction_or_symlink(&link, &victim);
+        });
+
+        let tool = WriteFileTool::new(repo.clone());
+        let out = tool
+            .call(serde_json::json!({"path": "existing-write.txt", "content": "owned"}))
+            .await
+            .expect("write");
+        assert_eq!(
+            out["success"], false,
+            "an existing leaf swapped mid-effect must fail closed: {out}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("victim-dir").join("sentinel.txt"))
+                .unwrap(),
+            "outside-original",
+            "the outside sentinel file must not be written through the swapped link"
+        );
+    }
+
+    #[tokio::test]
+    async fn fresh_leaf_swap_during_validation_write_fails_closed() {
+        let base = tempfile::tempdir().expect("tempdir");
+        let repo = base.path().join("repo");
+        let outside = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(&repo).unwrap();
+        let victim_dir = outside.path().join("victim-dir");
+        std::fs::create_dir_all(&victim_dir).unwrap();
+        std::fs::write(victim_dir.join("sentinel.txt"), "outside-original").unwrap();
+
+        let repo_clone = repo.clone();
+        let outside_clone = outside.path().to_path_buf();
+        arm("fresh.txt", move |_path| {
+            let victim = outside_clone.join("victim-dir");
+            let link = repo_clone.join("fresh.txt");
+            let _ = std::fs::remove_file(&link);
+            let _ = junction_or_symlink(&link, &victim);
+        });
+
+        let tool = WriteFileTool::new(repo.clone());
+        let out = tool
+            .call(serde_json::json!({"path": "fresh.txt", "content": "owned"}))
+            .await
+            .expect("write");
+        assert_eq!(
+            out["success"], false,
+            "a fresh leaf swapped mid-effect must fail closed: {out}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("victim-dir").join("sentinel.txt"))
+                .unwrap(),
+            "outside-original",
+            "the outside victim file must not receive the written content"
+        );
+    }
+
+    #[tokio::test]
+    async fn ancestor_swap_during_validation_write_fails_closed() {
+        let base = tempfile::tempdir().expect("tempdir");
+        let repo = base.path().join("repo");
+        let outside = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(repo.join("sub")).unwrap();
+        let victim_dir = outside.path().join("victim-dir");
+        std::fs::create_dir_all(&victim_dir).unwrap();
+        std::fs::write(victim_dir.join("sentinel.txt"), "outside-original").unwrap();
+
+        let repo_clone = repo.clone();
+        let outside_clone = outside.path().to_path_buf();
+        arm("victim.txt", move |_path| {
+            let sub_orig = repo_clone.join("sub-orig");
+            let _ = std::fs::rename(repo_clone.join("sub"), &sub_orig);
+            let _ = junction_or_symlink(&repo_clone.join("sub"), &outside_clone);
+        });
+
+        let tool = WriteFileTool::new(repo.clone());
+        let out = tool
+            .call(serde_json::json!({"path": "sub/victim.txt", "content": "owned"}))
+            .await
+            .expect("write");
+        assert_eq!(
+            out["success"], false,
+            "a swapped ancestor must fail closed before the write effect: {out}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("victim-dir").join("sentinel.txt"))
+                .unwrap(),
+            "outside-original",
+            "the outside sentinel file must not be written through the swapped ancestor"
+        );
+        assert!(
+            !outside.path().join("child.txt").exists(),
+            "no file must be created outside the repo through the swapped ancestor"
+        );
+    }
+
+    #[tokio::test]
+    async fn patch_swap_during_validation_fails_closed() {
+        let base = tempfile::tempdir().expect("tempdir");
+        let repo = base.path().join("repo");
+        let outside = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join("existing-patch.txt"), "repo-original").unwrap();
+        let victim_dir = outside.path().join("victim-dir");
+        std::fs::create_dir_all(&victim_dir).unwrap();
+        std::fs::write(victim_dir.join("sentinel.txt"), "outside-original").unwrap();
+
+        let repo_clone = repo.clone();
+        let outside_clone = outside.path().to_path_buf();
+        arm("existing-patch.txt", move |_path| {
+            let victim = outside_clone.join("victim-dir");
+            let link = repo_clone.join("existing-patch.txt");
+            let _ = std::fs::remove_file(&link);
+            let _ = junction_or_symlink(&link, &victim);
+        });
+
+        let tool = PatchFileTool::new(repo.clone());
+        let out = tool
+            .call(serde_json::json!({
+                "path": "existing-patch.txt",
+                "diff": "--- a/existing-patch.txt\n+++ b/existing-patch.txt\n@@ -1 +1 @@\n-repo-original\n+owned\n"
+            }))
+            .await
+            .expect("patch");
+        assert_eq!(
+            out["success"], false,
+            "a leaf swapped mid-effect must fail closed for patch too: {out}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("victim-dir").join("sentinel.txt"))
+                .unwrap(),
+            "outside-original",
+            "the outside sentinel file must not be patched through the swapped link"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_swap_during_validation_fails_closed() {
+        let base = tempfile::tempdir().expect("tempdir");
+        let repo = base.path().join("repo");
+        let outside = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join("read-target.txt"), "repo-content").unwrap();
+        let victim_dir = outside.path().join("victim-dir");
+        std::fs::create_dir_all(&victim_dir).unwrap();
+        std::fs::write(victim_dir.join("sentinel.txt"), "outside-original").unwrap();
+
+        let repo_clone = repo.clone();
+        let outside_clone = outside.path().to_path_buf();
+        arm("read-target.txt", move |_path| {
+            let victim = outside_clone.join("victim-dir");
+            let link = repo_clone.join("read-target.txt");
+            let _ = std::fs::remove_file(&link);
+            let _ = junction_or_symlink(&link, &victim);
+        });
+
+        let tool = RepoReadFileTool::new(repo.clone());
+        let out = tool
+            .call(serde_json::json!({"path": "read-target.txt"}))
+            .await
+            .expect("read");
+        assert_eq!(
+            out["success"], false,
+            "a leaf swapped mid-effect must fail closed for reads too: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dangling_final_component_during_validation_write_fails_closed() {
+        let base = tempfile::tempdir().expect("tempdir");
+        let repo = base.path().join("repo");
+        let outside = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(&repo).unwrap();
+        // Target deliberately absent (dangling junction — target directory
+        // never created). mklink /J handles a nonexistent target.
+        let link = repo.join("dangling.txt");
+        let absent_target = outside.path().join("never-created-dir");
+        let out = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(&link)
+            .arg(&absent_target)
+            .output();
+        match out {
+            Ok(o) if o.status.success() => {}
+            _ => panic!(
+                "reparse point creation not permitted on this host; host cannot produce the required fixture"
+            ),
+        }
+        assert!(
+            std::fs::symlink_metadata(&link).is_ok(),
+            "the junction itself must exist after creation"
+        );
+
+        let tool = WriteFileTool::new(repo.clone());
+        let out = tool
+            .call(serde_json::json!({"path": "dangling.txt", "content": "owned"}))
+            .await
+            .expect("write");
+        assert_eq!(
+            out["success"], false,
+            "a dangling final-component link must fail closed: {out}"
+        );
+        assert!(
+            !outside.path().join("never-created-dir").exists(),
+            "the dangling outside directory must never be created by a refused write"
         );
     }
 }

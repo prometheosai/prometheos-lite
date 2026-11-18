@@ -1,5 +1,24 @@
 ## Unreleased
 
+- #138 E7/I03 Slice A - independent-review R1-R5 follow-up repair. `WriteFileTool`,
+  `RepoReadFileTool` and `PatchFileTool` no longer decide on pathnames: the filesystem
+  effect runs through a verified handle-relative open (`NtCreateFile` with
+  `RootDirectory` on Windows; open-by-parent descriptor with reparse-point checks on
+  Unix). Every ancestor component is opened as a handle and verified non-reparse before
+  the effect; the leaf is classified on the opened handle (ordinary vs reparse point vs
+  nonexistent vs inspection failure - any unexpected inspection error fails closed);
+  existing leaves are opened, verified, and only then truncated (`open(2)`-style
+  truncate-after-verify); fresh leaves are created with `FILE_CREATE`/`O_CREAT|O_EXCL`
+  so a swapped-in leaf fails the create. External `patch(1)` is removed; a bounded,
+  self-contained unified-diff applier (strict hunk parsing, delta-adjusted match
+  position, trailing-newline preservation) is used instead. PathGuard is unchanged from
+  the merged repair (#318 lineage). The repair adds ZERO new public items (all
+  machinery private inside `src/tools/repo.rs`); the deterministic adversarial
+  validation→effect swap tests live in-crate (`tools::repo::adversarial_tests`, 6
+  tests) plus d09b92f's suite in `tests/security_regression_slice_a.rs` (28 tests,
+  unchanged). `local_ci_policy.py` (G-B static guard) passes with zero findings.
+  Linux/macOS NOT RUN.
+
 - #138 E7/I03 Slice A - independent-review repair (PR #315 round 2). Dangling-symlink
   and unresolved-ancestor reparse points are now rejected by `PathGuard` on every
   segment (no exception between parent and leaf); arbitrary inspection errors other
