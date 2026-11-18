@@ -1,5 +1,29 @@
 ## Unreleased
 
+- #138 E7/I03 Slice A - security regression suite + threat-boundary matrix
+  for the independent security assessment (Lite-internal, experimental; NOT
+  an independent assessment; NOT a release gate). PR #315 (2026-11-17):
+  repairs two demonstrated path/authority defects - (1) `PathGuard` checked
+  the canonical *parent* directory only, so a repo-internal symlink (dir or
+  junction) satisfied the syntactic checks and let `read_file`, `write_file`,
+  `patch_file`, `list_tree` and `search_files` reach outside the repository;
+  every tool now validates through the canonical ancestor and never follows a
+  symlink entry; (2) `PermissionLedger::check` compared paths by raw prefix,
+  letting `repo/src/../../secret.txt` borrow a `repo/src` grant; paths are
+  now lexically normalized before comparison, and any explicit deny takes
+  precedence over any allow. New executable regressions cover command
+  allowlist/blocklist behavior, symlink/junction escape for every repo tool,
+  path-guard fresh-nested-path write, PermissionLedger prefix traversal and
+  deny precedence, journal `validate_journal` sequence gap (direct regression
+  against the production validator) and forged journal events,
+  dependency-manifest-revision pin refusal, and build-config payload markers
+  (the #297 postcss attack class) in
+  `frontend/postcss.config.js`/`next.config.js`/`package.json`/lockfile.
+  Threat-boundary matrix with explicit residual risks is in
+  `docs/security/threat-boundary-matrix-slice-A.md`. NO independent
+  assessment is claimed complete; assessor sign-off remains outstanding.
+  Linux/macOS NOT RUN.
+
 - #137 E7/I02 Slice A - controlled reliability / fault-injection campaign
   (Lite-internal, experimental). PR #313 (2026-11-17): a new narrow
   fault-injection hook in `workflow::durable` (thread-local, no-op unless armed

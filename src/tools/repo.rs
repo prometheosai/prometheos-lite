@@ -67,24 +67,25 @@ impl Tool for ListTreeTool {
     async fn call(&self, input: serde_json::Value) -> Result<serde_json::Value> {
         let root = input.get("root").and_then(|v| v.as_str()).unwrap_or("");
 
-        // Validate path with PathGuard
-        if !root.is_empty() && !self.path_guard.is_safe_path(root) {
-            return Ok(serde_json::json!({
-                "error": format!("Path validation failed: {}", root),
-                "success": false
-            }));
-        }
+        // Validate path with PathGuard (canonical, symlink-escape-proof)
+        let base_path = if root.is_empty() {
+            self.repo_path.clone()
+        } else {
+            match self.path_guard.validate_path(root) {
+                Ok(p) => std::path::PathBuf::from(p),
+                Err(_) => {
+                    return Ok(serde_json::json!({
+                        "error": format!("Path validation failed: {}", root),
+                        "success": false
+                    }));
+                }
+            }
+        };
 
         let depth = input
             .get("depth")
             .and_then(|v| v.as_u64())
             .map(|d| d as u32);
-
-        let base_path = if root.is_empty() {
-            self.repo_path.clone()
-        } else {
-            self.repo_path.join(root)
-        };
 
         let mut files = Vec::new();
         let mut dirs = Vec::new();
@@ -125,6 +126,13 @@ impl ListTreeTool {
         while let Some(entry) = entries.next_entry().await? {
             let entry_path = entry.path();
 
+            // Never follow symlinks/junctions: a repo-internal link pointing
+            // outside the repository must not be recursed into.
+            let file_type = entry.file_type().await?;
+            if file_type.is_symlink() {
+                continue;
+            }
+
             // Skip common ignored directories
             if let Some(name) = entry_path.file_name().and_then(|n| n.to_str())
                 && (name == "target" || name == "node_modules" || name == ".git" || name == ".next")
@@ -153,7 +161,6 @@ impl ListTreeTool {
 
 /// Read file tool - reads file contents
 pub struct RepoReadFileTool {
-    repo_path: PathBuf,
     path_guard: PathGuard,
 }
 
@@ -161,7 +168,6 @@ impl RepoReadFileTool {
     pub fn new(repo_path: PathBuf) -> Self {
         let base_dir = repo_path.to_string_lossy().to_string();
         Self {
-            repo_path,
             path_guard: PathGuard::new(base_dir),
         }
     }
@@ -197,14 +203,17 @@ impl Tool for RepoReadFileTool {
             .context("Missing path")?;
 
         // Validate path with PathGuard
-        if !self.path_guard.is_safe_path(path) {
-            return Ok(serde_json::json!({
-                "error": format!("Path validation failed: {}", path),
-                "success": false
-            }));
-        }
+        let safe_path = match self.path_guard.validate_path(path) {
+            Ok(p) => p,
+            Err(_) => {
+                return Ok(serde_json::json!({
+                    "error": format!("Path validation failed: {}", path),
+                    "success": false
+                }));
+            }
+        };
 
-        let full_path = self.repo_path.join(path);
+        let full_path = std::path::PathBuf::from(&safe_path);
 
         if !full_path.exists() {
             return Ok(serde_json::json!({
@@ -297,6 +306,12 @@ impl SearchFilesTool {
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
 
+            // Never follow symlinks/junctions out of the repository.
+            let file_type = entry.file_type().await?;
+            if file_type.is_symlink() {
+                continue;
+            }
+
             if path.is_dir() {
                 if let Some(name) = path.file_name().and_then(|n| n.to_str())
                     && (name == "target" || name == "node_modules" || name == ".git")
@@ -307,7 +322,12 @@ impl SearchFilesTool {
                 let mut sub_entries = tokio::fs::read_dir(&path).await?;
                 while let Some(sub_entry) = sub_entries.next_entry().await? {
                     let sub_path = sub_entry.path();
-                    if sub_path.is_file() {
+                    let sub_type = sub_entry.file_type().await?;
+                    if sub_type.is_symlink() {
+                        // Skip symlinks/junctions: never read outside the repo.
+                        continue;
+                    }
+                    if sub_type.is_file() {
                         if let Some(glob_pattern) = glob
                             && !self.matches_glob(&sub_path, glob_pattern)
                         {
@@ -364,7 +384,6 @@ impl SearchFilesTool {
 
 /// Write file tool - writes content to a file
 pub struct WriteFileTool {
-    repo_path: PathBuf,
     path_guard: PathGuard,
 }
 
@@ -372,7 +391,6 @@ impl WriteFileTool {
     pub fn new(repo_path: PathBuf) -> Self {
         let base_dir = repo_path.to_string_lossy().to_string();
         Self {
-            repo_path,
             path_guard: PathGuard::new(base_dir),
         }
     }
@@ -417,14 +435,17 @@ impl Tool for WriteFileTool {
             .context("Missing content")?;
 
         // Validate path with PathGuard
-        if !self.path_guard.is_safe_path(path) {
-            return Ok(serde_json::json!({
-                "error": format!("Path validation failed: {}", path),
-                "success": false
-            }));
-        }
+        let safe_path = match self.path_guard.validate_path(path) {
+            Ok(p) => p,
+            Err(_) => {
+                return Ok(serde_json::json!({
+                    "error": format!("Path validation failed: {}", path),
+                    "success": false
+                }));
+            }
+        };
 
-        let full_path = self.repo_path.join(path);
+        let full_path = std::path::PathBuf::from(&safe_path);
 
         // Create parent directories if they don't exist
         if let Some(parent) = full_path.parent() {
@@ -513,15 +534,17 @@ impl Tool for PatchFileTool {
             .context("Missing diff")?;
 
         // Validate path with PathGuard
-        if !self.path_guard.is_safe_path(path) {
-            return Ok(serde_json::json!({
-                "error": format!("Path validation failed: {}", path),
-                "success": false,
-                "validation": "failed"
-            }));
-        }
+        let safe_path = match self.path_guard.validate_path(path) {
+            Ok(p) => p,
+            Err(_) => {
+                return Ok(serde_json::json!({
+                    "error": format!("Path validation failed: {}", path),
+                    "success": false
+                }));
+            }
+        };
 
-        let full_path = self.repo_path.join(path);
+        let full_path = std::path::PathBuf::from(&safe_path);
 
         // Validate file exists
         if !full_path.exists() {
@@ -596,7 +619,7 @@ impl PatchFileTool {
             );
         }
 
-        if !self.path_guard.is_safe_path(&target) {
+        if self.path_guard.validate_path(&target).is_err() {
             anyhow::bail!("Diff target path validation failed: {}", target);
         }
 

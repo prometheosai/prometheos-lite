@@ -43,6 +43,39 @@ pub struct PermissionLedger {
     deny_count: u64,
 }
 
+/// Normalize a path lexically, without touching the filesystem: resolve
+/// `.` and `..` against normal components, preserving a leading root. Used
+/// so a path like `repo/src/../../secret.txt` cannot borrow a grant that
+/// covers `repo/src` merely because it starts with the same prefix.
+fn lexical_normalize(path: &Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut out = std::path::PathBuf::new();
+    let mut depth: usize = 0;
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => out.push(prefix.as_os_str()),
+            Component::RootDir => {
+                out.push(Path::new("/"));
+                depth = 0;
+            }
+            Component::Normal(name) => {
+                out.push(name);
+                depth += 1;
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if depth > 0 {
+                    out.pop();
+                    depth -= 1;
+                } else {
+                    out.push("..");
+                }
+            }
+        }
+    }
+    out
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct DeniedOperation {
     permission: Permission,
@@ -126,30 +159,64 @@ impl PermissionLedger {
     pub fn check(&mut self, permission: Permission, path: &Path) -> PermissionCheck {
         self.check_count += 1;
 
+        // Lexical normalization defeats prefix traversal attacks such as
+        // `repo/src/../../secret.txt` borrowing a grant covering `repo/src`.
+        let normalized = lexical_normalize(path);
+        let path_str = normalized.to_string_lossy().into_owned();
+
+        let mut matched_allow: Option<PermissionGrant> = None;
+        let mut matched_deny: Option<PermissionGrant> = None;
         for grant in &self.grants {
             if grant.permission == permission {
                 let matches = match &grant.path {
-                    Some(p) => path.starts_with(p),
+                    Some(p) => {
+                        let base = lexical_normalize(p);
+                        normalized == base || normalized.starts_with(&base)
+                    }
                     None => match &grant.pattern {
-                        Some(pattern) => {
-                            let path_str = path.to_string_lossy();
-                            regex::Regex::new(pattern)
-                                .map(|re| re.is_match(&path_str))
-                                .unwrap_or(false)
-                        }
+                        Some(pattern) => regex::Regex::new(pattern)
+                            .map(|re| re.is_match(&path_str))
+                            .unwrap_or(false),
                         None => true,
                     },
                 };
 
                 if matches {
-                    return PermissionCheck {
-                        granted: grant.allow,
-                        permission,
-                        matched_grant: Some(grant.clone()),
-                        reason: grant.reason.clone(),
-                    };
+                    if grant.allow {
+                        // Keep the first allow; do not let it shadow a deny
+                        // that appears later in the ledger.
+                        if matched_allow.is_none() {
+                            matched_allow = Some(grant.clone());
+                        }
+                    } else {
+                        matched_deny = Some(grant.clone());
+                    }
                 }
             }
+        }
+
+        // Any explicit denial takes precedence over an allow.
+        if let Some(deny) = matched_deny {
+            self.deny(
+                permission,
+                Some(path.to_path_buf()),
+                format!("explicitly denied: {}", deny.reason),
+            );
+            return PermissionCheck {
+                granted: false,
+                permission,
+                matched_grant: Some(deny),
+                reason: "Denied by explicit grant".to_string(),
+            };
+        }
+        if let Some(grant) = matched_allow {
+            let reason = grant.reason.clone();
+            return PermissionCheck {
+                granted: grant.allow,
+                permission,
+                matched_grant: Some(grant),
+                reason,
+            };
         }
 
         // No matching grant found - deny by default

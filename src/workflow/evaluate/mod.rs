@@ -49,7 +49,7 @@ pub use identity::{
     compute_identity_key, now_iso,
 };
 pub use integrity::verify_repo_integrity;
-pub use journal::{JournalEvent, read_journal};
+pub use journal::{JournalEvent, read_journal, validate_journal};
 pub use lock::WorkflowFileLock;
 pub use orchestrator::{
     EvaluationConfig, FAST_LOOP_REVIEWED_IDENTITY, FAST_LOOP_WORKFLOW_TEXT, evaluate,
