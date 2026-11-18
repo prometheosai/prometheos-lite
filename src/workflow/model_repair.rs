@@ -112,6 +112,24 @@ pub struct PromptContext {
     pub note: String,
 }
 
+/// Operator-supplied authorization evidence for the model-dispatch egress.
+/// Recorded by the runner from the dispatch spec, never by the model.
+/// Absent evidence is recorded as `None`; the strict path treats absent
+/// evidence as unverified, never as authorized. Not a credential: a
+/// receipt digest and an operator grant/task-scope reference for audit
+/// correlation only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EgressGrantEvidence {
+    /// sha256 (hex64) of the operator-supplied authorization receipt bytes.
+    pub receipt_sha256: String,
+    /// Operator grant/task-scope reference authorizing this egress. Not a
+    /// credential; recorded for audit correlation.
+    pub grant_ref: String,
+    /// RFC 3339 UTC instant the operator attests authorization was in force.
+    pub authorized_at: String,
+}
+
 /// The task the model must solve, as pinned by the caller.
 #[derive(Debug, Clone)]
 pub struct ModelRepairSpec {
@@ -151,6 +169,11 @@ pub struct ModelRepairSpec {
     /// optional issue number). Absent unless configured; never derived
     /// from the model or the task slug.
     pub source: Option<SomaSourceBinding>,
+    /// Operator-supplied authorization evidence for the model-dispatch
+    /// egress, when an authorized provider route/grant exists. Absent
+    /// unless the operator configures it; never derived from the model,
+    /// the task slug or any environment variable.
+    pub egress_grant: Option<EgressGrantEvidence>,
 }
 
 /// Operator-configured binding of the staged worktree to a tracked
@@ -319,6 +342,12 @@ pub struct ModelRepairReport {
     /// Operator-configured SOMA source binding, mirrored from the spec.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<SomaSourceBinding>,
+    /// Operator-supplied egress authorization evidence, mirrored from the
+    /// spec at dispatch. Absent unless the operator configured it; never
+    /// derived from the model. The strict path treats absent evidence as
+    /// unverified (a typed gap), never as authorized.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress_grant: Option<EgressGrantEvidence>,
     /// The pre-fix validator run. Present unless a pre-effect setup failure
     /// stopped before the baseline could execute. `ObservedSubprocess` exit
     /// code reproduces the pre-fix failing behavior.
@@ -342,11 +371,16 @@ pub struct ModelRepairReport {
     /// Digest binding the attached `WorkEventBatch` emission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub events_sha256: Option<String>,
-    /// True iff the report carries every field a strict
-    /// `soma.model-coding-run` v1.0.0 envelope requires, without inventing
-    /// values: execution identity, a provider-issued response/run id on the
-    /// sealing attempt, and a configured repository + revision + issue
-    /// binding. Computed at seal time; re-derived at verification.
+    /// **Strict SOMA coding-run envelope eligibility.** True iff every
+    /// mandatory predicate of [`assess_strict_soma_eligibility`] holds,
+    /// including a `Repaired` outcome, an actual patch digest, an observed
+    /// pinned validator receipt, an auditable WorkEventBatch whose digest
+    /// re-derives, a consistent execution identity, a provider-issued
+    /// response id on the sealing attempt, a valid repository/revision/issue
+    /// binding, and operator-supplied egress authorization evidence. A
+    /// failed or refused run may still be sealed as valid *failure
+    /// evidence* (see [`ModelRepairReport::verify`]); it is never `sealable`.
+    /// Computed at seal time; re-derived at verification.
     pub sealable: bool,
     /// Explicit reasons the report is not sealable for the strict path.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -356,7 +390,12 @@ pub struct ModelRepairReport {
 impl ModelRepairReport {
     /// Re-derive the outcome from the embedded measurements. A report whose
     /// `status` contradicts its attempts/receipts fails verification.
-    pub fn verify(&self) -> Result<(), String> {
+    ///
+    /// **Internal structural validity** of the report: schema, attempts,
+    /// receipts, digests and identities re-derive as recorded. This is
+    /// question A of the strict SOMA eligibility contract and must hold
+    /// for failed and refused runs too; it is never evidence of success.
+    fn verify_structure(&self) -> Result<(), String> {
         if self.schema_version != MODEL_REPAIR_REPORT_SCHEMA {
             return Err(format!(
                 "schema version {} is not {}",
@@ -438,6 +477,17 @@ impl ModelRepairReport {
             }
             None => return Err("missing events digest".to_string()),
         }
+        Ok(())
+    }
+
+    /// Full verification: internal structural validity plus strict
+    /// re-derivation of the sealability verdict recorded in the report.
+    ///
+    /// # Errors
+    /// Returns a message when structural verification fails or the recorded
+    /// sealability verdict does not match re-derivation from the report.
+    pub fn verify(&self) -> Result<(), String> {
+        self.verify_structure()?;
         let (sealable, reasons) = compute_sealability(self);
         if sealable != self.sealable || reasons != self.sealability_reasons {
             return Err("sealability does not match re-derivation from the report".to_string());
@@ -446,51 +496,406 @@ impl ModelRepairReport {
     }
 }
 
-/// Compute (sealable, reasons) from the report. Deterministic.
+/// One typed predicate failure of the strict SOMA eligibility contract.
+/// `kind` is one of `missing` (required evidence absent), `invalid`
+/// (evidence present but malformed/contradictory) or `unverified` (the
+/// proof lives outside this module and was not established, e.g. operator
+/// egress authorization, which the runner never fabricates).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SomaEligibilityGap {
+    /// Stable predicate identifier (e.g. `patch.present`).
+    pub predicate: String,
+    /// `missing` | `invalid` | `unverified`.
+    pub kind: String,
+    /// Operator-readable reason; never a synthesized replacement value.
+    pub reason: String,
+}
+
+/// The three questions a SOMA consumer may ask of a sealed report, kept
+/// strictly separate.
 ///
-/// `sealable` is true iff the report carries every field a strict
-/// `soma.model-coding-run` v1.0.0 envelope needs *without inventing
-/// values*: execution identity, a provider-issued response/run id on the
-/// sealing attempt, and a configured repository + revision + issue binding.
-/// Nothing else is required of the flag itself; patch/validation detail
-/// appears in [`soma_field_mapping`].
-pub fn compute_sealability(report: &ModelRepairReport) -> (bool, Vec<String>) {
-    let mut reasons = Vec::new();
-    if report.execution_id.trim().is_empty() {
-        reasons.push("missing execution identity (executionId)".to_string());
+/// **A. Internal report validity** (`internal_report_valid`): the report is
+/// well formed and its own digests re-derive. This must hold for failed and
+/// refused runs too; it is never evidence of success.
+///
+/// **B. Execution provenance completeness** (`provenance_complete`): the
+/// source binding, repository grammar, revision pin, issue identity,
+/// execution identity, WorkEventBatch digest, provider response id and
+/// operator egress authorization are present and verifiable.
+///
+/// **C. Strict SOMA coding-run envelope eligibility** (`eligible`): every
+/// mandatory predicate needed to emit the strict envelope can be derived
+/// from recorded evidence. An unsuccessful run is never eligible; a failure
+/// report remains valid *failure evidence* (A) without impersonating a
+/// successful coding repair (C).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StrictSomaEligibility {
+    /// A. Internal report validity.
+    pub internal_report_valid: bool,
+    /// B. Execution provenance completeness.
+    pub provenance_complete: bool,
+    /// C. Strict envelope eligibility (A ∧ B ∧ every mandatory predicate).
+    pub eligible: bool,
+    /// Typed gaps, ordered deterministically. Empty iff `eligible`.
+    pub gaps: Vec<SomaEligibilityGap>,
+}
+
+fn is_hex64(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn is_hex_revision(s: &str) -> bool {
+    (s.len() == 40 || s.len() == 64) && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn is_valid_github_slug(s: &str) -> bool {
+    fn part_ok(p: &str) -> bool {
+        !p.is_empty()
+            && p.len() <= 100
+            && p.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.' || b == b'_')
+            && !p.starts_with('-')
+            && !p.starts_with('.')
+            && !p.ends_with('.')
+            && p != "."
+            && p != ".."
     }
+    match s.split_once('/') {
+        Some((owner, name)) => part_ok(owner) && part_ok(name) && !name.contains('/'),
+        None => false,
+    }
+}
+
+fn is_rfc3339_utc(s: &str) -> bool {
+    chrono::DateTime::parse_from_rfc3339(s).is_ok()
+}
+
+/// Deterministic assessment of the three eligibility questions.
+///
+/// No I/O, no clock, no randomness. Failures are reported as typed gaps;
+/// nothing is inferred from configuration alone, and proof that lives
+/// outside this module (e.g. operator egress authorization, remote
+/// commit resolvability) is reported as `unverified` rather than assumed.
+#[must_use]
+pub fn assess_strict_soma_eligibility(report: &ModelRepairReport) -> StrictSomaEligibility {
+    let mut gaps: Vec<SomaEligibilityGap> = Vec::new();
+    let mut gap = |predicate: &str, kind: &str, reason: String| {
+        gaps.push(SomaEligibilityGap {
+            predicate: predicate.to_string(),
+            kind: kind.to_string(),
+            reason,
+        });
+    };
+
+    // ---- A. Internal report validity ----------------------------------
+    let internal_report_valid = report.verify_structure().is_ok();
+    if !internal_report_valid {
+        gap(
+            "internal.reportValid",
+            "invalid",
+            "the report does not verify internally (schema, receipts, digests or identities contradict); see ModelRepairReport::verify".to_string(),
+        );
+    }
+
+    // ---- B. Execution provenance completeness --------------------------
+    let mut provenance_ok = true;
+    let mut mark = |ok: bool, predicate: &str, kind: &str, reason: String| {
+        if !ok {
+            provenance_ok = false;
+            gap(predicate, kind, reason);
+        }
+    };
+
+    // Unique, well-formed, consistently bound execution identity.
+    let exec_ok = report.execution_id.len() == 37
+        && report.execution_id.starts_with("exec-")
+        && report.execution_id[5..]
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase());
+    mark(
+        exec_ok,
+        "execution_id.format",
+        if report.execution_id.trim().is_empty() {
+            "missing"
+        } else {
+            "invalid"
+        },
+        "executionId must be `exec-` followed by 32 lowercase hex characters".to_string(),
+    );
+
     let source = report.source.as_ref();
-    let repository = source.map(|s| s.repository.trim()).unwrap_or("");
-    if repository.is_empty() {
-        reasons.push(
-            "no configured repository binding (source.repository); a task slug is not a repository"
-                .to_string(),
+    mark(
+        source.is_some(),
+        "source.present",
+        "missing",
+        "no SOMA source binding configured (source.repository/revision/issueNumber); a task slug is not a repository".to_string(),
+    );
+    if let Some(source) = source {
+        mark(
+            is_valid_github_slug(source.repository.trim()),
+            "source.repository",
+            if source.repository.trim().is_empty() {
+                "missing"
+            } else {
+                "invalid"
+            },
+            format!(
+                "repository {:?} is not GitHub grammar owner/name",
+                source.repository
+            ),
         );
-    }
-    let revision = source.map(|s| s.repository_revision.trim()).unwrap_or("");
-    if revision.is_empty() {
-        reasons.push(
-            "no configured repository revision binding (source.repositoryRevision)".to_string(),
+        let revision = source.repository_revision.trim();
+        mark(
+            is_hex_revision(revision),
+            "source.repositoryRevision",
+            if revision.is_empty() {
+                "missing"
+            } else {
+                "invalid"
+            },
+            "repositoryRevision must be a 40- or 64-character hex commit sha".to_string(),
         );
-    }
-    if source.and_then(|s| s.issue_number).is_none() {
-        reasons.push(
-            "no tracked issue identity configured (source.issueNumber); a task slug is not an issue number"
-                .to_string(),
+        mark(
+            is_hex_revision(revision) && revision == report.base_revision,
+            "source.revisionPinned",
+            "invalid",
+            format!(
+                "source repository revision {:?} does not match the pinned base revision {:?}",
+                source.repository_revision, report.base_revision
+            ),
         );
+        let (issue_ok, issue_kind, issue_reason) = match source.issue_number {
+            None => (
+                false,
+                "missing",
+                "no tracked issue identity configured; a task slug is not an issue number"
+                    .to_string(),
+            ),
+            Some(0) => (
+                false,
+                "invalid",
+                "issueNumber must be a positive tracked issue number".to_string(),
+            ),
+            Some(_) => (true, "missing", String::new()),
+        };
+        mark(issue_ok, "source.issueNumber", issue_kind, issue_reason);
     }
+
+    // WorkEventBatch: exists, and its recorded digest matches the re-derived bytes.
+    match &report.events_sha256 {
+        None => mark(
+            false,
+            "events.present",
+            "missing",
+            "no events emission sealed".to_string(),
+        ),
+        Some(digest) => {
+            let rederived = hex_sha256(&serde_json::to_vec(&batch_of(report)).unwrap_or_default());
+            let bound_consistently = exec_ok
+                && batch_of(report)
+                    .events
+                    .iter()
+                    .all(|e| e.correlation_id == report.execution_id);
+            mark(
+                is_hex64(digest) && *digest == rederived,
+                "events.digestMatch",
+                "invalid",
+                "eventsDigest does not re-derive from the WorkEventBatch bound to this report"
+                    .to_string(),
+            );
+            mark(
+                bound_consistently,
+                "events.executionConsistent",
+                "invalid",
+                "every WorkEvent must bind to this run's executionId as correlationId".to_string(),
+            );
+        }
+    }
+
+    // Provider-issued response identity on the sealing (last) attempt.
     let sealing = report.attempts.last();
     let provider_id = sealing
         .and_then(|a| a.provider_response_id.as_deref())
         .map(str::trim)
         .filter(|s| !s.is_empty());
-    if provider_id.is_none() {
-        reasons.push(
-            "the responder did not expose a response/run id on the sealing attempt; not sealable for the strict SOMA provenance path"
-                .to_string(),
+    mark(
+        provider_id.is_some(),
+        "provider.responseId",
+        "missing",
+        "the responder did not expose a response/run id on the sealing attempt; not sealable for the strict SOMA provenance path".to_string(),
+    );
+
+    // Operator-supplied egress authorization. This module can never
+    // synthesize or verify grant scope offline; absence is `unverified`,
+    // never `authorized`.
+    match &report.egress_grant {
+        Some(evidence) => {
+            let ok = is_hex64(evidence.receipt_sha256.trim())
+                && !evidence.grant_ref.trim().is_empty()
+                && is_rfc3339_utc(evidence.authorized_at.trim());
+            mark(
+                ok,
+                "egress.grant",
+                "invalid",
+                "egress grant evidence is present but malformed (receipt_sha256 must be hex64, grantRef nonempty, authorizedAt RFC 3339)".to_string(),
+            );
+        }
+        None => mark(
+            false,
+            "egress.grant",
+            "unverified",
+            "no operator-supplied egress grant receipt was recorded; configuration is not evidence, and the runner never synthesizes one".to_string(),
+        ),
+    }
+
+    // ---- C. Strict success eligibility ---------------------------------
+    // A failed or refused run is never a successful coding repair. The
+    // failure report remains valid failure evidence (A) only.
+    let repaired = report.status == ModelRepairStatus::Repaired;
+    if !repaired {
+        gap(
+            "status.repaired",
+            "invalid",
+            format!(
+                "run outcome is {:?}; an unsuccessful run is failure evidence and never a successful coding repair",
+                report.status
+            ),
         );
     }
-    (reasons.is_empty(), reasons)
+
+    // Actual patch artifact: a sealed diff digest bound to the repaired tree.
+    match &report.final_diff_sha256 {
+        Some(digest) => {
+            if !is_hex64(digest) {
+                gap(
+                    "patch.present",
+                    "invalid",
+                    "finalDiffSha256 is not a hex64 digest".to_string(),
+                );
+            } else if let Some(excerpt) = &report.final_diff_excerpt {
+                // The excerpt equals the full diff when the diff fit the cap;
+                // recompute its digest to detect tampering of retained bytes.
+                let excerpt_truncated = excerpt.contains("more bytes truncated");
+                if !excerpt_truncated {
+                    let recomputed = hex_sha256(excerpt.as_bytes());
+                    if recomputed != *digest {
+                        gap(
+                            "patch.excerptDigest",
+                            "invalid",
+                            "retained patch excerpt digest does not match finalDiffSha256"
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+        }
+        None => gap(
+            "patch.present",
+            "missing",
+            "no sealed patch artifact (finalDiffSha256); the run is not in a repaired outcome"
+                .to_string(),
+        ),
+    }
+    if repaired
+        && report
+            .final_tree_digest
+            .as_deref()
+            .is_none_or(|d| !is_hex64(d))
+    {
+        gap(
+            "workspace.binding",
+            if report.final_tree_digest.is_some() {
+                "invalid"
+            } else {
+                "missing"
+            },
+            "repaired outcome requires a sealed finalTreeDigest (hex64) binding the patched workspace".to_string(),
+        );
+    }
+
+    // Validator receipt for the sealing attempt: observed subprocess, pinned exit.
+    match &report.baseline_validator {
+        Some(baseline) => {
+            if baseline.provenance != TaskValidatorProvenance::ObservedSubprocess {
+                gap(
+                    "validator.baselineObserved",
+                    "invalid",
+                    "baseline validator receipt is not ObservedSubprocess provenance".to_string(),
+                );
+            }
+        }
+        None => gap(
+            "validator.baselineObserved",
+            "missing",
+            "repaired outcome requires the baseline validator receipt".to_string(),
+        ),
+    }
+    match sealing.and_then(|a| a.validator.as_ref()) {
+        Some(validator) => {
+            let pinned = report.validator.expected_exit_code;
+            if validator.provenance != TaskValidatorProvenance::ObservedSubprocess {
+                gap(
+                    "validator.observed",
+                    "invalid",
+                    "final validator receipt is not ObservedSubprocess provenance".to_string(),
+                );
+            }
+            if validator.exit_code != Some(pinned) {
+                gap(
+                    "validator.pinnedExit",
+                    "invalid",
+                    format!(
+                        "final validator exit is {:?}, expected the pinned {}",
+                        validator.exit_code, pinned
+                    ),
+                );
+            }
+            if validator.timed_out {
+                gap(
+                    "validator.timedOut",
+                    "invalid",
+                    "final validator subprocess timed out".to_string(),
+                );
+            }
+        }
+        None => gap(
+            "validator.observed",
+            "missing",
+            "repaired outcome requires an observed validator receipt on the sealing attempt"
+                .to_string(),
+        ),
+    }
+
+    let eligible = gaps.is_empty() && repaired && internal_report_valid && provenance_ok;
+    StrictSomaEligibility {
+        internal_report_valid,
+        provenance_complete: provenance_ok,
+        eligible,
+        gaps,
+    }
+}
+
+/// Compute (sealable, reasons) from the report. Deterministic.
+///
+/// `sealable` is true iff [`assess_strict_soma_eligibility`] reports
+/// `eligible` — i.e. every mandatory strict `soma.model-coding-run`
+/// v1.0.0 envelope predicate holds. Nothing else is claimed by the flag:
+/// in particular, a `true` here does not emit the envelope, does not
+/// authorize egress, and does not attest external validity of the grant
+/// the operator recorded; distribution and emission live outside this
+/// module. An unsuccessful run is never `sealable`.
+pub fn compute_sealability(report: &ModelRepairReport) -> (bool, Vec<String>) {
+    let assessment = assess_strict_soma_eligibility(report);
+    (
+        assessment.eligible,
+        assessment
+            .gaps
+            .iter()
+            .map(|g| format!("{}: {}", g.predicate, g.reason))
+            .collect(),
+    )
 }
 
 impl ModelRepairReport {
@@ -498,8 +903,13 @@ impl ModelRepairReport {
     /// `soma.model-coding-run` v1.0.0 envelope fields. Rows with status
     /// `gap` carry an explicit reason and never a synthesized value.
     /// This is a derived view; it does not emit the envelope itself.
+    /// Every row's verdict is derived from the same assessment that drives
+    /// `sealable` ([`assess_strict_soma_eligibility`]), so the mapping can
+    /// never claim `present` where the strict verdicts records a gap.
     #[must_use]
     pub fn soma_field_mapping(&self) -> Vec<SomaMappingField> {
+        let eligibility = assess_strict_soma_eligibility(self);
+        let gap_for = |predicate: &str| eligibility.gaps.iter().find(|g| g.predicate == predicate);
         let mut rows = Vec::new();
         let source = self.source.as_ref();
         let present = |path: &str, value: String, note: &str| SomaMappingField {
@@ -515,44 +925,78 @@ impl ModelRepairReport {
             note: Some(reason.to_string()),
         };
 
-        rows.push(match source.and_then(|s| s.issue_number) {
-            Some(n) => present("source.issueNumber", n.to_string(), "operator-configured; not verified by this module"),
-            None => gap("source.issueNumber", "no tracked issue identity configured; a task slug was not promoted to an issue number"),
+        rows.push(match gap_for("source.issueNumber") {
+            None => match source.and_then(|s| s.issue_number) {
+                Some(n) => present(
+                    "source.issueNumber",
+                    n.to_string(),
+                    "operator-configured, positive tracked issue; not cryptographically verified by this module",
+                ),
+                None => gap(
+                    "source.issueNumber",
+                    "issue predicate passed but number is absent (inconsistent state)",
+                ),
+            },
+            Some(g) => gap("source.issueNumber", &g.reason),
         });
-        rows.push(match source {
-            Some(s) if !s.repository.trim().is_empty() => present(
-                "source.repository",
-                s.repository.clone(),
-                "operator-configured binding; the staged tree's git origin matches this slug at the pinned revision",
-            ),
-            _ => gap("source.repository", "no repository binding configured; a synthetic/temp path is not a repository"),
+        rows.push(match gap_for("source.repository") {
+            None => match source {
+                Some(s) => present(
+                    "source.repository",
+                    s.repository.clone(),
+                    "operator-configured GitHub-grammar binding at the pinned revision; resolvability not verified by this module",
+                ),
+                None => gap("source.repository", "repository predicate passed but binding is absent (inconsistent state)"),
+            },
+            Some(g) => gap("source.repository", &g.reason),
         });
-        rows.push(match source {
-            Some(s) if !s.repository_revision.trim().is_empty() => present(
-                "source.repositoryRevision",
-                s.repository_revision.clone(),
-                "git sha; staged tree at this revision verified by the run's pin checks",
-            ),
-            _ => gap(
-                "source.repositoryRevision",
-                "no revision binding configured",
-            ),
+        rows.push(match gap_for("source.repositoryRevision").or_else(|| gap_for("source.revisionPinned")) {
+            None => match source {
+                Some(s) => present(
+                    "source.repositoryRevision",
+                    s.repository_revision.clone(),
+                    "hex commit sha equal to the pinned base revision; remote resolvability not verified by this module",
+                ),
+                None => gap("source.repositoryRevision", "revision predicate passed but binding is absent (inconsistent state)"),
+            },
+            Some(g) => gap("source.repositoryRevision", &g.reason),
         });
 
         let sealing = self.attempts.last();
-        match sealing.and_then(|a| a.provider_response_id.as_deref()) {
-            Some(id) => rows.push(present(
-                "model.providerRunId",
-                id.to_string(),
-                sealing
-                    .and_then(|a| a.provider_response_id_source.as_deref())
-                    .unwrap_or("response-body:id"),
-            )),
-            None => rows.push(gap(
-                "model.providerRunId",
-                "the responder did not expose a response/run id; no local hash substitutes for it",
-            )),
+        match gap_for("provider.responseId") {
+            None => match sealing.and_then(|a| a.provider_response_id.as_deref()) {
+                Some(id) => rows.push(present(
+                    "model.providerRunId",
+                    id.to_string(),
+                    sealing
+                        .and_then(|a| a.provider_response_id_source.as_deref())
+                        .unwrap_or("response-body:id"),
+                )),
+                None => rows.push(gap(
+                    "model.providerRunId",
+                    "provider predicate passed but id is absent (inconsistent state)",
+                )),
+            },
+            Some(g) => rows.push(gap("model.providerRunId", &g.reason)),
         }
+
+        rows.push(match &self.egress_grant {
+            Some(evidence) if gap_for("egress.grant").is_none() => present(
+                "provenance.egressGrant",
+                format!("sha256 {}", evidence.receipt_sha256),
+                "operator-supplied grant receipt recorded at dispatch; grant scope not re-verifiable by this module",
+            ),
+            _ => match gap_for("egress.grant") {
+                Some(g) => gap(
+                    "provenance.egressGrant",
+                    &g.reason,
+                ),
+                None => gap(
+                    "provenance.egressGrant",
+                    "no operator-supplied egress grant receipt was recorded; configuration is not evidence",
+                ),
+            },
+        });
 
         rows.push(present(
             "model.harness",
@@ -560,9 +1004,16 @@ impl ModelRepairReport {
             "harness identity recorded from the harness registration, never from the model",
         ));
 
-        let provider_note = match sealing.and_then(|a| a.provider_response_id.as_ref()) {
-            Some(_) => "lite-observed-run, modelAuthoredClaim: true, providerRunId present",
-            None => {
+        let provider_present = gap_for("provider.responseId").is_none();
+        let egress_present = gap_for("egress.grant").is_none();
+        let provider_note = match (provider_present, egress_present) {
+            (true, true) => {
+                "lite-observed-run, modelAuthoredClaim: true, providerRunId and operator egress grant recorded"
+            }
+            (true, false) => {
+                "lite-observed-run, modelAuthoredClaim: true, providerRunId present, egress grant unverified — provenance not sealable for the strict path"
+            }
+            (false, _) => {
                 "lite-observed-run, modelAuthoredClaim: true, providerRunId absent — provenance not sealable for the strict path"
             }
         };
@@ -572,38 +1023,67 @@ impl ModelRepairReport {
             provider_note,
         ));
 
-        rows.push(match self.events_sha256 {
-            Some(ref digest) => present(
+        // The events row is `present` only when the recorded digest
+        // re-derives and binds to this execution identity; the mapping
+        // never claims more than the strict assessment does.
+        let events_gap = eligibility
+            .gaps
+            .iter()
+            .find(|g| g.predicate.starts_with("events."));
+        rows.push(match (&self.events_sha256, events_gap) {
+            (Some(digest), None) => present(
                 "events",
                 format!("WorkEventBatch 1.3.0, {} events, sha256 {}", self.attempts.len() + 1, digest),
-                "every event binds to executionId; replay preserves the identity; duplicates share the same ids",
+                "every event binds to executionId; replay preserves the identity; digest re-derived and matches",
             ),
-            None => gap("events", "no events emission sealed"),
+            (Some(_), Some(g)) => gap("events", &g.reason),
+            (None, _) => gap("events", "no events emission sealed"),
         });
 
-        rows.push(match self.final_tree_digest {
-            Some(ref digest) => present(
-                "workspace",
-                format!("sha256 {digest}"),
-                "staged git worktree behind the pinned revision; writable scope limited to the repair target",
-            ),
-            None => gap("workspace", "pre-effect pin failure; workspace digest unavailable"),
+        rows.push(match gap_for("workspace.binding") {
+            None => match self.final_tree_digest {
+                Some(ref digest) => present(
+                    "workspace",
+                    format!("sha256 {digest}"),
+                    "staged git worktree behind the pinned revision; writable scope limited to the repair target",
+                ),
+                None if self.status == ModelRepairStatus::Repaired => gap(
+                    "workspace",
+                    "workspace predicate passed but digest is absent (inconsistent state)",
+                ),
+                None => gap("workspace", "no patched workspace (run is not in a repaired outcome)"),
+            },
+            Some(g) => gap("workspace", &g.reason),
         });
 
-        rows.push(match self.final_diff_sha256 {
-            Some(ref digest) => present(
-                "patch",
-                format!("sha256 {digest}"),
-                "model-authored diff artifact; sealed and redacted",
-            ),
-            None => gap(
-                "patch",
-                "no accepted patch (run is not in a repaired outcome)",
-            ),
+        rows.push(match gap_for("patch.present").or_else(|| gap_for("patch.excerptDigest")) {
+            None => match self.final_diff_sha256 {
+                Some(ref digest) if self.status == ModelRepairStatus::Repaired => present(
+                    "patch",
+                    format!("sha256 {digest}"),
+                    "model-authored diff artifact digest; full bytes are not retained by this module — byte-level re-verification happens at SOMA ingestion",
+                ),
+                Some(_) => gap(
+                    "patch",
+                    "a patch digest exists but the run outcome is not repaired; an unsuccessful run never presents as a repaired patch",
+                ),
+                None => gap(
+                    "patch",
+                    "no accepted patch (run is not in a repaired outcome)",
+                ),
+            },
+            Some(g) => gap("patch", &g.reason),
         });
 
-        rows.push(match self.baseline_validator {
-            Some(ref receipt) => present(
+        // The validation row is `present` only under the strict contract:
+        // repaired outcome, baseline receipt observed, final receipt observed
+        // and exit code equal to the pinned expectation.
+        let validator_gap = eligibility
+            .gaps
+            .iter()
+            .find(|g| g.predicate.starts_with("validator."));
+        rows.push(match (&self.baseline_validator, validator_gap) {
+            (Some(receipt), None) => present(
                 "validation",
                 format!(
                     "pinned validator, baseline exit {:?}, final attempt provenance {:?}",
@@ -616,19 +1096,20 @@ impl ModelRepairReport {
                 ),
                 "validator receipts re-derived at verification; ObservedSubprocess required for repaired",
             ),
-            None => gap("validation", "baseline validator receipt missing"),
+            (Some(_), Some(g)) => gap("validation", &g.reason),
+            (None, _) => gap("validation", "baseline validator receipt missing"),
         });
 
-        let run_digest = if self.sealable {
+        let run_digest = if eligibility.eligible {
             present(
                 "runDigest",
                 "eligible for emission; envelope not emitted by this module".to_string(),
-                "sealable: every required field is present without invented values; the consumer recomputes runDigest",
+                "sealable: every mandatory predicate holds; the consumer recomputes runDigest",
             )
         } else {
             gap(
                 "runDigest",
-                "not eligible: the report is not sealable; an envelope emitted from it would be invalid",
+                "not eligible: the report fails strict SOMA coding-run predicates (see gaps); an envelope emitted from it would be invalid",
             )
         };
         rows.push(run_digest);
@@ -1074,6 +1555,7 @@ pub async fn run_model_repair(
         attempts: Vec::new(),
         execution_id,
         source: spec.source.clone(),
+        egress_grant: spec.egress_grant.clone(),
         baseline_validator: None,
         final_tree_digest: None,
         final_diff_sha256: None,

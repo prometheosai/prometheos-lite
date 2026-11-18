@@ -100,6 +100,26 @@ fn env_or_dotenv(key: &str, dotenv: &[(String, String)]) -> Option<String> {
         })
 }
 
+/// Operator-supplied egress grant evidence for the model-dispatch egress,
+/// read only from the operator's environment. All three components must be
+/// present and non-empty, or the result is `None`; a partial set is treated
+/// as absent (fail closed). Nothing is synthesized and no provider
+/// identity is invented.
+fn operator_egress_grant(
+    dotenv: &[(String, String)],
+) -> Option<prometheos_lite::workflow::model_repair::EgressGrantEvidence> {
+    let receipt_sha256 = env_or_dotenv("LITE_EGRESS_GRANT_RECEIPT_SHA256", dotenv)?;
+    let grant_ref = env_or_dotenv("LITE_EGRESS_GRANT_REF", dotenv)?;
+    let authorized_at = env_or_dotenv("LITE_EGRESS_GRANT_AUTHORIZED_AT", dotenv)?;
+    Some(
+        prometheos_lite::workflow::model_repair::EgressGrantEvidence {
+            receipt_sha256,
+            grant_ref,
+            authorized_at,
+        },
+    )
+}
+
 fn git(repo: &Path, args: &[&str]) -> Result<String> {
     let out = Command::new("git")
         .args(args)
@@ -581,6 +601,12 @@ async fn main() -> Result<()> {
             repository_revision: base_sha.clone(),
             issue_number,
         }),
+        // Operator-supplied egress grant evidence, read only from the
+        // operator's environment. Any absent component leaves this `None`;
+        // the strict path then reports the grant as unverified and the run
+        // is never strictly eligible. Nothing here is synthesized, and an
+        // environment variable alone never implies authorization.
+        egress_grant: operator_egress_grant(&dotenv),
     };
 
     println!("dispatching governed model ({model}) ...");

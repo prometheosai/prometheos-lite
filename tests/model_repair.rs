@@ -135,6 +135,7 @@ fn repair_spec(worktree: &Path, rev: &str) -> ModelRepairSpec {
         validator_target_dir: None,
         prompt_context: None,
         source: None,
+        egress_grant: None,
     }
 }
 
@@ -145,6 +146,12 @@ fn repair_spec_with_source(worktree: &Path, rev: &str) -> ModelRepairSpec {
         repository_revision: rev.to_string(),
         issue_number: Some(136),
     });
+    spec
+}
+
+fn repair_spec_with_source_and_grant(worktree: &Path, rev: &str) -> ModelRepairSpec {
+    let mut spec = repair_spec_with_source(worktree, rev);
+    spec.egress_grant = Some(operator_grant());
     spec
 }
 
@@ -525,6 +532,21 @@ fn report_serde_round_trip_and_digest() {
 // Provider provenance and unique execution identity (PR #314 review)
 // ---------------------------------------------------------------------------
 
+/// Operator-supplied egress grant fixture, explicitly synthetic and
+/// clearly labeled: it proves the runner can carry operator evidence, it
+/// is never a credential, and nothing about it implies a real authorized
+/// provider route.
+fn operator_grant() -> prometheos_lite::workflow::model_repair::EgressGrantEvidence {
+    prometheos_lite::workflow::model_repair::EgressGrantEvidence {
+        receipt_sha256: format!(
+            "{:x}",
+            sha2::Sha256::digest(b"operator-grant-receipt-fixture-v1")
+        ),
+        grant_ref: "grant-lite-136-fixture-0001".to_string(),
+        authorized_at: "2026-11-17T00:00:00Z".to_string(),
+    }
+}
+
 fn completion_with_id(
     content: &str,
     id: &str,
@@ -540,11 +562,17 @@ fn completion_with_id(
     }
 }
 
-// 1. Genuine provider id present: captured, sealed, verifiable, and sealable.
+// 1. Genuine provider id present: captured, sealed, and verifiable. Strict
+//    SOMA eligibility additionally requires operator egress grant evidence;
+//    without it the run is never strictly eligible (unverified), with it
+//    the verdict is +eligible.
 #[tokio::test]
 async fn provider_id_present_is_captured_sealed_and_verify_passes() {
     let (temp, rev) = stage_fixture();
     let worktree = temp.path().to_path_buf();
+
+    // Without operator egress grant evidence: full provider evidence is
+    // present, but the strict path must not be sealable (unverified).
     let spec = repair_spec_with_source(&worktree, &rev);
     let proposer = ScriptedProposer::with_completions(
         descriptor(),
@@ -564,9 +592,43 @@ async fn provider_id_present_is_captured_sealed_and_verify_passes() {
     );
     assert!(report.execution_id.starts_with("exec-"));
     assert!(report.execution_id.len() > 16);
-    assert!(report.sealable, "sealable with id + bindings: {report:?}");
-    assert!(report.sealability_reasons.is_empty());
+    assert!(
+        !report.sealable,
+        "egress grant unverified must not seal: {report:?}"
+    );
+    assert!(
+        report
+            .sealability_reasons
+            .iter()
+            .any(|r| r.contains("egress.grant")),
+        "reasons enumerate the unverified egress grant: {:?}",
+        report.sealability_reasons
+    );
     assert!(report.verify().is_ok(), "sealed report verifies");
+
+    // With operator egress grant evidence: strict eligibility is met.
+    let (temp2, rev2) = stage_fixture();
+    let worktree2 = temp2.path().to_path_buf();
+    let spec2 = repair_spec_with_source_and_grant(&worktree2, &rev2);
+    let proposer2 = ScriptedProposer::with_completions(
+        descriptor(),
+        vec![Ok(completion_with_id(FIX_DIFF, "chatcmpl-test-0002"))],
+    );
+    let report2 =
+        prometheos_lite::workflow::model_repair::run_model_repair(&spec2, proposer2, None).await;
+    assert_eq!(report2.status, ModelRepairStatus::Repaired);
+    assert!(
+        report2.sealable,
+        "full evidence + operator grant is sealable: {report2:?}"
+    );
+    assert!(report2.sealability_reasons.is_empty());
+    assert!(report2.verify().is_ok(), "sealed report verifies");
+    let mapping = report2.soma_field_mapping();
+    let run_digest = mapping
+        .iter()
+        .find(|row| row.path == "runDigest")
+        .expect("runDigest row");
+    assert_eq!(run_digest.status, "present");
 }
 
 // 2. Provider id absent: recorded absent, report not sealable, verify still passes.
@@ -969,7 +1031,7 @@ fn soma_field_mapping_reports_present_rows_and_typed_gaps() {
             descriptor(),
             vec![Ok(completion_with_id(FIX_DIFF, "p-mapping"))],
         );
-        let spec = repair_spec_with_source(&worktree, &rev);
+        let spec = repair_spec_with_source_and_grant(&worktree, &rev);
         prometheos_lite::workflow::model_repair::run_model_repair(&spec, proposer, None).await
     });
     let mapping = report.soma_field_mapping();
@@ -1006,6 +1068,7 @@ fn soma_field_mapping_reports_present_rows_and_typed_gaps() {
     assert_eq!(by_path("workspace").status, "present");
     assert_eq!(by_path("patch").status, "present");
     assert_eq!(by_path("validation").status, "present");
+    assert_eq!(by_path("provenance.egressGrant").status, "present");
     assert_eq!(by_path("runDigest").status, "present");
 }
 
@@ -1076,4 +1139,343 @@ async fn unparseable_responses_and_empty_response_paths_have_identity() {
     assert_ne!(report2.status, ModelRepairStatus::Repaired);
     assert!(!report2.execution_id.is_empty());
     assert!(report2.verify().is_ok());
+}
+
+// ---------------------------------------------------------------------------
+// Strict SOMA envelope eligibility: typed gaps (PR #314 review)
+//
+// Every mandatory predicate of the strict contract is exercised negatively.
+// An unsuccessful run may seal as valid failure evidence (verify() passes)
+// but is never eligible for strict SOMA success-envelope emission.
+// ---------------------------------------------------------------------------
+
+fn assert_not_strictly_eligible(report: &ModelRepairReport, predicate: &str) {
+    let assessment =
+        prometheos_lite::workflow::model_repair::assess_strict_soma_eligibility(report);
+    assert!(
+        !assessment.eligible,
+        "case must not be strictly eligible: {report:?}"
+    );
+    assert!(
+        assessment.gaps.iter().any(|g| g.predicate == predicate),
+        "expected gap {predicate}, got {:?}",
+        assessment.gaps
+    );
+    let (sealable, reasons) = prometheos_lite::workflow::model_repair::compute_sealability(report);
+    assert!(!sealable);
+    assert!(
+        reasons.iter().any(|r| r.contains(predicate)),
+        "reasons enumerate {predicate}: {reasons:?}"
+    );
+    let mapping = report.soma_field_mapping();
+    let run_digest = mapping
+        .iter()
+        .find(|row| row.path == "runDigest")
+        .expect("runDigest row");
+    assert_eq!(
+        run_digest.status, "gap",
+        "mapping agrees with verdict: {mapping:?}"
+    );
+    assert_eq!(run_digest.value, None);
+}
+
+async fn repaired_with_id() -> (tempfile::TempDir, ModelRepairReport) {
+    let (temp, rev) = stage_fixture();
+    let worktree = temp.path().to_path_buf();
+    let spec = repair_spec_with_source_and_grant(&worktree, &rev);
+    let proposer = ScriptedProposer::with_completions(
+        descriptor(),
+        vec![Ok(completion_with_id(FIX_DIFF, "p-strict-eligible"))],
+    );
+    let report =
+        prometheos_lite::workflow::model_repair::run_model_repair(&spec, proposer, None).await;
+    assert_eq!(report.status, ModelRepairStatus::Repaired);
+    (temp, report)
+}
+
+#[tokio::test]
+async fn failed_status_with_provider_id_is_not_strictly_eligible() {
+    let (temp, rev) = stage_fixture();
+    let worktree = temp.path().to_path_buf();
+    let spec = repair_spec_with_source_and_grant(&worktree, &rev);
+    // Four unparseable completions, each carrying a genuine provider id.
+    let completions = (0..4)
+        .map(|i| Ok(completion_with_id(GARBAGE, &format!("p-fail-{i}"))))
+        .collect::<Vec<_>>();
+    let proposer = ScriptedProposer::with_completions(descriptor(), completions);
+    let report =
+        prometheos_lite::workflow::model_repair::run_model_repair(&spec, proposer, None).await;
+    assert_ne!(report.status, ModelRepairStatus::Repaired);
+    assert!(
+        report
+            .attempts
+            .iter()
+            .any(|a| a.provider_response_id.is_some())
+    );
+    assert!(report.verify().is_ok(), "failure evidence remains valid");
+    assert_not_strictly_eligible(&report, "status.repaired");
+}
+
+#[tokio::test]
+async fn provider_refusal_with_id_is_not_strictly_eligible() {
+    let (temp, rev) = stage_fixture();
+    let worktree = temp.path().to_path_buf();
+    let spec = repair_spec_with_source_and_grant(&worktree, &rev);
+    let proposer = ScriptedProposer::with_completions(
+        descriptor(),
+        vec![Err(ModelProposeError::Refused(
+            "policy: refusal with a recorded gateway trace".to_string(),
+        ))],
+    );
+    let report =
+        prometheos_lite::workflow::model_repair::run_model_repair(&spec, proposer, None).await;
+    assert_eq!(report.status, ModelRepairStatus::ModelRefusal);
+    assert!(report.verify().is_ok(), "failure evidence remains valid");
+    assert_not_strictly_eligible(&report, "status.repaired");
+}
+
+#[tokio::test]
+async fn issue_number_zero_is_not_strictly_eligible() {
+    let (temp, rev) = stage_fixture();
+    let worktree = temp.path().to_path_buf();
+    let mut spec = repair_spec_with_source_and_grant(&worktree, &rev);
+    spec.source = Some(prometheos_lite::workflow::model_repair::SomaSourceBinding {
+        repository: "prometheosai/prometheos-lite".to_string(),
+        repository_revision: rev.to_string(),
+        issue_number: Some(0),
+    });
+    let proposer = ScriptedProposer::with_completions(
+        descriptor(),
+        vec![Ok(completion_with_id(FIX_DIFF, "p-issue-0"))],
+    );
+    let report =
+        prometheos_lite::workflow::model_repair::run_model_repair(&spec, proposer, None).await;
+    assert_not_strictly_eligible(&report, "source.issueNumber");
+}
+
+#[tokio::test]
+async fn invalid_repository_slug_is_not_strictly_eligible() {
+    let (temp, rev) = stage_fixture();
+    let worktree = temp.path().to_path_buf();
+    let mut spec = repair_spec_with_source_and_grant(&worktree, &rev);
+    spec.source = Some(prometheos_lite::workflow::model_repair::SomaSourceBinding {
+        repository: "not a slug!!".to_string(),
+        repository_revision: rev.to_string(),
+        issue_number: Some(136),
+    });
+    let proposer = ScriptedProposer::with_completions(
+        descriptor(),
+        vec![Ok(completion_with_id(FIX_DIFF, "p-bad-repo"))],
+    );
+    let report =
+        prometheos_lite::workflow::model_repair::run_model_repair(&spec, proposer, None).await;
+    assert_not_strictly_eligible(&report, "source.repository");
+}
+
+#[tokio::test]
+async fn malformed_revision_is_not_strictly_eligible() {
+    let (temp, rev) = stage_fixture();
+    let worktree = temp.path().to_path_buf();
+    let mut spec = repair_spec_with_source_and_grant(&worktree, &rev);
+    spec.source = Some(prometheos_lite::workflow::model_repair::SomaSourceBinding {
+        repository: "prometheosai/prometheos-lite".to_string(),
+        repository_revision: "zz-not-hex".to_string(),
+        issue_number: Some(136),
+    });
+    let proposer = ScriptedProposer::with_completions(
+        descriptor(),
+        vec![Ok(completion_with_id(FIX_DIFF, "p-bad-rev"))],
+    );
+    let report =
+        prometheos_lite::workflow::model_repair::run_model_repair(&spec, proposer, None).await;
+    assert_not_strictly_eligible(&report, "source.repositoryRevision");
+}
+
+#[tokio::test]
+async fn revision_mismatch_is_not_strictly_eligible() {
+    let (temp, rev) = stage_fixture();
+    let worktree = temp.path().to_path_buf();
+    let mut spec = repair_spec_with_source_and_grant(&worktree, &rev);
+    spec.source = Some(prometheos_lite::workflow::model_repair::SomaSourceBinding {
+        repository: "prometheosai/prometheos-lite".to_string(),
+        repository_revision: "0000000000000000000000000000000000000001".to_string(),
+        issue_number: Some(136),
+    });
+    let proposer = ScriptedProposer::with_completions(
+        descriptor(),
+        vec![Ok(completion_with_id(FIX_DIFF, "p-rev-mismatch"))],
+    );
+    let report =
+        prometheos_lite::workflow::model_repair::run_model_repair(&spec, proposer, None).await;
+    assert_not_strictly_eligible(&report, "source.revisionPinned");
+}
+
+#[tokio::test]
+async fn missing_final_patch_is_not_strictly_eligible() {
+    let (_temp, mut report) = repaired_with_id().await;
+    report.final_diff_sha256 = None;
+    assert_not_strictly_eligible(&report, "patch.present");
+}
+
+#[tokio::test]
+async fn patch_digest_mismatch_is_not_strictly_eligible() {
+    let (_temp, mut report) = repaired_with_id().await;
+    // Tamper the retained patch bytes; the digest no longer re-derives.
+    report.final_diff_excerpt = Some("tampered excerpt that no longer matches".to_string());
+    assert_not_strictly_eligible(&report, "patch.excerptDigest");
+}
+
+#[tokio::test]
+async fn missing_final_validator_is_not_strictly_eligible() {
+    let (_temp, mut report) = repaired_with_id().await;
+    report.attempts.last_mut().expect("attempt").validator = None;
+    assert_not_strictly_eligible(&report, "validator.observed");
+}
+
+#[tokio::test]
+async fn unobserved_validator_is_not_strictly_eligible() {
+    let (_temp, mut report) = repaired_with_id().await;
+    report
+        .attempts
+        .last_mut()
+        .expect("attempt")
+        .validator
+        .as_mut()
+        .expect("validator")
+        .provenance = prometheos_lite::workflow::scenario::TaskValidatorProvenance::NotExecuted;
+    assert_not_strictly_eligible(&report, "validator.observed");
+}
+
+#[tokio::test]
+async fn missing_work_event_batch_is_not_strictly_eligible() {
+    let (_temp, mut report) = repaired_with_id().await;
+    report.events_sha256 = None;
+    assert_not_strictly_eligible(&report, "events.present");
+}
+
+#[tokio::test]
+async fn event_digest_mismatch_is_not_strictly_eligible() {
+    let (_temp, mut report) = repaired_with_id().await;
+    report.events_sha256 = Some("00".repeat(32));
+    assert_not_strictly_eligible(&report, "events.digestMatch");
+}
+
+#[tokio::test]
+async fn missing_provider_id_is_not_strictly_eligible() {
+    let (temp, rev) = stage_fixture();
+    let worktree = temp.path().to_path_buf();
+    let spec = repair_spec_with_source_and_grant(&worktree, &rev);
+    let proposer = ScriptedProposer::new(descriptor(), vec![Ok(FIX_DIFF.to_string())]);
+    let report =
+        prometheos_lite::workflow::model_repair::run_model_repair(&spec, proposer, None).await;
+    assert_eq!(report.status, ModelRepairStatus::Repaired);
+    assert_not_strictly_eligible(&report, "provider.responseId");
+}
+
+#[tokio::test]
+async fn missing_egress_grant_receipt_is_not_strictly_eligible() {
+    let (temp, rev) = stage_fixture();
+    let worktree = temp.path().to_path_buf();
+    let spec = repair_spec_with_source(&worktree, &rev); // no egress grant
+    let proposer = ScriptedProposer::with_completions(
+        descriptor(),
+        vec![Ok(completion_with_id(FIX_DIFF, "p-no-grant"))],
+    );
+    let report =
+        prometheos_lite::workflow::model_repair::run_model_repair(&spec, proposer, None).await;
+    assert_eq!(report.status, ModelRepairStatus::Repaired);
+    let assessment =
+        prometheos_lite::workflow::model_repair::assess_strict_soma_eligibility(&report);
+    assert!(!assessment.eligible);
+    let grant_gap = assessment
+        .gaps
+        .iter()
+        .find(|g| g.predicate == "egress.grant")
+        .expect("egress grant gap");
+    assert_eq!(grant_gap.kind, "unverified");
+    let mapping = report.soma_field_mapping();
+    let row = mapping
+        .iter()
+        .find(|r| r.path == "provenance.egressGrant")
+        .expect("egress grant row");
+    assert_eq!(row.status, "gap");
+}
+
+#[tokio::test]
+async fn replayed_report_with_incorrect_execution_identity_is_not_strictly_eligible() {
+    let (_temp, mut report) = repaired_with_id().await;
+    // Valid format, wrong identity: the batch binding no longer re-derives.
+    report.execution_id = format!("exec-{}", "0".repeat(32));
+    assert_not_strictly_eligible(&report, "events.digestMatch");
+}
+
+#[tokio::test]
+async fn last_attempt_id_without_repair_is_not_strictly_eligible() {
+    let (temp, rev) = stage_fixture();
+    let worktree = temp.path().to_path_buf();
+    let spec = repair_spec_with_source_and_grant(&worktree, &rev);
+    // Four wrong-but-plausible diffs, each with a genuine provider id: the
+    // sealing attempt has an id, but the run is ValidatorRejected.
+    let completions = (0..4)
+        .map(|i| Ok(completion_with_id(WRONG_DIFF, &format!("p-rejected-{i}"))))
+        .collect::<Vec<_>>();
+    let proposer = ScriptedProposer::with_completions(descriptor(), completions);
+    let report =
+        prometheos_lite::workflow::model_repair::run_model_repair(&spec, proposer, None).await;
+    assert_eq!(report.status, ModelRepairStatus::ValidatorRejected);
+    assert!(
+        report
+            .attempts
+            .last()
+            .and_then(|a| a.provider_response_id.as_deref())
+            .is_some()
+    );
+    assert!(report.verify().is_ok(), "failure evidence remains valid");
+    assert_not_strictly_eligible(&report, "status.repaired");
+}
+
+#[tokio::test]
+async fn one_unverified_essential_field_blocks_eligibility() {
+    // Everything else is internally consistent; the egress grant receipt is
+    // present but malformed (empty grantRef). One unverified essential
+    // field is enough to block strict eligibility.
+    let (temp, rev) = stage_fixture();
+    let worktree = temp.path().to_path_buf();
+    let mut spec = repair_spec_with_source_and_grant(&worktree, &rev);
+    spec.egress_grant = Some(
+        prometheos_lite::workflow::model_repair::EgressGrantEvidence {
+            receipt_sha256: operator_grant().receipt_sha256,
+            grant_ref: "   ".to_string(),
+            authorized_at: operator_grant().authorized_at,
+        },
+    );
+    let proposer = ScriptedProposer::with_completions(
+        descriptor(),
+        vec![Ok(completion_with_id(FIX_DIFF, "p-one-gap"))],
+    );
+    let report =
+        prometheos_lite::workflow::model_repair::run_model_repair(&spec, proposer, None).await;
+    assert_not_strictly_eligible(&report, "egress.grant");
+}
+
+#[tokio::test]
+async fn full_recorded_evidence_with_operator_grant_is_strictly_eligible() {
+    let (_temp, report) = repaired_with_id().await;
+    let assessment =
+        prometheos_lite::workflow::model_repair::assess_strict_soma_eligibility(&report);
+    assert!(assessment.internal_report_valid, "A holds");
+    assert!(assessment.provenance_complete, "B holds");
+    assert!(assessment.eligible, "C holds: {:?}", assessment.gaps);
+    assert!(assessment.gaps.is_empty());
+    assert!(report.sealable);
+    assert_eq!(report.sealability_reasons.len(), 0);
+    assert!(report.verify().is_ok());
+    let mapping = report.soma_field_mapping();
+    let by_path = |p: &str| mapping.iter().find(|r| r.path == p).expect("row").clone();
+    assert_eq!(by_path("runDigest").status, "present");
+    assert_eq!(by_path("provenance.egressGrant").status, "present");
+    assert_eq!(by_path("events").status, "present");
+    assert_eq!(by_path("patch").status, "present");
+    assert_eq!(by_path("workspace").status, "present");
+    assert_eq!(by_path("validation").status, "present");
 }
