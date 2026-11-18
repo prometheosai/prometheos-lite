@@ -19,7 +19,9 @@ use rusqlite::{Connection, params, types::Type};
 
 use super::AsDb;
 use crate::work::event::WorkContextEvent;
-use crate::work::provenance::{ProvenanceEnvelope, compute_event_source_digest};
+use crate::work::journal_contract::{
+    ProvenanceEnvelope, compute_event_source_digest, seal_journal_entry,
+};
 
 /// Parse the `data` JSON column fail-closed: corrupt durable rows are a
 /// typed conversion error, never a fabricated `null` event payload.
@@ -102,19 +104,10 @@ pub fn record_event_conn(
     event: &WorkContextEvent,
     envelope: &ProvenanceEnvelope,
 ) -> anyhow::Result<()> {
-    // P1 gap 1: enforce the canonical-bytes fixpoint and semantic
-    // invariants at the write boundary — a malformed envelope can never
-    // be stored, even from a caller that bypassed all upstream checks.
-    envelope.validate_write_invariants()?;
-    let provenance_json = envelope.to_canonical_json_string()?;
-    let source_digest = compute_event_source_digest(
-        &event.id,
-        &event.work_context_id,
-        &event.event_type,
-        &event.data,
-        &event.created_at.to_rfc3339(),
-        &provenance_json,
-    )?;
+    // P1 gap 1: seal at the domain boundary (contract verb): the envelope
+    // is validated, canonicalized, digest-locked over the entire record and
+    // its flat identity columns derived - all before persistence begins.
+    let sealed = seal_journal_entry(event, envelope)?;
 
     conn.execute(
         "INSERT INTO work_context_events
@@ -127,11 +120,11 @@ pub fn record_event_conn(
             &event.event_type,
             &serde_json::to_string(&event.data)?,
             &event.created_at.to_rfc3339(),
-            &provenance_json,
-            &source_digest,
-            &envelope.run_query_key(),
-            &envelope.principal_query_key(),
-            &envelope.correlation_query_key(),
+            &sealed.provenance_json,
+            &sealed.source_digest,
+            &sealed.run_id,
+            &sealed.principal_id,
+            &sealed.correlation_id,
         ],
     )
     .context("Failed to insert work context event")?;

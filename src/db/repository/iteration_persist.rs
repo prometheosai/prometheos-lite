@@ -81,7 +81,7 @@ pub fn persist_iteration_conn(
     context: &crate::work::types::WorkContext,
     draft: &IterationDraft,
     performance: Option<&FlowPerformanceRecord>,
-    envelope: &crate::work::provenance::ProvenanceEnvelope,
+    envelope: &crate::work::journal_contract::ProvenanceEnvelope,
 ) -> Result<bool> {
     let tx = conn.unchecked_transaction()?;
 
@@ -220,7 +220,7 @@ fn insert_event(
     context_id: &str,
     event_type: &str,
     data: serde_json::Value,
-    envelope: &crate::work::provenance::ProvenanceEnvelope,
+    envelope: &crate::work::journal_contract::ProvenanceEnvelope,
 ) -> Result<()> {
     let event = crate::work::event::WorkContextEvent::new(
         uuid::Uuid::new_v4().to_string(),
@@ -251,7 +251,7 @@ pub fn persist_completion_conn(
     playbook: Option<&crate::work::playbook::WorkContextPlaybook>,
     status_from: WorkStatus,
     status_to: WorkStatus,
-    envelope: &crate::work::provenance::ProvenanceEnvelope,
+    envelope: &crate::work::journal_contract::ProvenanceEnvelope,
 ) -> Result<bool> {
     let tx = conn.unchecked_transaction()?;
 
@@ -302,10 +302,10 @@ pub fn persist_completion_conn(
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn journal() -> crate::work::provenance::JournalContext {
-        crate::work::provenance::JournalContext::internal_system(
+    fn journal() -> crate::work::journal_contract::JournalContext {
+        crate::work::journal_contract::JournalContext::internal_system(
             format!("test-{}", uuid::Uuid::new_v4()),
-            crate::work::provenance::JournalContext::work_authority(
+            crate::work::journal_contract::JournalContext::work_authority(
                 crate::work::types::AutonomyLevel::Review,
                 crate::work::types::ApprovalPolicy::Auto,
             ),
@@ -350,9 +350,9 @@ mod tests {
             context,
             draft,
             performance,
-            &crate::work::provenance::JournalContext::internal_system(
+            &crate::work::journal_contract::JournalContext::internal_system(
                 format!("test-{}", uuid::Uuid::new_v4()),
-                crate::work::provenance::JournalContext::work_authority(
+                crate::work::journal_contract::JournalContext::work_authority(
                     crate::work::types::AutonomyLevel::Review,
                     crate::work::types::ApprovalPolicy::Auto,
                 ),
