@@ -926,3 +926,153 @@ fn security_permission_ledger_curdir_normalization_cannot_escape_grant() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// E. Dangling (unresolvable) reparse points and swap-before-effect fail-closed
+// ---------------------------------------------------------------------------
+
+/// Create a reparse point at `link` targeting `target`. On Windows `mklink /J`
+/// creates a MOUNT_POINT junction to a possibly nonexistent directory (no
+/// elevation); falls back to symlink where permitted. Returns false when
+/// neither is permitted.
+fn dangling_reparse(link: &Path, target: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        let out = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output();
+        if let Ok(out) = out
+            && out.status.success()
+            && link.exists()
+        {
+            return true;
+        }
+        if std::os::windows::fs::symlink_dir(target, link).is_ok() {
+            return true;
+        }
+        if std::os::windows::fs::symlink_file(target, link).is_ok() {
+            return true;
+        }
+        false
+    }
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, link).is_ok()
+    }
+}
+
+#[tokio::test]
+async fn security_repo_dangling_symlink_final_component_write_and_patch_refused() {
+    let base = tempdir();
+    let repo = base.path().join("repo");
+    let outside = tempdir();
+    std::fs::create_dir_all(&repo).unwrap();
+    // Target deliberately absent (dangling link — the "missing external
+    // file" scenario the review calls out).
+    let outside_target = outside.path().join("dangling_victim.txt");
+    let link = repo.join("dangling.txt");
+    if !dangling_reparse(&link, &outside_target) {
+        eprintln!("SKIP: reparse point creation not permitted on this host");
+        return;
+    }
+
+    let out = WriteFileTool::new(repo.clone())
+        .call(serde_json::json!({"path": "dangling.txt", "content": "owned"}))
+        .await
+        .expect("write");
+    assert_eq!(
+        out["success"], false,
+        "a dangling final-component link must fail closed: {out}"
+    );
+    assert!(
+        !outside_target.exists(),
+        "the dangling outside victim must never be created by a refused write"
+    );
+
+    let out = PatchFileTool::new(repo)
+        .call(serde_json::json!({
+            "path": "dangling.txt",
+            "diff": "--- a/dangling.txt\n+++ b/dangling.txt\n@@ -1 +1 @@\n-x\n+owned\n"
+        }))
+        .await
+        .expect("patch");
+    assert_eq!(
+        out["success"], false,
+        "patch through a dangling final-component link must be refused: {out}"
+    );
+    assert!(
+        !outside_target.exists(),
+        "a refused patch must not create a file outside the repo"
+    );
+}
+
+#[tokio::test]
+async fn security_repo_dangling_ancestor_symlink_read_refused() {
+    let base = tempdir();
+    let repo = base.path().join("repo");
+    let outside = tempdir();
+    std::fs::create_dir_all(&repo).unwrap();
+    // Ancestor link whose target does not exist — the unresolvable-ancestor
+    // case. The path guard must refuse before the read effect runs.
+    let nonexistent = outside.path().join("nonexistent_ancestor");
+    let link = repo.join("escape");
+    if !dangling_reparse(&link, &nonexistent) {
+        eprintln!("SKIP: reparse point creation not permitted on this host");
+        return;
+    }
+
+    let tool = RepoReadFileTool::new(repo.clone());
+    let out = tool
+        .call(serde_json::json!({"path": "escape/victim.txt"}))
+        .await
+        .expect("read");
+    assert_eq!(
+        out["success"], false,
+        "read through an unresolvable ancestor link must be refused: {out}"
+    );
+    assert!(
+        !outside.path().join("escape/victim.txt").exists(),
+        "the ancestor target does not exist; no read may occur or create it"
+    );
+}
+
+#[tokio::test]
+async fn security_repo_swap_after_validation_write_fails_closed() {
+    let base = tempdir();
+    let repo = base.path().join("repo");
+    let outside = tempdir();
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::write(outside.path().join("victim.txt"), "outside-of-repo").unwrap();
+    std::fs::write(repo.join("seed.txt"), "seed").unwrap();
+
+    let tool = WriteFileTool::new(repo.clone());
+    // Validate a non-existent path resolves safely inside the repo.
+    let guard = prometheos_lite::tools::PathGuard::new(repo.to_string_lossy().into_owned());
+    guard
+        .validate_path("swapped.txt")
+        .expect("a fresh target inside the repo validates");
+
+    // Swap the target with a link to an outside file BEFORE the effect.
+    let link = repo.join("swapped.txt");
+    if !junction_or_symlink(&link, &outside.path().join("victim.txt")) {
+        eprintln!("SKIP: reparse point creation not permitted on this host");
+        return;
+    }
+
+    // The effect must fail closed with zero unauthorized side effects.
+    let out = tool
+        .call(serde_json::json!({"path": "swapped.txt", "content": "owned"}))
+        .await
+        .expect("write");
+    assert_eq!(
+        out["success"], false,
+        "a swap-before-effect must fail closed: {out}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(outside.path().join("victim.txt")).unwrap(),
+        "outside-of-repo",
+        "the outside victim file is untouched by a swap-before-effect write"
+    );
+}

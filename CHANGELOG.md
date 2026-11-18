@@ -1,5 +1,17 @@
 ## Unreleased
 
+- #138 E7/I03 Slice A - independent-review repair (PR #315 round 2). Dangling-symlink
+  and unresolved-ancestor reparse points are now rejected by `PathGuard` on every
+  segment (no exception between parent and leaf); arbitrary inspection errors other
+  than `NotFound` fail closed; `WriteFileTool`/`PatchFileTool` re-check the leaf and
+  refuse when a reparse point landed between validation and effect, and fresh-file
+  writes open with `create_new(true)` (a post-validation swap now fails closed, with
+  zero side effects). Deterministic swap-before-effect regression test added. Residual
+  TOCTOU window for the `patch` branch (external `patch(1)` executable, not under our
+  open()) documented in the threat matrix. Tests added: `dangling_symlink_final_component_write_and_patch_refused`,
+  `dangling_ancestor_symlink_read_refused`, `swap_after_validation_write_fails_closed`.
+  Linux/macOS NOT RUN.
+
 - #138 E7/I03 Slice A - security regression suite + threat-boundary matrix
   for the independent security assessment (Lite-internal, experimental; NOT
   an independent assessment; NOT a release gate). PR #315 (2026-11-17):
