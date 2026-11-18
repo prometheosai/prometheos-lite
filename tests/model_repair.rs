@@ -1141,7 +1141,6 @@ async fn unparseable_responses_and_empty_response_paths_have_identity() {
     assert!(report2.verify().is_ok());
 }
 
-// ---------------------------------------------------------------------------
 // Strict SOMA envelope eligibility: typed gaps (PR #314 review)
 //
 // Every mandatory predicate of the strict contract is exercised negatively.
@@ -1192,7 +1191,6 @@ async fn repaired_with_id() -> (tempfile::TempDir, ModelRepairReport) {
     assert_eq!(report.status, ModelRepairStatus::Repaired);
     (temp, report)
 }
-
 #[tokio::test]
 async fn failed_status_with_provider_id_is_not_strictly_eligible() {
     let (temp, rev) = stage_fixture();
@@ -1314,13 +1312,31 @@ async fn revision_mismatch_is_not_strictly_eligible() {
 async fn missing_final_patch_is_not_strictly_eligible() {
     let (_temp, mut report) = repaired_with_id().await;
     report.final_diff_sha256 = None;
-    assert_not_strictly_eligible(&report, "patch.present");
+    assert_not_strictly_eligible(&report, "patch.artifactDigest");
 }
 
 #[tokio::test]
 async fn patch_digest_mismatch_is_not_strictly_eligible() {
     let (_temp, mut report) = repaired_with_id().await;
-    // Tamper the retained patch bytes; the digest no longer re-derives.
+    // Tamper the retained full diff; the digest must no longer re-derive.
+    report.final_diff =
+        Some("--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-wrong\n+right\n".to_string());
+    assert_not_strictly_eligible(&report, "patch.artifactDigest");
+}
+
+#[tokio::test]
+async fn missing_final_patch_artifact_entirely_is_not_strictly_eligible() {
+    let (_temp, mut report) = repaired_with_id().await;
+    report.final_diff = None;
+    report.final_diff_sha256 = None;
+    assert_not_strictly_eligible(&report, "patch.present");
+}
+
+#[tokio::test]
+async fn legacy_excerpt_digest_mismatch_is_not_strictly_eligible() {
+    // Legacy sealed evidence carries only the excerpt; it must recompute.
+    let (_temp, mut report) = repaired_with_id().await;
+    report.final_diff = None;
     report.final_diff_excerpt = Some("tampered excerpt that no longer matches".to_string());
     assert_not_strictly_eligible(&report, "patch.excerptDigest");
 }
@@ -1478,4 +1494,221 @@ async fn full_recorded_evidence_with_operator_grant_is_strictly_eligible() {
     assert_eq!(by_path("patch").status, "present");
     assert_eq!(by_path("workspace").status, "present");
     assert_eq!(by_path("validation").status, "present");
+}
+
+// #314 Slice D review repairs — complete diff artifact binding + UTF-8-safe
+// bounded excerpt
+// ---------------------------------------------------------------------------
+
+fn stage_big_fixture() -> (tempfile::TempDir, String) {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path().to_path_buf();
+    std::fs::create_dir_all(root.join("src")).expect("mkdir src");
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"big-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n",
+    )
+    .expect("write manifest");
+    let mut lib = String::from(
+        "pub fn sum(a: i64, b: i64) -> i64 {\n    a - b\n}\n#[cfg(test)]\nmod tests {\n    use super::sum;\n    #[test]\n    fn sums_two_positive_numbers() {\n        assert_eq!(sum(2, 2), 4);\n    }\n}\n",
+    );
+    for n in 0..1_200 {
+        lib.push_str(&format!("// marker {n}: a - b\n"));
+    }
+    std::fs::write(root.join("src/lib.rs"), lib).expect("write lib.rs");
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(&root)
+            .env("GIT_AUTHOR_NAME", "lite-fixture")
+            .env("GIT_AUTHOR_EMAIL", "fixture@example.invalid")
+            .env("GIT_AUTHOR_DATE", "1764547200 +0000")
+            .env("GIT_COMMITTER_NAME", "lite-fixture")
+            .env("GIT_COMMITTER_EMAIL", "fixture@example.invalid")
+            .env("GIT_COMMITTER_DATE", "1764547200 +0000")
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "git {:?} failed: {:?}", args, out);
+        out
+    };
+    git(&["init", "-q"]);
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "pinned big rust source"]);
+    let rev = git(&["rev-parse", "HEAD"]);
+    let rev = String::from_utf8_lossy(&rev.stdout).trim().to_string();
+    (temp, rev)
+}
+
+#[tokio::test]
+async fn model_authored_repair_produces_complete_untruncated_diff() {
+    let (temp, rev) = stage_big_fixture();
+    let worktree = temp.path().to_path_buf();
+    let spec = repair_spec_with_source(&worktree, &rev);
+    let proposer = ScriptedProposer::new(
+        descriptor(),
+        vec![Ok(
+            r#"[{"type":"search_replace","file":"src/lib.rs","search":"a - b","replace":"a + b","replace_all":true}]"#
+                .to_string(),
+        )],
+    );
+    let report =
+        prometheos_lite::workflow::model_repair::run_model_repair(&spec, proposer, None).await;
+    assert_eq!(report.status, ModelRepairStatus::Repaired);
+
+    let full = report
+        .final_diff
+        .as_ref()
+        .expect("a repaired outcome must carry the complete finalDiff");
+    assert!(
+        full.len() > prometheos_lite::workflow::model_repair::MAX_DIFF_BYTES,
+        "fixture must exceed the excerpt cap, got {} bytes",
+        full.len()
+    );
+    let excerpt = report
+        .final_diff_excerpt
+        .as_deref()
+        .expect("excerpt present");
+    assert!(
+        excerpt.len() < full.len(),
+        "excerpt is a bounded view, never a parseable patch"
+    );
+    assert!(
+        excerpt.contains("[... "),
+        "truncated excerpt carries the truncation marker: {excerpt:?}"
+    );
+    let expected_digest = prometheos_lite::workflow::model_repair::sha256_hex(full.as_bytes());
+    assert_eq!(
+        report.final_diff_sha256.as_deref(),
+        Some(expected_digest.as_str()),
+        "the digest binds the complete diff bytes"
+    );
+    assert!(report.verify().is_ok(), "sealed report must verify");
+
+    // Applying the COMPLETE diff to a fresh pristine clone yields the
+    // repaired source and the validator passes.
+    let dest_scratch = std::env::temp_dir().join(format!(
+        "lite-model-repair-final-diff-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dest_scratch).expect("scratch dir");
+    let clone = dest_scratch.join("clone");
+    let status = Command::new("git")
+        .args(["clone", "--no-local", "--no-hardlinks"])
+        .arg(&worktree)
+        .arg(&clone)
+        .status()
+        .expect("git clone runs");
+    assert!(status.success(), "clone succeeds");
+    let checkout = Command::new("git")
+        .args(["checkout", "-q", "--detach", &rev])
+        .current_dir(&clone)
+        .status()
+        .expect("git checkout runs");
+    assert!(checkout.success(), "checkout succeeds");
+    let diff_path = dest_scratch.join("repair.diff");
+    std::fs::write(&diff_path, full).unwrap();
+    let status = Command::new("git")
+        .args(["apply", "--whitespace=nowarn"])
+        .arg(&diff_path)
+        .current_dir(&clone)
+        .status()
+        .expect("git apply runs");
+    assert!(status.success(), "complete diff applies cleanly");
+    std::fs::remove_dir_all(&dest_scratch).unwrap();
+}
+
+#[tokio::test]
+async fn report_verify_rejects_tampered_full_diff() {
+    let (temp, rev) = stage_big_fixture();
+    let worktree = temp.path().to_path_buf();
+    let spec = repair_spec_with_source(&worktree, &rev);
+    let proposer = ScriptedProposer::new(
+        descriptor(),
+        vec![Ok(
+            r#"[{"type":"search_replace","file":"src/lib.rs","search":"a - b","replace":"a + b","replace_all":true}]"#
+                .to_string(),
+        )],
+    );
+    let report =
+        prometheos_lite::workflow::model_repair::run_model_repair(&spec, proposer, None).await;
+    assert_eq!(report.status, ModelRepairStatus::Repaired);
+
+    // Tamper the stored full diff: verification must fail.
+    let mut tampered = report.clone();
+    tampered.final_diff =
+        Some("--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-wrong\n+right\n".to_string());
+    assert!(
+        tampered.verify().is_err(),
+        "tampered finalDiff breaks verification"
+    );
+
+    // Tamper the bound digest: verification must fail.
+    let mut tampered2 = report.clone();
+    tampered2.final_diff_sha256 = Some("0".repeat(64));
+    assert!(
+        tampered2.verify().is_err(),
+        "tampered digest breaks verification"
+    );
+}
+
+#[test]
+fn bounded_excerpt_never_splits_a_multibyte_character() {
+    // 4-byte codepoints; naive byte slicing would split codepoints at cap.
+    let bytes = "𝒫𝓇𝑜".repeat(12_000).into_bytes();
+    let out = prometheos_lite::workflow::model_repair::bounded_excerpt(&bytes, 8192);
+    assert!(out.len() < bytes.len());
+    assert!(out.contains("[... "));
+    // The cut must not panic and the bytes remain valid UTF-8 with a
+    // finalized marker line.
+    let marker = out
+        .rfind('\n')
+        .map(|idx| &out[idx + 1..])
+        .expect("marker line present");
+    assert!(marker.starts_with("[... "));
+}
+
+#[test]
+fn bounded_excerpt_exact_boundary_is_untrimmed() {
+    let bytes = "abc";
+    let out = prometheos_lite::workflow::model_repair::bounded_excerpt(bytes.as_bytes(), 3);
+    assert_eq!(out, "abc");
+    let out2 = prometheos_lite::workflow::model_repair::bounded_excerpt("abcdef".as_bytes(), 3);
+    assert!(out2.len() > bytes.len());
+}
+
+#[test]
+fn scripted_double_provider_id_never_yields_sealable_by_marker() {
+    let (temp, rev) = stage_fixture();
+    let worktree = temp.path().to_path_buf();
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let report = runtime.block_on(async {
+        let completion = prometheos_lite::workflow::model_repair::ProposedCompletion {
+            content: FIX_DIFF.to_string(),
+            provider_response_id: Some("p-double".to_string()),
+            provider_response_id_source: Some(
+                "scripted-test-double (not live-provider evidence)".to_string(),
+            ),
+            gateway_trace_id: None,
+            local_request_id: Some("req-model-repair-live-step".to_string()),
+        };
+        let proposer = ScriptedProposer::with_completions(descriptor(), vec![Ok(completion)]);
+        let spec = repair_spec_with_source(&worktree, &rev);
+        prometheos_lite::workflow::model_repair::run_model_repair(&spec, proposer, None).await
+    });
+    assert_eq!(report.status, ModelRepairStatus::Repaired);
+    assert!(
+        !report.sealable,
+        "a scripted double is not live-provider evidence"
+    );
+    assert!(
+        report
+            .sealability_reasons
+            .iter()
+            .any(|r| r.contains("test double"))
+    );
+    assert!(report.verify().is_ok());
 }
