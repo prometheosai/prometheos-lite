@@ -13,6 +13,7 @@ pub mod evolution_engine;
 pub mod execution_service;
 pub mod human_principal;
 pub mod orchestrator;
+pub mod persistence;
 pub mod phase_controller;
 pub mod plan;
 pub mod playbook;

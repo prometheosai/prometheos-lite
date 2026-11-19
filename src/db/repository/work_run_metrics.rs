@@ -1,9 +1,11 @@
 use anyhow::Context;
-use chrono::{DateTime, Utc};
 use rusqlite::params;
 
 use super::AsDb;
-use crate::work::types::HarnessRunMetricsRecord;
+use crate::work::persistence::{
+    HarnessRunMetricsRecord, HarnessRunMetricsRow, decode_harness_run_metrics,
+    encode_harness_run_metrics,
+};
 
 pub trait WorkRunMetricsOperations {
     fn upsert_harness_run_metrics(&self, record: &HarnessRunMetricsRecord) -> anyhow::Result<()>;
@@ -21,18 +23,19 @@ pub trait WorkRunMetricsOperations {
 impl<T: AsDb> WorkRunMetricsOperations for T {
     fn upsert_harness_run_metrics(&self, record: &HarnessRunMetricsRecord) -> anyhow::Result<()> {
         let conn = self.as_db().conn();
+        let row = encode_harness_run_metrics(record)?;
         conn.execute(
             "INSERT OR REPLACE INTO harness_run_metrics (
                 work_context_id, run_id, trace_summary, token_usage, quality_metrics, trajectory, created_at
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
-                &record.work_context_id,
-                &record.run_id,
-                serde_json::to_string(&record.trace_summary)?,
-                serde_json::to_string(&record.token_usage)?,
-                serde_json::to_string(&record.quality_metrics)?,
-                serde_json::to_string(&record.trajectory)?,
-                &record.created_at.to_rfc3339(),
+                &row.work_context_id,
+                &row.run_id,
+                &row.trace_summary,
+                &row.token_usage,
+                &row.quality_metrics,
+                &row.trajectory,
+                &row.created_at,
             ],
         )
         .context("Failed to upsert harness run metrics")?;
@@ -54,29 +57,23 @@ impl<T: AsDb> WorkRunMetricsOperations for T {
             .context("Failed to prepare harness run metrics list query")?;
         let rows = stmt
             .query_map(params![work_context_id], |row| {
-                let created_at_raw: String = row.get(6)?;
-                let created_at = DateTime::parse_from_rfc3339(&created_at_raw)
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .unwrap_or_else(|_| Utc::now());
-                Ok(HarnessRunMetricsRecord {
+                Ok(HarnessRunMetricsRow {
                     work_context_id: row.get(0)?,
                     run_id: row.get(1)?,
-                    trace_summary: serde_json::from_str(&row.get::<_, String>(2)?)
-                        .unwrap_or_default(),
-                    token_usage: serde_json::from_str(&row.get::<_, String>(3)?)
-                        .unwrap_or_default(),
-                    quality_metrics: serde_json::from_str(&row.get::<_, String>(4)?)
-                        .unwrap_or_default(),
-                    trajectory: serde_json::from_str(&row.get::<_, String>(5)?)
-                        .unwrap_or(serde_json::Value::Null),
-                    created_at,
+                    trace_summary: row.get(2)?,
+                    token_usage: row.get(3)?,
+                    quality_metrics: row.get(4)?,
+                    trajectory: row.get(5)?,
+                    created_at: row.get(6)?,
                 })
             })
             .context("Failed to query harness run metrics")?;
 
         let mut out = Vec::new();
         for row in rows {
-            out.push(row.context("Failed to parse harness run metrics row")?);
+            out.push(decode_harness_run_metrics(
+                row.context("Failed to read harness run metrics row")?,
+            )?);
         }
         Ok(out)
     }
@@ -95,25 +92,19 @@ impl<T: AsDb> WorkRunMetricsOperations for T {
             )
             .context("Failed to prepare harness run metrics get query")?;
         let row = stmt.query_row(params![work_context_id, run_id], |row| {
-            let created_at_raw: String = row.get(6)?;
-            let created_at = DateTime::parse_from_rfc3339(&created_at_raw)
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now());
-            Ok(HarnessRunMetricsRecord {
+            Ok(HarnessRunMetricsRow {
                 work_context_id: row.get(0)?,
                 run_id: row.get(1)?,
-                trace_summary: serde_json::from_str(&row.get::<_, String>(2)?).unwrap_or_default(),
-                token_usage: serde_json::from_str(&row.get::<_, String>(3)?).unwrap_or_default(),
-                quality_metrics: serde_json::from_str(&row.get::<_, String>(4)?)
-                    .unwrap_or_default(),
-                trajectory: serde_json::from_str(&row.get::<_, String>(5)?)
-                    .unwrap_or(serde_json::Value::Null),
-                created_at,
+                trace_summary: row.get(2)?,
+                token_usage: row.get(3)?,
+                quality_metrics: row.get(4)?,
+                trajectory: row.get(5)?,
+                created_at: row.get(6)?,
             })
         });
 
         match row {
-            Ok(r) => Ok(Some(r)),
+            Ok(row) => Ok(Some(decode_harness_run_metrics(row)?)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e).context("Failed to load harness run metrics"),
         }
@@ -123,6 +114,8 @@ impl<T: AsDb> WorkRunMetricsOperations for T {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
+
     fn journal() -> crate::work::provenance::JournalContext {
         crate::work::provenance::JournalContext::internal_system(
             format!("test-{}", uuid::Uuid::new_v4()),
@@ -134,7 +127,7 @@ mod tests {
     }
 
     use crate::db::repository::Db;
-    use crate::work::types::{HarnessQualityMetrics, HarnessTraceSummary, TokenUsageSummary};
+    use crate::work::persistence::{HarnessQualityMetrics, HarnessTraceSummary, TokenUsageSummary};
     use crate::work::{WorkContextService, types::WorkDomain};
     use std::sync::Arc;
 
