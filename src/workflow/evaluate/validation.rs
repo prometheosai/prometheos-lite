@@ -1326,7 +1326,8 @@ fn spawn_resource_monitor_win(
     };
     std::thread::spawn(move || {
         let job_handle = job as *mut winapi::ctypes::c_void;
-        while !done.load(Ordering::SeqCst) {
+        // Returns true if a breach was detected and classified (job terminated).
+        let check = |kind: &Arc<AtomicU8>| -> bool {
             unsafe {
                 // Memory: compare the job's peak committed memory against the limit.
                 if limits.max_memory_bytes.is_some() {
@@ -1344,7 +1345,7 @@ fn spawn_resource_monitor_win(
                     {
                         kind.store(2, Ordering::SeqCst);
                         TerminateJobObject(job_handle, 0xC000_0142u32);
-                        return;
+                        return true;
                     }
                 }
                 // CPU: compare the job's aggregate user time against the limit.
@@ -1363,12 +1364,24 @@ fn spawn_resource_monitor_win(
                     {
                         kind.store(1, Ordering::SeqCst);
                         TerminateJobObject(job_handle, 0xC000_0142u32);
-                        return;
+                        return true;
                     }
                 }
             }
+            false
+        };
+
+        while !done.load(Ordering::SeqCst) {
+            if check(&kind) {
+                return;
+            }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
+        // Final poll: the kernel job time/memory limit may terminate the process
+        // while this monitor is sleeping, and `done` may be signaled before the
+        // next scheduled poll. Without this pass the breach would be missed and
+        // misrecorded as an ordinary failure (non-deterministic under load).
+        let _ = check(&kind);
         // Ownership transferred here: close the job handle now that the tree is
         // stopped and the caller has joined.
         unsafe {
