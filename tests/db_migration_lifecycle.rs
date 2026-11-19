@@ -705,3 +705,23 @@ fn post_migration_connection_enforces_fk() {
         1
     );
 }
+
+#[test]
+fn already_migrated_db_opens_while_another_connection_writes() {
+    // Regression for the "concurrent writer blocks open" failure class:
+    // an already-migrated database must open read-only, even while a
+    // separate connection holds an uncommitted write transaction.
+    let temp = TempDir::new().expect("tempdir");
+    let path = temp.path().join("contention.db");
+    let path_str = path.to_str().expect("utf8 path").to_string();
+    {
+        let _db = Db::new(&path_str).expect("fixture migrates");
+    }
+    let writer = Connection::open(&path).expect("writer connection");
+    let tx = writer.unchecked_transaction().expect("writer transaction");
+    tx.execute_batch("CREATE TABLE IF NOT EXISTS contention_probe (id TEXT)")
+        .expect("hold the writer lock");
+
+    let reader = Db::new(&path_str).expect("open while writer holds the lock");
+    assert_eq!(schema_versions(reader.conn()), vec![1, 2, 3, 4, 5, 6]);
+}

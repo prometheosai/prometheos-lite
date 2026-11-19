@@ -283,6 +283,12 @@ fn validate_events_seq(conn: &Connection) -> Result<()> {
 
 /// Bring `conn` to the current schema. Safe on any historical state that
 /// this binary can validate; refuses on anything newer or inconsistent.
+///
+/// Opening an already-migrated database is read-only: the ledger is only
+/// read, recorded steps are not re-applied, and `user_version` is only
+/// written when this binary had to apply at least one step (or the stored
+/// value is stale), so opening never blocks or fails on another process
+/// holding the writer lock.
 pub(crate) fn migrate(conn: &Connection) -> Result<()> {
     // An older binary must never reset a newer database's user_version.
     let user_version: i64 = conn
@@ -294,22 +300,36 @@ pub(crate) fn migrate(conn: &Connection) -> Result<()> {
          refusing to open or downgrade it"
     );
 
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS schema_migrations (
-             version INTEGER PRIMARY KEY,
-             name TEXT NOT NULL,
-             applied_at TEXT NOT NULL
-         )",
-    )
-    .context("failed to create schema_migrations table")?;
+    // Read-only probe: only create the ledger when it is missing (the
+    // read costs no writer lock; the create does, so we avoid it on the
+    // already-migrated happy path).
+    let ledger_exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|count| count > 0)?;
+    if !ledger_exists {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS schema_migrations (
+                 version INTEGER PRIMARY KEY,
+                 name TEXT NOT NULL,
+                 applied_at TEXT NOT NULL
+             )",
+        )
+        .context("failed to create schema_migrations table")?;
+    }
 
     let applied = validate_history(conn)?;
     validate_events_seq(conn)?;
 
+    let mut applied_any = false;
     for migration in MIGRATIONS {
         if applied.contains(&migration.version) {
             continue;
         }
+        applied_any = true;
         run_migration(conn, migration).with_context(|| {
             format!(
                 "schema migration v{} ({}) failed",
@@ -327,7 +347,14 @@ pub(crate) fn migrate(conn: &Connection) -> Result<()> {
         "foreign_keys pragma is off after schema migration (state unreadable or corrupted); \
          refusing to hand out the connection"
     );
-    conn.pragma_update(None, "user_version", SCHEMA_VERSION)
-        .context("failed to set user_version")?;
+    if applied_any {
+        // Advisory mirror of the ledger. Written only when this binary
+        // applied at least one step (which means it held the writer);
+        // otherwise opening is read-only and never blocks on a locked
+        // database. `schema_migrations` remains the source of truth and
+        // is never downgraded or rewritten here.
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION)
+            .context("failed to set user_version")?;
+    }
     Ok(())
 }
