@@ -187,3 +187,19 @@ fn corrupt_stored_metrics_json_is_refused_not_zeroed() {
         .expect_err("corrupt JSON must be refused, not zero-filled");
     assert!(format!("{error:#}").contains("trace_summary"));
 }
+
+#[test]
+fn unrepresentable_duration_is_rejected_before_persistence() {
+    let (svc, ctx_id) = setup();
+    let db = svc.get_db();
+    let mut record = flow_record("fpr-wrap", "flow-wrap", &ctx_id);
+    record.duration_ms = u64::MAX;
+    let error = db
+        .create_flow_performance(&record)
+        .expect_err("out-of-i64-range duration must be refused, not wrapped");
+    assert!(format!("{error:#}").contains("duration_ms"));
+    let remaining = db
+        .get_performance_by_work_context(&ctx_id)
+        .expect("query context");
+    assert!(remaining.is_empty(), "refused record must not be persisted");
+}
