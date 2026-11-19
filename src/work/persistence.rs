@@ -388,42 +388,43 @@ mod tests {
                 .expect_err(&format!("{bad:?} must be refused"));
             assert!(format!("{error:#}").contains("test.column"));
         }
-    fn encode_flow_performance_rejects_unsnappable_duration() {
-        let mut record = flow_record();
-        record.duration_ms = u64::MAX;
-        let error = encode_flow_performance(&record).expect_err("must refuse to wrap");
-        assert!(format!("{error:#}").contains("duration_ms"));
-    }
+        fn encode_flow_performance_rejects_unsnappable_duration() {
+            let mut record = flow_record();
+            record.duration_ms = u64::MAX;
+            let error = encode_flow_performance(&record).expect_err("must refuse to wrap");
+            assert!(format!("{error:#}").contains("duration_ms"));
+        }
 
-    #[test]
-    fn encode_flow_performance_rejects_nan_success_score() {
-        let mut record = flow_record();
-        record.success_score = f32::NAN;
-        let error = encode_flow_performance(&record).expect_err("NaN must be refused");
-        assert!(format!("{error:#}").contains("success_score"));
-    }
+        #[test]
+        fn encode_flow_performance_rejects_nan_success_score() {
+            let mut record = flow_record();
+            record.success_score = f32::NAN;
+            let error = encode_flow_performance(&record).expect_err("NaN must be refused");
+            assert!(format!("{error:#}").contains("success_score"));
+        }
 
-    #[test]
-    fn encode_flow_performance_rejects_infinite_token_cost() {
-        let mut record = flow_record();
-        record.token_cost = f64::INFINITY;
-        let error = encode_flow_performance(&record).expect_err("infinity must be refused");
-        assert!(format!("{error:#}").contains("token_cost"));
-    }
+        #[test]
+        fn encode_flow_performance_rejects_infinite_token_cost() {
+            let mut record = flow_record();
+            record.token_cost = f64::INFINITY;
+            let error = encode_flow_performance(&record).expect_err("infinity must be refused");
+            assert!(format!("{error:#}").contains("token_cost"));
+        }
 
-    #[test]
-    fn decode_flow_performance_rejects_non_finite_success_score() {
-        let mut row = encode_flow_performance(&flow_record()).expect("encodes");
-        row.success_score = f64::NAN;
-        let error = decode_flow_performance(row).expect_err("NaN must be refused");
-        assert!(format!("{error:#}").contains("success_score"));
-    }
+        #[test]
+        fn decode_flow_performance_rejects_non_finite_success_score() {
+            let mut row = encode_flow_performance(&flow_record()).expect("encodes");
+            row.success_score = f64::NAN;
+            let error = decode_flow_performance(row).expect_err("NaN must be refused");
+            assert!(format!("{error:#}").contains("success_score"));
+        }
 
-    #[test]
-    fn decode_flow_performance_rejects_non_finite_token_cost() {
-        let mut row = encode_flow_performance(&flow_record()).expect("encodes");
-        row.token_cost = f64::INFINITY;
-        let error = decode_flow_performance(row).expect_err("infinity must be refused");
-        assert!(format!("{error:#}").contains("token_cost"));
+        #[test]
+        fn decode_flow_performance_rejects_non_finite_token_cost() {
+            let mut row = encode_flow_performance(&flow_record()).expect("encodes");
+            row.token_cost = f64::INFINITY;
+            let error = decode_flow_performance(row).expect_err("infinity must be refused");
+            assert!(format!("{error:#}").contains("token_cost"));
+        }
     }
 }
