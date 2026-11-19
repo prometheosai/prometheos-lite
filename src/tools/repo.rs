@@ -1245,11 +1245,22 @@ fn apply_unified_diff(original: &str, diff: &str) -> Result<String> {
     let mut cursor = 0usize;
     let mut delta: isize = 0;
     for hunk in &hunks {
-        let preferred = (hunk.old_start as isize - 1 + delta) as usize;
+        // Clamp defensively: a crafted header (e.g. start beyond isize::MAX)
+        // must yield an out-of-range sentinel, never a wrapped index that can
+        // panic the parser. A preferred position before the cursor is not
+        // trusted; find_position rejects it instead of letting the caller
+        // slice `original_lines[cursor..pos]` backwards.
+        let preferred = hunk
+            .old_start
+            .saturating_sub(1)
+            .saturating_add(delta.max(0) as usize);
         let pos = find_position(&original_lines, cursor, preferred, &hunk.old_lines)?;
         out.extend_from_slice(&original_lines[cursor..pos]);
         cursor = pos + hunk.old_lines.len();
-        delta += hunk.new_lines.len() as isize - hunk.old_lines.len() as isize;
+        let grown = hunk.new_lines.len() as isize - hunk.old_lines.len() as isize;
+        delta = delta
+            .checked_add(grown)
+            .context("unified-diff arithmetic overflow")?;
         out.extend(hunk.new_lines.iter().cloned());
     }
     out.extend_from_slice(&original_lines[cursor..]);
@@ -1306,10 +1317,16 @@ fn find_position(
     preferred: usize,
     needle: &[String],
 ) -> Result<usize> {
+    // Checked match test: a preferred or scanned position beyond the file
+    // (or past an arithmetic edge) is simply "not a match", so a crafted
+    // hunk header can never panic the parser on bounds arithmetic.
     let matches = |pos: usize| -> bool {
-        pos + needle.len() <= original.len() && original[pos..pos + needle.len()] == needle[..]
+        let Some(end) = pos.checked_add(needle.len()) else {
+            return false;
+        };
+        end <= original.len() && &original[pos..end] == needle
     };
-    if matches(preferred) {
+    if preferred >= cursor && matches(preferred) {
         return Ok(preferred);
     }
     let end = original.len().saturating_sub(needle.len());
@@ -1369,7 +1386,7 @@ fn arm(leaf_name: &str, hook: impl FnOnce(&Path) + Send + 'static) {
 
 /// If an armed hook matches `path`, run it exactly once and drop it.
 #[cfg(test)]
-fn interpose_after_validation(path: &Path) {
+fn consume_matching_hook(path: &Path) {
     let matched = {
         let mut hooks = HOOKS.lock().unwrap_or_else(|e| e.into_inner());
         let position = hooks
@@ -1382,8 +1399,24 @@ fn interpose_after_validation(path: &Path) {
     }
 }
 
+#[cfg(test)]
+fn interpose_after_validation(path: &Path) {
+    consume_matching_hook(path);
+}
+
 #[cfg(not(test))]
 fn interpose_after_validation(_path: &Path) {}
+
+/// TEST-ONLY interposition between the creation decision and the anchored
+/// creation of a missing directory component. Not for production use: the
+/// production creation is anchored to the parent handle by construction.
+#[cfg(test)]
+fn interpose_at_creation(path: &Path) {
+    consume_matching_hook(path);
+}
+
+#[cfg(not(test))]
+fn interpose_at_creation(_path: &Path) {}
 
 /// Split `full_path` into its canonical base plus the normal components
 /// below it. Rejects absolute/prefix/parent components (defense in depth).
@@ -1438,39 +1471,120 @@ fn walk_dir_chain(
     Ok((handles, cur))
 }
 
-/// Create missing directories along `segments` relative to the verified
-/// base, then re-walk from scratch to produce a fresh verified chain.
-/// Nothing is written at this stage; an attacker can only rename empty
-/// directories or introduce reparse points, both of which fail the re-walk.
+/// Create missing directories along `segments` relative to the verified base.
+///
+/// Every directory we create is anchored to a parent handle that is already
+/// verified as a plain, non-reparse directory: on Windows the child is
+/// created exclusively with `NtCreateFile` (`FILE_CREATE`) against that
+/// handle, so a reparse point raced in at the segment cannot redirect
+/// creation — the create lands as a new plain directory inside the verified
+/// chain or fails closed. On Unix `mkdir(2)` is used after the parent
+/// handle was verified; POSIX `mkdir` does not follow a leaf symlink (a
+/// segment swapped to a link fails with EEXIST, i.e. no creation), but the
+/// std API has no fd-based create, so a parent swapped *between* the
+/// pre-create check and the call is caught at the post-create re-open
+/// (reparse refused); the outside-creation window is residual on Unix and is
+/// documented rather than denied. After creation the chain is re-verified
+/// through the live handles before any byte of the effect is written.
 fn create_dir_chain(
     base: &Path,
     segments: &[std::ffi::OsString],
 ) -> Result<(Vec<std::fs::File>, PathBuf)> {
-    // Find where the existing chain stops; create the whole remainder.
-    let missing_from = (|| -> std::io::Result<Option<usize>> {
-        for index in 0..segments.len() {
-            let child = segments[..=index]
-                .iter()
-                .fold(base.to_path_buf(), |acc, seg| acc.join(seg));
-            match std::fs::symlink_metadata(&child) {
-                Ok(_) => continue,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Some(index)),
-                Err(e) => return Err(e),
+    let canon = base.canonicalize()?;
+    let mut handles: Vec<std::fs::File> = vec![open_dir(&canon)?];
+    let mut cur = canon.clone();
+    for segment in segments {
+        let child = cur.join(segment);
+        match std::fs::symlink_metadata(&child) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() {
+                    bail!(
+                        "component {} is a symlink/reparse point; refusing",
+                        child.display()
+                    );
+                }
+                if !meta.file_type().is_dir() {
+                    bail!("component {} is not a directory; refusing", child.display());
+                }
+                let handle = open_child_dir(handles.last().expect("base handle"), &cur, segment)?;
+                verify_plain_directory(&handle, &child)?;
+                cur = child;
+                handles.push(handle);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let handle =
+                    create_child_dir(handles.last().expect("base handle"), &cur, segment, &child)?;
+                cur = child;
+                handles.push(handle);
+            }
+            Err(e) => {
+                bail!("failed to inspect component {}: {e}", child.display());
             }
         }
-        Ok(None)
-    })()
-    .with_context(|| "failed to inspect directory chain")?;
-    if let Some(_start) = missing_from {
-        let missing: PathBuf = segments
-            .iter()
-            .fold(base.to_path_buf(), |acc, seg| acc.join(seg));
-        std::fs::create_dir_all(&missing)
-            .with_context(|| format!("failed to create directory {}", missing.display()))?;
     }
-    // Re-verify from scratch: a reparse point or swap introduced during
-    // creation fails here, before a single byte is written.
-    walk_dir_chain(base, segments)
+    Ok((handles, cur))
+}
+
+/// Windows: create `segment` exclusively against the verified parent handle,
+/// returning the pinned directory handle after verifying the created object
+/// is a plain directory. Refuses on any non-success status or reparse mark.
+#[cfg(windows)]
+fn create_child_dir(
+    parent: &std::fs::File,
+    parent_path: &Path,
+    segment: &std::ffi::OsStr,
+    child_path: &Path,
+) -> Result<std::fs::File> {
+    interpose_at_creation(child_path);
+    let name = nt_string(segment);
+    let parent_raw = parent.as_raw_handle() as winapi::shared::ntdef::HANDLE;
+    let (status, raw) = nt_create_file(
+        &name,
+        parent_raw,
+        GENERIC_READ | GENERIC_WRITE | SYNCHRONIZE,
+        FILE_CREATE,
+        true,
+    );
+    let Some(raw_handle) = raw else {
+        bail!(
+            "directory creation refused (anchored under {}; status {:#x})",
+            parent_path.display(),
+            status
+        );
+    };
+    let handle = from_nt_handle(raw_handle, child_path)?;
+    let a = attrs(&handle)?;
+    if a & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        bail!(
+            "anchored directory creation landed on a reparse point: {}",
+            child_path.display()
+        );
+    }
+    if a & FILE_ATTRIBUTE_DIRECTORY == 0 {
+        bail!(
+            "anchored directory creation produced a non-directory object: {}",
+            child_path.display()
+        );
+    }
+    Ok(handle)
+}
+
+/// Unix: `mkdir` against the verified pathname, then reopen the child and
+/// verify it through the parent handle chain. See the design note on
+/// `create_dir_chain` for the documented Unix residual.
+#[cfg(unix)]
+fn create_child_dir(
+    parent: &std::fs::File,
+    _parent_path: &Path,
+    segment: &std::ffi::OsStr,
+    child_path: &Path,
+) -> Result<std::fs::File> {
+    interpose_at_creation(child_path);
+    std::fs::create_dir(child_path)
+        .with_context(|| format!("failed to create directory {}", child_path.display()))?;
+    let handle = open_child_dir(parent, _parent_path, segment)?;
+    verify_plain_directory(&handle, child_path)?;
+    Ok(handle)
 }
 
 /// Open `full_path` for writing under `base`, verifying every ancestor and
@@ -2304,5 +2418,136 @@ mod adversarial_tests {
             !outside.path().join("never-created-dir").exists(),
             "the dangling outside directory must never be created by a refused write"
         );
+    }
+
+    /// FIX A regression (Windows): a reparse point raced in *at directory
+    /// creation time* must not create directories outside the repo. The
+    /// name-based `create_dir_all` used previously followed the junction and
+    /// created the directory through it; anchored creation refuses.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn write_during_ancestor_swap_at_creation_creates_nothing_outside_repo() {
+        let base = tempfile::tempdir().expect("tempdir");
+        let repo = base.path().join("repo");
+        let outside = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(repo.join("sub")).unwrap();
+        let victim_dir = outside.path().join("victim-dir");
+        std::fs::create_dir_all(&victim_dir).unwrap();
+
+        let repo_clone = repo.clone();
+        let outside_clone = outside.path().to_path_buf();
+        // Fires once, between the stat that says "missing" and the anchored
+        // creation of "a" (the write target is sub/a/file.txt).
+        arm("a", move |_path| {
+            let sub_orig = repo_clone.join("sub-orig");
+            let _ = std::fs::rename(repo_clone.join("sub"), &sub_orig);
+            let _ = junction_or_symlink(&repo_clone.join("sub"), &outside_clone.join("victim-dir"));
+        });
+
+        let tool = WriteFileTool::new(repo.clone());
+        let out = tool
+            .call(serde_json::json!({"path": "sub/a/file.txt", "content": "owned"}))
+            .await
+            .expect("write");
+        assert_eq!(
+            out["success"], false,
+            "a write through a raced ancestor must fail closed: {out}"
+        );
+        assert!(
+            std::fs::read_dir(&victim_dir)
+                .map(|mut entries| entries.next().is_none())
+                .unwrap_or(false),
+            "no directory may be created outside the repo through a raced ancestor: {}",
+            victim_dir.display()
+        );
+        assert!(
+            !outside.path().join("victim-dir/a").exists(),
+            "the segment under the raced ancestor must not be created outside the repo"
+        );
+    }
+
+    /// FIX B regression: crafted headers with extreme start values must not
+    /// wrap the delta arithmetic or panic the parser; extremes that cannot
+    /// apply are rejected or applied cleanly, but the call must not panic.
+    #[test]
+    fn parser_is_panic_free_on_extreme_hunk_starts() {
+        let diff = "--- a/f\n+++ b/f\n@@ -18446744073709551615,1 +1,1 @@\n existing\n";
+        assert_eq!(
+            apply_unified_diff("existing\n", diff).unwrap(),
+            "existing\n"
+        );
+        let diff = "--- a/f\n+++ b/f\n@@ -9223372036854775806,1 +1,1 @@\n b\n";
+        assert_eq!(apply_unified_diff("a\nb\n", diff).unwrap(), "a\nb\n");
+    }
+
+    /// FIX B regression: hunks whose preferred position falls behind the
+    /// cursor panic the old parser (`original_lines[cursor..pos]` with
+    /// pos < cursor); they must be rejected as "hunk does not apply".
+    #[test]
+    fn parser_rejects_out_of_order_hunks_without_panicking() {
+        let diff = "--- a/f\n+++ b/f\n@@ -2,1 +2,1 @@\n b\n@@ -2,1 +2,1 @@\n b\n";
+        assert!(
+            apply_unified_diff("a\nb\n", diff).is_err(),
+            "out-of-order hunk must be rejected, not panic"
+        );
+    }
+
+    /// FIX B regression: a large negative delta followed by an early start
+    /// used to produce a wrapped `usize::MAX - delta` preferred index that
+    /// panicked on bounds arithmetic; now the parser rejects cleanly.
+    #[test]
+    fn parser_rejects_hunks_before_file_start_without_panicking() {
+        let diff = "--- a/f\n+++ b/f\n@@ -1,2 +1,0 @@\n-a\n-b\n@@ -1,1 +1,1 @@\n c\n";
+        assert!(
+            apply_unified_diff("a\nb\n", diff).is_err(),
+            "hunk before the file start must be rejected, not panic"
+        );
+    }
+
+    /// FIX B regression: malformed grammar variants are all rejected with
+    /// typed errors.
+    #[test]
+    fn parser_rejects_malformed_diffs() {
+        for diff in [
+            "",
+            "\n",
+            "garbage",
+            "--- a/f\n",
+            "@@ -1 +1 @@\nextra-junk\n",
+            "@@ -1,1 +1,1 @@\n",
+            "@@ -1,1 +1,2 @@\n-x\n+y\n",
+            "@@ -1,1 +1,1 @@\n empty body first line is not empty; this hunk lacks a leading space\n",
+        ] {
+            assert!(
+                apply_unified_diff("a\nb\n", diff).is_err(),
+                "expected rejection: {diff:?}"
+            );
+        }
+    }
+
+    /// FIX B regression: bounded property probe — thousands of deterministic
+    /// pseudo-random odd diffs must not panic. Panics fail the test itself;
+    /// rejections are expected and ignored.
+    #[test]
+    fn parser_has_no_panic_on_randomish_diffs() {
+        let mut state: u64 = 0x8f3a_1c92_b4d5_7e6f;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..2000 {
+            let hunk = format!("@@ -{} +{} @@\n", next() % 10, next() % 10);
+            let body: String = (0..3)
+                .map(|_| match next() % 3 {
+                    0 => " context\n",
+                    1 => "-del\n",
+                    _ => "+add\n",
+                })
+                .collect();
+            let diff = format!("--- a/f\n+++ b/f\n{hunk}{body}");
+            let _ = apply_unified_diff("a\nb\nc\n", &diff);
+        }
     }
 }
