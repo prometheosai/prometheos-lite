@@ -201,7 +201,7 @@ impl<T: AsDb> WorkContextOperations for T {
         let conn = self.as_db().conn();
         let sql = format!("{} WHERE id = ?1", WORK_CONTEXT_SELECT);
         let mut stmt = conn
-            .prepare(&sql)
+            .prepare(sql.as_ref())
             .context("Failed to prepare work context query")?;
 
         let result = stmt.query_row(params![id], row_to_raw);
@@ -246,7 +246,7 @@ impl<T: AsDb> WorkContextOperations for T {
             WORK_CONTEXT_SELECT
         );
         let mut stmt = conn
-            .prepare(&sql)
+            .prepare(sql.as_ref())
             .context("Failed to prepare work contexts list query")?;
 
         let raws: Vec<rusqlite::Result<WorkContextRow>> =
@@ -274,7 +274,7 @@ impl<T: AsDb> WorkContextOperations for T {
              INNER JOIN conversation_work_contexts cwc ON wc.id = cwc.work_context_id
              WHERE cwc.conversation_id = ?1 AND cwc.is_active = 1";
         let mut stmt = conn
-            .prepare(&sql)
+            .prepare(sql.as_ref())
             .context("Failed to prepare active context query")?;
 
         let result = stmt.query_row(params![conversation_id], row_to_raw);
