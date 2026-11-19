@@ -13,14 +13,19 @@
 //!   which SQLite disallows inside a transaction, so the runner suspends
 //!   the pragma around the step's transaction and restores it afterwards
 //!   on every path — DDL and ledger record still commit atomically);
+//! - idempotent steps re-converge on every open: drift introduced after
+//!   the last recorded open is repaired in place. Steps already in the
+//!   ledger converge without writing, so an already-migrated database
+//!   opens read-only and never blocks on another process holding the
+//!   writer lock;
 //! - before any DDL runs, the runner validates the recorded history:
 //!   unknown future versions, name mismatches, and gaps/overlaps are
 //!   rejected, as is a database whose `PRAGMA user_version` is newer than
 //!   this binary's revision (an older binary never downgrades or silently
 //!   resets a newer database);
-//! - column-level presence is not trusted blindly: a `work_context_events`
-//!   table whose `seq` exists but is not an INTEGER primary key is refused
-//!   rather than silently left behind with broken cursor semantics.
+//! - `seq` of a text-affinity type is refused; intermediate
+//!   integer-affinity spellings (INT/INTEGER/BIGINT, possibly non-pk
+//!   after a copy-recreate) are required to converge.
 //!
 //! `PRAGMA user_version` mirrors the current revision as advisory signal
 //! only (it is never lowered by an older binary). `schema_migrations` is
@@ -137,7 +142,7 @@ pub(crate) fn ensure_column(
 
 fn record_applied(conn: &Connection, migration: &Migration) -> Result<()> {
     conn.execute(
-        "INSERT OR REPLACE INTO schema_migrations (version, name, applied_at)
+        "INSERT INTO schema_migrations (version, name, applied_at)
          VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
         rusqlite::params![migration.version, migration.name],
     )
@@ -145,19 +150,23 @@ fn record_applied(conn: &Connection, migration: &Migration) -> Result<()> {
     Ok(())
 }
 
-/// Run a migration step and record it atomically.
-fn apply_record_commit(conn: &Connection, migration: &Migration) -> Result<()> {
+/// Run a migration step. `record` is true only when the version is not
+/// already in the ledger; already-recorded steps converge in place and
+/// must not write (opening a migrated database has to stay read-only).
+fn apply_record_commit(conn: &Connection, migration: &Migration, record: bool) -> Result<()> {
     let tx = conn
         .unchecked_transaction()
         .context("failed to begin migration transaction")?;
     (migration.apply)(conn)?;
-    record_applied(conn, migration)?;
+    if record {
+        record_applied(conn, migration)?;
+    }
     tx.commit()
         .context("failed to commit migration transaction")?;
     Ok(())
 }
 
-fn run_migration(conn: &Connection, migration: &Migration) -> Result<()> {
+fn run_migration(conn: &Connection, migration: &Migration, record: bool) -> Result<()> {
     if migration.suspend_fk_outside {
         let fk_on: i64 = conn
             .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
@@ -187,7 +196,7 @@ fn run_migration(conn: &Connection, migration: &Migration) -> Result<()> {
         // the FK pragma is restored on every path afterwards. Restoration
         // errors are never swallowed: on the success path they fail the open,
         // on the failure path both errors are preserved.
-        let outcome = apply_record_commit(conn, migration);
+        let outcome = apply_record_commit(conn, migration, record);
         let restore = if fk_on != 0 {
             Some(
                 conn.execute("PRAGMA foreign_keys=ON", [])
@@ -205,7 +214,7 @@ fn run_migration(conn: &Connection, migration: &Migration) -> Result<()> {
             (Err(error), _) => Err(error),
         }
     } else {
-        apply_record_commit(conn, migration)
+        apply_record_commit(conn, migration, record)
     }
 }
 
@@ -246,9 +255,11 @@ fn validate_history(conn: &Connection) -> Result<std::collections::HashSet<i64>>
     Ok(recorded.into_iter().collect())
 }
 
-/// Column-level sanity for the cursor column, not just column existence.
-/// A `seq` that exists but is not an INTEGER primary key would make every
-/// durable cursor silently wrong; refuse instead of rebuilding.
+/// Column-level sanity for the cursor column: refuse an explicitly
+/// TEXT-affinity `seq` (unambiguously broken for a monotonic cursor) but
+/// accept any integer-affinity spelling — intermediate historical states
+/// carry `INT`/`INTEGER`/`BIGINT` spellings, possibly without the rowid
+/// alias primary key, and they are required to converge.
 fn validate_events_seq(conn: &Connection) -> Result<()> {
     let has_events: bool = conn
         .query_row(
@@ -260,22 +271,22 @@ fn validate_events_seq(conn: &Connection) -> Result<()> {
     if !has_events {
         return Ok(());
     }
-    let seq: Option<(String, i64)> = conn
+    let seq: Option<String> = conn
         .query_row(
-            "SELECT type, pk FROM pragma_table_info('work_context_events') WHERE name = 'seq'",
+            "SELECT type FROM pragma_table_info('work_context_events') WHERE name = 'seq'",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| row.get(0),
         )
         .optional()?;
-    if let Some((declared_type, pk)) = seq {
+    if let Some(declared_type) = seq {
+        let t = declared_type.to_uppercase();
+        let text_affinity = ["TEXT", "CHAR", "CLOB", "BLOB", "JSON", "UUID"]
+            .iter()
+            .any(|needle| t.contains(needle));
         anyhow::ensure!(
-            declared_type.eq_ignore_ascii_case("INTEGER"),
-            "work_context_events.seq exists but is declared {declared_type:?}, not INTEGER; \
-             refusing to continue with broken durable cursor semantics"
-        );
-        anyhow::ensure!(
-            pk > 0,
-            "work_context_events.seq exists but is not a primary key (pk = {pk}); refusing to continue"
+            !text_affinity,
+            "work_context_events.seq exists but is declared {declared_type:?}, \
+             which is not an integer-affinity column; refusing to continue with broken durable cursor semantics"
         );
     }
     Ok(())
@@ -284,11 +295,14 @@ fn validate_events_seq(conn: &Connection) -> Result<()> {
 /// Bring `conn` to the current schema. Safe on any historical state that
 /// this binary can validate; refuses on anything newer or inconsistent.
 ///
-/// Opening an already-migrated database is read-only: the ledger is only
-/// read, recorded steps are not re-applied, and `user_version` is only
-/// written when this binary had to apply at least one step (or the stored
-/// value is stale), so opening never blocks or fails on another process
-/// holding the writer lock.
+/// Every idempotent step re-runs on every open - that is how a database
+/// that drifted after its last recorded open (an interrupted init, a
+/// manual hotfix, an older binary) converges again. Steps already in the
+/// ledger converge in place and are never re-recorded, so an
+/// already-migrated database opens read-only and never contends with
+/// another process holding the writer lock. `user_version` is only
+/// written when a step was first applied. `schema_migrations` records
+/// and validates version identity; it never gates re-application.
 pub(crate) fn migrate(conn: &Connection) -> Result<()> {
     // An older binary must never reset a newer database's user_version.
     let user_version: i64 = conn
@@ -324,18 +338,19 @@ pub(crate) fn migrate(conn: &Connection) -> Result<()> {
     let applied = validate_history(conn)?;
     validate_events_seq(conn)?;
 
-    let mut applied_any = false;
+    let mut applied_new = false;
     for migration in MIGRATIONS {
-        if applied.contains(&migration.version) {
-            continue;
-        }
-        applied_any = true;
-        run_migration(conn, migration).with_context(|| {
+        let is_new = !applied.contains(&migration.version);
+        // Every step is idempotent: converge unconditionally on every
+        // open. Only never-yet-recorded steps write the ledger; already
+        // recorded steps converge in place without writing a byte.
+        run_migration(conn, migration, is_new).with_context(|| {
             format!(
                 "schema migration v{} ({}) failed",
                 migration.version, migration.name
             )
         })?;
+        applied_new |= is_new;
     }
     // A connection whose FK enforcement state is not healthy must not be
     // treated as ready for use: re-verify after every migration.
@@ -347,7 +362,7 @@ pub(crate) fn migrate(conn: &Connection) -> Result<()> {
         "foreign_keys pragma is off after schema migration (state unreadable or corrupted); \
          refusing to hand out the connection"
     );
-    if applied_any {
+    if applied_new {
         // Advisory mirror of the ledger. Written only when this binary
         // applied at least one step (which means it held the writer);
         // otherwise opening is read-only and never blocks on a locked

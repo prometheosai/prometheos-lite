@@ -477,15 +477,17 @@ fn seq_column_of_wrong_type_is_rejected() {
     };
     let message = format!("{error:#}");
     assert!(
-        message.contains("seq") && message.contains("not INTEGER"),
+        message.contains("seq") && message.contains("integer-affinity"),
         "explains the refusal: {message}"
     );
 }
 
 #[test]
-fn seq_column_missing_primary_key_is_rejected() {
+fn seq_column_integer_affinity_without_rowid_pk_converges() {
+    // A copy-recreated events table loses the rowid-alias PRIMARY KEY and
+    // can carry the INT spelling; the migration must converge, not refuse.
     let temp = TempDir::new().expect("tempdir");
-    let path = temp.path().join("seq-no-pk.db");
+    let path = temp.path().join("seq-int-no-pk.db");
     let conn = Connection::open(&path).expect("open fixture");
     conn.execute_batch(minimal_work_contexts_ddl())
         .expect("contexts");
@@ -499,17 +501,21 @@ fn seq_column_missing_primary_key_is_rejected() {
              created_at TEXT NOT NULL
          )",
     )
-    .expect("corrupt events shape");
+    .expect("non-rowid events shape");
+    conn.execute(
+        "INSERT INTO work_context_events VALUES (1, 'evt-1', 'ctx-1', 'context_created', '{}', '2026-09-01T00:00:00+00:00')",
+        [],
+    )
+    .expect("seed row");
     drop(conn);
-    let error = match Db::new(path.to_str().expect("utf8 path")) {
-        Err(error) => error,
-        Ok(_) => panic!("a non-primary-key seq cursor must be refused"),
-    };
-    let message = format!("{error:#}");
-    assert!(
-        message.contains("seq") && message.contains("primary key"),
-        "explains the refusal: {message}"
-    );
+    let db = Db::new(path.to_str().expect("utf8 path")).expect("converges");
+    let events: i64 = db
+        .conn()
+        .query_row("SELECT COUNT(*) FROM work_context_events", [], |row| {
+            row.get(0)
+        })
+        .expect("count events");
+    assert_eq!(events, 1, "pre-existing row is preserved");
 }
 
 #[test]
