@@ -16,7 +16,13 @@
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 
-pub use crate::work::types::{ApprovalPolicy, AutonomyLevel};
+pub use crate::work::artifact::Artifact;
+pub use crate::work::decision::DecisionRecord;
+pub use crate::work::plan::ExecutionPlan;
+pub use crate::work::types::{
+    ApprovalPolicy, AutonomyLevel, CompletionCriterion, ExecutionRecord, WorkContext, WorkDomain,
+    WorkPhase, WorkPriority, WorkStatus,
+};
 pub use crate::work::types::{
     FlowPerformanceRecord, HarnessQualityMetrics, HarnessRunMetricsRecord, HarnessTraceSummary,
     TokenUsageSummary,
@@ -388,43 +394,251 @@ mod tests {
                 .expect_err(&format!("{bad:?} must be refused"));
             assert!(format!("{error:#}").contains("test.column"));
         }
-        fn encode_flow_performance_rejects_unsnappable_duration() {
-            let mut record = flow_record();
-            record.duration_ms = u64::MAX;
-            let error = encode_flow_performance(&record).expect_err("must refuse to wrap");
-            assert!(format!("{error:#}").contains("duration_ms"));
-        }
+    }
 
-        #[test]
-        fn encode_flow_performance_rejects_nan_success_score() {
-            let mut record = flow_record();
-            record.success_score = f32::NAN;
-            let error = encode_flow_performance(&record).expect_err("NaN must be refused");
-            assert!(format!("{error:#}").contains("success_score"));
-        }
+    #[test]
+    fn encode_flow_performance_rejects_unsnappable_duration() {
+        let mut record = flow_record();
+        record.duration_ms = u64::MAX;
+        let error = encode_flow_performance(&record).expect_err("must refuse to wrap");
+        assert!(format!("{error:#}").contains("duration_ms"));
+    }
 
-        #[test]
-        fn encode_flow_performance_rejects_infinite_token_cost() {
-            let mut record = flow_record();
-            record.token_cost = f64::INFINITY;
-            let error = encode_flow_performance(&record).expect_err("infinity must be refused");
-            assert!(format!("{error:#}").contains("token_cost"));
-        }
+    #[test]
+    fn encode_flow_performance_rejects_nan_success_score() {
+        let mut record = flow_record();
+        record.success_score = f32::NAN;
+        let error = encode_flow_performance(&record).expect_err("NaN must be refused");
+        assert!(format!("{error:#}").contains("success_score"));
+    }
 
-        #[test]
-        fn decode_flow_performance_rejects_non_finite_success_score() {
-            let mut row = encode_flow_performance(&flow_record()).expect("encodes");
-            row.success_score = f64::NAN;
-            let error = decode_flow_performance(row).expect_err("NaN must be refused");
-            assert!(format!("{error:#}").contains("success_score"));
-        }
+    #[test]
+    fn encode_flow_performance_rejects_infinite_token_cost() {
+        let mut record = flow_record();
+        record.token_cost = f64::INFINITY;
+        let error = encode_flow_performance(&record).expect_err("infinity must be refused");
+        assert!(format!("{error:#}").contains("token_cost"));
+    }
 
-        #[test]
-        fn decode_flow_performance_rejects_non_finite_token_cost() {
-            let mut row = encode_flow_performance(&flow_record()).expect("encodes");
-            row.token_cost = f64::INFINITY;
-            let error = decode_flow_performance(row).expect_err("infinity must be refused");
-            assert!(format!("{error:#}").contains("token_cost"));
-        }
+    #[test]
+    fn decode_flow_performance_rejects_non_finite_success_score() {
+        let mut row = encode_flow_performance(&flow_record()).expect("encodes");
+        row.success_score = f64::NAN;
+        let error = decode_flow_performance(row).expect_err("NaN must be refused");
+        assert!(format!("{error:#}").contains("success_score"));
+    }
+
+    #[test]
+    fn decode_flow_performance_rejects_non_finite_token_cost() {
+        let mut row = encode_flow_performance(&flow_record()).expect("encodes");
+        row.token_cost = f64::INFINITY;
+        let error = decode_flow_performance(row).expect_err("infinity must be refused");
+        assert!(format!("{error:#}").contains("token_cost"));
+    }
+}
+
+/// -- WorkContext row persistence -------------------------------------------
+///
+/// The exact column layout of the `work_contexts` table, owned by the domain
+/// persistence contract. `db` may depend on this module; nothing else does.
+///
+/// All JSON-typed columns are decoded through a fail-closed parser: corrupt
+/// rows are refused with the column name, never silently defaulted; string
+/// timestamps are RFC3339, refused on a parse failure; the `"Cancelled"`
+/// literal is the JSON value of `WorkStatus::Cancelled`.
+///
+/// `EvaluationResult`, `CompletionCriterion`, etc. are parsed by the same
+/// `decode_json` gate so malformed shapes cannot leak into the domain.
+
+/// The raw column strings for a stored `work_contexts` row. Field order does
+/// not match the table's physical column order; this is a typed record, not a
+/// positional row. The `db` layer is responsible for projecting the table's
+/// columns into this shape.
+pub struct WorkContextRow {
+    pub id: String,
+    pub user_id: String,
+    pub title: String,
+    pub domain: String,
+    pub domain_profile_id: Option<String>,
+    pub context_type: String,
+    pub project_id: Option<String>,
+    pub conversation_id: Option<String>,
+    pub parent_context_id: Option<String>,
+    pub priority: String,
+    pub due_at: Option<String>,
+    pub goal: String,
+    pub requirements: String,
+    pub constraints: String,
+    pub status: String,
+    pub current_phase: String,
+    pub blocked_reason: Option<String>,
+    pub plan: Option<String>,
+    pub approved_plan: Option<String>,
+    pub artifacts: String,
+    pub memory_refs: String,
+    pub decisions: String,
+    pub flow_runs: String,
+    pub tool_trace: String,
+    pub execution_metadata: String,
+    pub open_questions: String,
+    pub autonomy_level: String,
+    pub approval_policy: String,
+    pub summary: Option<String>,
+    pub completion_criteria: String,
+    pub last_activity_at: String,
+    pub metadata: String,
+    pub playbook_id: Option<String>,
+    pub evaluation_result: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Decode a raw column record into a domain `WorkContext`, failing closed on
+/// any corrupt column.
+pub fn decode_work_context(row: WorkContextRow) -> Result<WorkContext> {
+    Ok(WorkContext {
+        id: row.id,
+        user_id: row.user_id,
+        title: row.title,
+        domain: decode_json_spec(&row.domain, "domain")?,
+        domain_profile_id: row.domain_profile_id,
+        context_type: row.context_type,
+        project_id: row.project_id,
+        conversation_id: row.conversation_id,
+        parent_context_id: row.parent_context_id,
+        priority: decode_json_spec(&row.priority, "priority")?,
+        due_at: decode_opt_timestamp(row.due_at, "due_at")?,
+        goal: row.goal,
+        requirements: decode_json_spec(&row.requirements, "requirements")?,
+        constraints: decode_json_spec(&row.constraints, "constraints")?,
+        status: decode_json_spec(&row.status, "status")?,
+        current_phase: decode_json_spec(&row.current_phase, "current_phase")?,
+        blocked_reason: row.blocked_reason,
+        plan: decode_opt_json_spec(&row.plan, "plan")?,
+        approved_plan: decode_opt_json_spec(&row.approved_plan, "approved_plan")?,
+        artifacts: decode_json_spec(&row.artifacts, "artifacts")?,
+        memory_refs: decode_json_spec(&row.memory_refs, "memory_refs")?,
+        decisions: decode_json_spec(&row.decisions, "decisions")?,
+        flow_runs: decode_json_spec(&row.flow_runs, "flow_runs")?,
+        tool_trace: decode_json_spec(&row.tool_trace, "tool_trace")?,
+        execution_metadata: decode_json_spec(&row.execution_metadata, "execution_metadata")?,
+        open_questions: decode_json_spec(&row.open_questions, "open_questions")?,
+        autonomy_level: decode_json_spec(&row.autonomy_level, "autonomy_level")?,
+        approval_policy: decode_json_spec(&row.approval_policy, "approval_policy")?,
+        summary: row.summary,
+        completion_criteria: decode_json_spec(&row.completion_criteria, "completion_criteria")?,
+        last_activity_at: decode_timestamp(&row.last_activity_at, "last_activity_at")?,
+        metadata: serde_json::from_str(&row.metadata)
+            .with_context(|| format!("work_contexts.metadata is corrupt: {:?}", row.metadata))?,
+        playbook_id: row.playbook_id,
+        evaluation_result: decode_opt_json(&row.evaluation_result, "evaluation_result")?,
+        created_at: decode_timestamp(&row.created_at, "created_at")?,
+        updated_at: decode_timestamp(&row.updated_at, "updated_at")?,
+    })
+}
+
+fn decode_json_spec<T: serde::de::DeserializeOwned>(text: &str, field: &str) -> Result<T> {
+    serde_json::from_str(text)
+        .with_context(|| format!("work_contexts.{field} is corrupt: {text:?}"))
+}
+
+fn decode_opt_json_spec<T: serde::de::DeserializeOwned>(
+    text: &Option<String>,
+    field: &str,
+) -> Result<Option<T>> {
+    match text {
+        None => Ok(None),
+        Some(value) => serde_json::from_str(value)
+            .with_context(|| format!("work_contexts.{field} is corrupt: {value:?}"))
+            .map(Some),
+    }
+}
+
+fn decode_opt_json(text: &Option<String>, field: &str) -> Result<Option<serde_json::Value>> {
+    match text {
+        None => Ok(None),
+        Some(value) => serde_json::from_str(value)
+            .with_context(|| format!("work_contexts.{field} is corrupt: {value:?}"))
+            .map(Some),
+    }
+}
+
+fn decode_timestamp(text: &str, field: &str) -> Result<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(text)
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+        .with_context(|| format!("work_contexts.{field} is not RFC3339: {text:?}"))
+}
+
+fn decode_opt_timestamp(
+    text: Option<String>,
+    field: &str,
+) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
+    match text {
+        None => Ok(None),
+        Some(value) => chrono::DateTime::parse_from_rfc3339(&value)
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .map(Some)
+            .with_context(|| format!("work_contexts.{field} is not RFC3339: {value:?}")),
+    }
+}
+
+/// Serialize a work-context back to the row layout's JSON-typed columns. Used
+/// by the write paths. Values are not validated against column width here —
+/// the caller picks columns by table name; the contract only refuses
+/// unserializable values.
+pub fn encode_work_context(context: &WorkContext) -> WorkContextRow {
+    WorkContextRow {
+        id: context.id.clone(),
+        user_id: context.user_id.clone(),
+        title: context.title.clone(),
+        domain: serde_json::to_string(&context.domain).expect("domain serializes"),
+        domain_profile_id: context.domain_profile_id.clone(),
+        context_type: context.context_type.clone(),
+        project_id: context.project_id.clone(),
+        conversation_id: context.conversation_id.clone(),
+        parent_context_id: context.parent_context_id.clone(),
+        priority: serde_json::to_string(&context.priority).expect("priority serializes"),
+        due_at: context.due_at.map(|d| d.to_rfc3339()),
+        goal: context.goal.clone(),
+        requirements: serde_json::to_string(&context.requirements)
+            .expect("requirements serializes"),
+        constraints: serde_json::to_string(&context.constraints).expect("constraints serializes"),
+        status: serde_json::to_string(&context.status).expect("status serializes"),
+        current_phase: serde_json::to_string(&context.current_phase)
+            .expect("current_phase serializes"),
+        blocked_reason: context.blocked_reason.clone(),
+        plan: context
+            .plan
+            .as_ref()
+            .map(|p| serde_json::to_string(p).expect("plan serializes")),
+        approved_plan: context
+            .approved_plan
+            .as_ref()
+            .map(|p| serde_json::to_string(p).expect("approved_plan serializes")),
+        artifacts: serde_json::to_string(&context.artifacts).expect("artifacts serializes"),
+        memory_refs: serde_json::to_string(&context.memory_refs).expect("memory_refs serializes"),
+        decisions: serde_json::to_string(&context.decisions).expect("decisions serializes"),
+        flow_runs: serde_json::to_string(&context.flow_runs).expect("flow_runs serializes"),
+        tool_trace: serde_json::to_string(&context.tool_trace).expect("tool_trace serializes"),
+        execution_metadata: serde_json::to_string(&context.execution_metadata)
+            .expect("execution_metadata serializes"),
+        open_questions: serde_json::to_string(&context.open_questions)
+            .expect("open_questions serializes"),
+        autonomy_level: serde_json::to_string(&context.autonomy_level)
+            .expect("autonomy_level serializes"),
+        approval_policy: serde_json::to_string(&context.approval_policy)
+            .expect("approval_policy serializes"),
+        summary: context.summary.clone(),
+        completion_criteria: serde_json::to_string(&context.completion_criteria)
+            .expect("completion_criteria serializes"),
+        last_activity_at: context.last_activity_at.to_rfc3339(),
+        metadata: serde_json::to_string(&context.metadata).expect("metadata serializes"),
+        playbook_id: context.playbook_id.clone(),
+        evaluation_result: context
+            .evaluation_result
+            .as_ref()
+            .map(|v| serde_json::to_string(v).expect("evaluation_result serializes")),
+        created_at: context.created_at.to_rfc3339(),
+        updated_at: context.updated_at.to_rfc3339(),
     }
 }
