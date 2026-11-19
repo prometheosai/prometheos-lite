@@ -177,20 +177,20 @@ fn run_migration(conn: &Connection, migration: &Migration, record: bool) -> Resu
         }
         // Persisted before the transaction so an aborted attempt still
         // converges on retry; deliberately not covered by the rollback.
-        if let Some(pre) = migration.pre_tx {
-            if let Err(error) = pre(conn) {
-                let restore = if fk_on != 0 {
-                    Some(conn.execute("PRAGMA foreign_keys=ON", []))
-                } else {
-                    None
-                };
-                return match restore {
-                    Some(Err(restore_error)) => Err(error).context(format!(
-                        "pre-transaction migration phase failed; foreign_keys restoration also failed: {restore_error:#}"
-                    )),
-                    _ => Err(error).context("pre-transaction migration phase failed"),
-                };
-            }
+        if let Some(pre) = migration.pre_tx
+            && let Err(error) = pre(conn)
+        {
+            let restore = if fk_on != 0 {
+                Some(conn.execute("PRAGMA foreign_keys=ON", []))
+            } else {
+                None
+            };
+            return match restore {
+                Some(Err(restore_error)) => Err(error).context(format!(
+                    "pre-transaction migration phase failed; foreign_keys restoration also failed: {restore_error:#}"
+                )),
+                _ => Err(error).context("pre-transaction migration phase failed"),
+            };
         }
         // DDL and the ledger record commit atomically inside the transaction;
         // the FK pragma is restored on every path afterwards. Restoration
@@ -220,7 +220,7 @@ fn run_migration(conn: &Connection, migration: &Migration, record: bool) -> Resu
 
 /// Refuse a database whose recorded history this binary cannot trust.
 fn validate_history(conn: &Connection) -> Result<std::collections::HashSet<i64>> {
-    let mut rows: Vec<(i64, String)> = conn
+    let rows: Vec<(i64, String)> = conn
         .prepare("SELECT version, name FROM schema_migrations ORDER BY version")?
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
