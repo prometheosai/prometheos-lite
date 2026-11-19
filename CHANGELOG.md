@@ -1,23 +1,27 @@
 ## Unreleased
 
-- #138 E7/I03 Slice A - independent-review R1-R5 follow-up repair. `WriteFileTool`,
-  `RepoReadFileTool` and `PatchFileTool` no longer decide on pathnames: the filesystem
-  effect runs through a verified handle-relative open (`NtCreateFile` with
-  `RootDirectory` on Windows; open-by-parent descriptor with reparse-point checks on
-  Unix). Every ancestor component is opened as a handle and verified non-reparse before
-  the effect; the leaf is classified on the opened handle (ordinary vs reparse point vs
-  nonexistent vs inspection failure - any unexpected inspection error fails closed);
-  existing leaves are opened, verified, and only then truncated (`open(2)`-style
-  truncate-after-verify); fresh leaves are created with `FILE_CREATE`/`O_CREAT|O_EXCL`
-  so a swapped-in leaf fails the create. External `patch(1)` is removed; a bounded,
-  self-contained unified-diff applier (strict hunk parsing, delta-adjusted match
-  position, trailing-newline preservation) is used instead. PathGuard is unchanged from
-  the merged repair (#318 lineage). The repair adds ZERO new public items (all
-  machinery private inside `src/tools/repo.rs`); the deterministic adversarial
-  validation→effect swap tests live in-crate (`tools::repo::adversarial_tests`, 6
-  tests) plus d09b92f's suite in `tests/security_regression_slice_a.rs` (28 tests,
-  unchanged). `local_ci_policy.py` (G-B static guard) passes with zero findings.
-  Linux/macOS NOT RUN.
+- #138 E7/I03 Slice A - independent-review R1-R5 follow-up repair (corrected local
+  candidate lineage 4feb2d1 -> b255686 -> current). `WriteFileTool`, `RepoReadFileTool`
+  and `PatchFileTool` no longer decide on pathnames: the filesystem effect runs through
+  a verified handle-relative open (`NtCreateFile` with `RootDirectory` on Windows;
+  fd-relative `openat`/`mkdirat` with `O_NOFOLLOW|O_DIRECTORY|O_CLOEXEC` on Unix for
+  traversal, leaf opens, and directory creation). Every ancestor component is opened as
+  a handle/fd and verified non-reparse before the effect; the leaf is classified on the
+  verified handle (ordinary vs reparse point vs nonexistent vs inspection failure -
+  any unexpected inspection error fails closed); existing leaves are opened, verified,
+  and only then truncated; fresh leaves are created exclusively (`FILE_CREATE` /
+  `O_CREAT|O_EXCL`). Directory creation is anchored to the verified parent handle/fd
+  (FIX A), closing unauthorized outside-directory creation races on Windows and Unix
+  (Linux execution NOT RUN on the Unix path; code-level fd-relative fix implemented).
+  External `patch(1)` is removed; a bounded, self-contained unified-diff applier with
+  strict parsing, checked/clamped delta arithmetic, checked bounds, and typed rejection
+  of malformed/out-of-order/extreme hunks is used (panic-free on untrusted input, FIX B).
+  PathGuard is unchanged from the merged repair (#318 lineage). The repair adds ZERO
+  new public items and no unapproved dependencies (uses existing `libc` on Unix).
+  Deterministic adversarial validation-effect swap and parser-hardening tests live
+  in-crate (`tools::repo::adversarial_tests`) plus `tests/security_regression_slice_a.rs`.
+  `local_ci_policy.py` (G-B static guard) passes with zero findings.
+  Linux/macOS NOT RUN (Windows fully verified).
 
 - #138 E7/I03 Slice A - independent-review repair (PR #315 round 2). Dangling-symlink
   and unresolved-ancestor reparse points are now rejected by `PathGuard` on every
@@ -118,10 +122,10 @@
   historical live run is re-classified `historical-ungoverned-egress`
   (preserved byte-for-byte as historical experimental evidence, NOT a
   policy-compliant governed run; live reproduction is
-  LIVE_REPRODUCTION_BLOCKED — OpenRouter free tier returned HTTP 401 on
+  LIVE_REPRODUCTION_BLOCKED ÔÇö OpenRouter free tier returned HTTP 401 on
   re-probes). The recorded model proposal was
   `self.last_refill += ticks * self.tick_millis;` (the earlier release note
-  mis-stated it — now corrected). Negative matrix extended: remote+local-only
+  mis-stated it ÔÇö now corrected). Negative matrix extended: remote+local-only
   profile refusal, network-deny pre-dial refusal (zero upstream bytes),
   authorized cloud-backed dispatch, wrong provider/model identity, wrong
   harness revision, wrong winning attempt, fabricated raw-response digest,
@@ -154,7 +158,7 @@
   envelope: `docs/evidence/real-model-pilot-tokenbucket-2026-11-16.json`
   (independent assessor replay re-derives the recorded post-run tree
   digest from the committed bytes offline; the preserved envelope fails the
-  repaired verification by design — it is historical evidence, not a
+  repaired verification by design ÔÇö it is historical evidence, not a
   policy-compliant record). Negative
   matrix: forbidden files (`tests/rate_limit.rs`, `src/lib.rs`), nonexistent
   search text, stale revision, interrupted dispatch (typed timeout, zero
@@ -178,7 +182,7 @@
   tests, and never reported as such. Same pinned pattern as Slice B:
   content digest, deterministic revision, writable `git-worktree`, pinned
   validator command/argv, expected exit code, expected file-after digest and
-  expected post-run tree digest. (2) A replayable failure → replay →
+  expected post-run tree digest. (2) A replayable failure ÔåÆ replay ÔåÆ
   verified-repair chain on the pinned Slice B bytes:
   `lite-rust-bugfix-arithmetic-replay-001`
   (`tests/fixtures/scenarios/rust-bugfix-arithmetic-replay/descriptor.json`)
@@ -228,13 +232,13 @@
   file-after digest, expected post-run tree digest). The runner
   (`tests/scenario_task_execution.rs`) runs preflight phases in a load-bearing
   order: fixture content verification, descriptor completeness (`validation`
-  pins required — absent, the task is `invalid-task` and is never
+  pins required ÔÇö absent, the task is `invalid-task` and is never
   dispatched), deterministic staging with the staged commit checked against
   the pin, isolated writable workspace acquisition and verification under the
   #171 contract (writable-only gate, `ensure_writable`, adapter validation,
   revision, baseline tree-digest == pin), then a repair-target authorization
-  preflight (repo-relative paths, editable set, transaction dry-run — zero
-  writes) — and ONLY then the governed dispatch. A result gate immediately after the dispatch refuses
+  preflight (repo-relative paths, editable set, transaction dry-run ÔÇö zero
+  writes) ÔÇö and ONLY then the governed dispatch. A result gate immediately after the dispatch refuses
    to repair after ANY `Err` (typed `Refused` or `ExecutionFailed`): no
    repair, no validator, no success envelope, typed failure/journal/
    accounting evidence preserved exactly as measured, zero filesystem
@@ -246,7 +250,7 @@
   fixture-scripted `search-replace` edit applied with permission through
   `FilePolicy` + `FileSet` + `apply_patch_with_rollback`; the governed model
   dispatch holds NO write authority (its node manifest pins
-  `writableScopes: []` — the repair carries its own explicit permit,
+  `writableScopes: []` ÔÇö the repair carries its own explicit permit,
   `repair.writeAuthority: scripted-fixture-workspace-file-policy`). The
   validator output (stdout+stderr) is captured into a bounded, digested
   receipt with exit code, argv, expected exit code, pinned assertion and
@@ -288,7 +292,7 @@
   stub `unsupported`; the Foundry external evaluation format does not exist,
   and no score, comparison, certification or Foundry consumption is claimed.
 
-- #154 E6/I07 Slice A — the governed execution-harness seam and its
+- #154 E6/I07 Slice A ÔÇö the governed execution-harness seam and its
   conformance foundation. `lite.harness.v1`
   (`src/workflow/execution_harness.rs`) defines a sealed,
   implementation-owned `HarnessDeclarationV1` (identity + revision, closed
@@ -296,7 +300,7 @@
   `RuntimeCapabilitySet`) whose only effect path is `HarnessDispatch::call`:
   the caller fixes the manifest, local restrictions and known secrets, the
   adapter chooses only among its DECLARED capabilities, and the call lands in
-  the governed `NodeRunner` nine-gate pipeline — an adapter cannot reach an
+  the governed `NodeRunner` nine-gate pipeline ÔÇö an adapter cannot reach an
   effect around #117/#118, and an undeclared capability is refused before the
   runner or its journal is touched. Checkpoints carry a PORTABLE state digest
   only (never process/PTY/chat state), and resume refuses a checkpoint that
@@ -305,15 +309,15 @@
   (`HarnessCatalog`, entries ordered by id, digest-sealed), so there is no
   separate catalogue file to drift, and duplicate or unsealed declarations
   are refused at registration. The reusable conformance kit
-  (`HCONF-0001…0024`) EXECUTES the adapter rather than only reading its
+  (`HCONF-0001ÔÇª0024`) EXECUTES the adapter rather than only reading its
   declaration, and proves declaration/behaviour agreement (a declared
   `checkpointExport` must export; a declared resume must resume). Two
-  distinct in-repo implementations — an in-process `native` worker and a
-  `protocol-bridged` scripted worker — pass it in
+  distinct in-repo implementations ÔÇö an in-process `native` worker and a
+  `protocol-bridged` scripted worker ÔÇö pass it in
   `tests/execution_harness_conformance.rs`. No concrete external adapter
-  (Claude Code, Codex, Goose, …) and no transport is claimed; real adapter
+  (Claude Code, Codex, Goose, ÔÇª) and no transport is claimed; real adapter
   families and harness selection (#133) remain follow-ups.
-- #154 E6/I07 Slice B — harness selection is now bound to the published
+- #154 E6/I07 Slice B ÔÇö harness selection is now bound to the published
   SPEC 007 negotiation instead of being a string lookup. `HarnessRegistry::select`
   runs `WorkRequirements` + the adapter's declared `RuntimeCapabilitySet`
   through `soma::capability::resolve`, so an unsupported capability, version
@@ -329,9 +333,9 @@
   never authority.
 - Documentation correction, recorded rather than amended: PR #268
   (`ee908f5`, merged after #259) closed the three gate-authority gaps found
-  by the #259 review — authored-path refusal for human gate decisions, the
+  by the #259 review ÔÇö authored-path refusal for human gate decisions, the
   `replay-authorization` current-frontier currency rule, and import-time
-  fail-closed re-verification — but landed without a CHANGELOG entry. This
+  fail-closed re-verification ÔÇö but landed without a CHANGELOG entry. This
   note is the missing historical record; the merged history is unchanged.
 
 - Repository integrity cleanup: the confirmed `frontend/postcss.config.js`
@@ -341,15 +345,15 @@
   content (all 88 blobs identical to the approved #257 head `16fbba4`),
   and committed build artifacts and local probing scratch files are
   removed from the tree. The repository policy gate gains three general
-  invariants — reviewed pins for executable configuration surfaces,
+  invariants ÔÇö reviewed pins for executable configuration surfaces,
   duplicate-JSON-key detection over tracked documents, and LF-only
-  fidelity for the whole vendored tree — each of which is a change-review
+  fidelity for the whole vendored tree ÔÇö each of which is a change-review
   or byte-fidelity rule rather than a content signature, and each of
   which was negative-probed before landing.
 - Repository policy gate repair, after an independent review of the
   cleanup above: a missing, malformed, non-object, or empty pin file is
   now a reported violation instead of an unhandled traceback or a silent
-  pass — an empty pin set can no longer switch the pin invariant off —
+  pass ÔÇö an empty pin set can no longer switch the pin invariant off ÔÇö
   and the duplicate-key scan now covers every tracked JSON document
   instead of excluding whole subtrees, with only the three known-invalid
   fixtures exempt by explicit path. The API LLM boundary now scans every
@@ -366,28 +370,28 @@
   filesystem-fallback path, while the repository uses the tracked-file
   path, and its two API-boundary cases never constructed the one
   configuration that distinguishes "scans every API root" from "scans one"
-  — so reintroducing that defect left the suite green. The sandboxes are
+  ÔÇö so reintroducing that defect left the suite green. The sandboxes are
   now git repositories with their files tracked, both scan paths are
-  covered, and the discriminating case — both API roots present, the
-  violation in `src/api` — is exercised. The gate additionally reports
+  covered, and the discriminating case ÔÇö both API roots present, the
+  violation in `src/api` ÔÇö is exercised. The gate additionally reports
   filesystem-level pathologies instead of raising them: a pin file that is
   a directory, a pin entry naming a directory, an unreadable pinned
   surface, and an unreadable vendored file. A source file that is not
   valid UTF-8 is decoded leniently and scanned rather than rejected. The
   pinned set grows to 25 surfaces, adding `clippy.toml`,
   `frontend/tsconfig.json`, `frontend/.eslintrc.json`,
-  `scripts/lib/target_dir.sh` — which three pinned smoke scripts source —
+  `scripts/lib/target_dir.sh` ÔÇö which three pinned smoke scripts source ÔÇö
   and `prometheos.config.json`, which the smoke chain reads. The gate's
   fallback-confinement rule gains regression coverage of its own. The
   guide now states the gate's fifth rule, the exact shape of its
   fail-closed behaviour, and three limits that were previously left
   implicit: the set is curated and not exhaustive, the pin file is not
   itself pinned, and the gate's own pin is checked by the gate.
-- #131 E6/I02 Slice B — the governed graph-run inspector and the human gate
+- #131 E6/I02 Slice B ÔÇö the governed graph-run inspector and the human gate
   decision interface: `prometheos work runs`, `prometheos work inspect-run`,
   and `prometheos work decide` read the durable `graph_checkpoints` registry
-  and record durable `lite.hdecision.v1` gate decisions — actor, timestamp,
-  target gate, cited evidence digest, rationale, sealed content digest —
+  and record durable `lite.hdecision.v1` gate decisions ÔÇö actor, timestamp,
+  target gate, cited evidence digest, rationale, sealed content digest ÔÇö
   through a compare-and-swap transaction that lands the checkpoint write and
   the journal event together (a failed event write rolls the checkpoint
   back). Machine actors are refused at authoring AND at import: the
@@ -398,11 +402,11 @@
   evidence still ANCHORED in the run's current state, so a superseded
   artifact makes the recorded decision STALE and returns the gate to
   pending. The decide endpoint now refuses a route that leaves a human gate
-  unless it is the route the recorded verdict authorizes — a journaled basis
+  unless it is the route the recorded verdict authorizes ÔÇö a journaled basis
   alone is not authority. Inspection is read-only, verifies the checkpoint
   chain digest, and reports the manifest binding as `unverified` when no
   manifest is supplied rather than implying a check that did not run.
-- #131 E6/I02 Slice B (F1 repair) — the human actor behind a gate decision
+- #131 E6/I02 Slice B (F1 repair) ÔÇö the human actor behind a gate decision
   is a VERIFIED principal, never a caller-supplied label: `work decide` has
   no `--actor` flag, and the recorded identity is the OS-authenticated
   account of the running thread (`GetUserNameW` resolves the CALLING
@@ -411,7 +415,7 @@
   cross-checked
   against the working directory's durable trust anchor
   (`.prometheos/human-principals.json`). When the session identity cannot
-  be established, or the anchor does not list it, the decision is REFUSED —
+  be established, or the anchor does not list it, the decision is REFUSED ÔÇö
   the runtime never promotes a self-asserted identity to a human one. The
   decision path only ever READS the anchor: it never provisions, repairs,
   or rewrites it, a malformed anchor is refused, and on Unix an anchor
@@ -425,14 +429,14 @@
   verified principal as `principal.human.identity`, which a database
   trigger ties to the `principal_id` column at the insert boundary. Scope of the guarantee, stated
   plainly: this proves WHICH ACCOUNT acted and that the operator
-  allowlisted it for this repository — it is NOT human-presence
+  allowlisted it for this repository ÔÇö it is NOT human-presence
   verification, and an automated process running under an allowlisted
   account inherits that identity; interactive authentication remains a
   separate capability. The governing identity source is declared
   explicitly (`IDENTITY_SOURCE`) rather than assumed: on Windows it is
   the CALLING THREAD's authenticated token (`GetUserNameW` resolves
   `OpenThreadToken`), so an impersonating thread reports the IMPERSONATED
-  identity and the process identity is never substituted for it —
+  identity and the process identity is never substituted for it ÔÇö
   impersonation is named, not detected. On Unix it is the process's
   EFFECTIVE uid. The CLI path now also proves the atomicity and
   concurrency guarantees directly (F2): an aborted journal write rolls
@@ -445,7 +449,7 @@
   be routed by a decision the verified CLI path recorded.
 
 
-- #164 E4/X07 Slice 3 — review-report and evidence-timeline projections:
+- #164 E4/X07 Slice 3 ÔÇö review-report and evidence-timeline projections:
   `lite.review-report.v1` deterministic render of gate/issue/summary state
   over `(WorkflowDefinition, ReviewFacts, policy)` and
   `lite.evidence-timeline.v1` deterministic total-order render via
@@ -456,28 +460,28 @@
   markers for unavailable sources. `SOMA-CMP-0011` is the sole new
   diagnostic for duplicate identity, pinned in the repository-owned
   Lite diagnostic-extension registry (`src/workflow/soma/diagnostic_extensions.rs`)
-  — the upstream-vendored catalogues stay immutable per the #240
+  ÔÇö the upstream-vendored catalogues stay immutable per the #240
   provenance/additivity lock (resolution: upstream catalogue first, then
   the extension registry; cross-registry duplicates fail closed).
-- #164 E4/X07 Slice 2 — graph projection with nested composite disclosure
+- #164 E4/X07 Slice 2 ÔÇö graph projection with nested composite disclosure
   boundaries: recursive inline `BodyItem` parsing with exact `oneOf`
   discrimination (union-key collision, missing required fields, and
   malformed nesting reject at load), recursive nested-scope audit with
   root-only / per-scope / document-wide check families plus fail-closed
   consumers on every `.body` surface, and the byte-stable graph
-  projection (`lite.graph-projection.v1`) — withheld-by-default composite
+  projection (`lite.graph-projection.v1`) ÔÇö withheld-by-default composite
   boundaries, `GraphDisclosurePolicy` (validated, sorted, non-cascading,
   `PROJ-0003`), domain-separated `childSubgraphDigest` (acyclic
   bottom-up) and `policyDigest`, the fail-closed boundary-port dataflow
-  algorithm (R1-R9, §7.4 outcome labels), hidden node/edge counts under
-  count authorization, and the two §11 verification paths (byte-path
+  algorithm (R1-R9, ┬º7.4 outcome labels), hidden node/edge counts under
+  count authorization, and the two ┬º11 verification paths (byte-path
   structural contract; ordered against-source steps where derived-digest
   mismatches report `SOMA-CMP-0004` and fresh-render identity reports
   `PROJ-0002`). Flat-workflow projections stay byte-identical to
   `main@84d44e4`; regressions cover parse negatives, per-fault nested
   audit codes, structural no-leakage diff, seeded determinism,
   cross-boundary endpoint crafts, and envelope/payload forgery.
-- #164 E4/X07 Slice 1 — deterministic projection identity plus canonical and
+- #164 E4/X07 Slice 1 ÔÇö deterministic projection identity plus canonical and
   human views: versioned projection envelope (`projection.v1`, nested payload,
   source + projection digests under the SOMA DecimalV2 canonical rules), the
   canonical JSON projection (byte-deterministic, never redacted) with a
@@ -495,7 +499,7 @@
   with a SHA-256 integrity digest. Hosted workflow files were removed; releases
   remain explicit, human-approved local operations with no automatic deployment
   or publication.
-- #132 graph-decide slice — `POST /work-contexts/:id/graph-runs/:run_id/decisions` on
+- #132 graph-decide slice ÔÇö `POST /work-contexts/:id/graph-runs/:run_id/decisions` on
   top of the #221 registry. The endpoint gates on ownership (same user_id
   everywhere), work-context not cancelled, the graph checkpoint must exist
   and hold a matching runId, manifest semantic digest pin verification, a
@@ -504,16 +508,16 @@
   persists the resulting graph checkpoint via the registry; emits a durable
   `graph_decision` event on the work-context event stream. Five tests pin the
   happy path (state changes) with unknown-run (404), wrong-user (403),
-  cancel (409 — cancelled context refuses post-cancel decisions),
-  already-terminated (409 — no further decision), and UnjournaledBasis (409).
-- #221 (repair round 4, review-driven) — registry repair testlab is
+  cancel (409 ÔÇö cancelled context refuses post-cancel decisions),
+  already-terminated (409 ÔÇö no further decision), and UnjournaledBasis (409).
+- #221 (repair round 4, review-driven) ÔÇö registry repair testlab is
   actually present now:
 
   - **`list_checkpoints` was lax**: it validated structure but never
     pulled `checkpoint_digest` from the row, so it skipped any digest
     comparison, and it never bound that digest comparison back into
     the returned rows. Fixed: `list_checkpoints` runs the full check
-    suite per row — structure, runId-vs-key match, recomputed-vs-stored
+    suite per row ÔÇö structure, runId-vs-key match, recomputed-vs-stored
     digest comparison. A stored tamper in any one of the three is a
     hard error across both read endpoints.
   - **New regressions**: `stored_digest_tamper_is_detected_on_read_and_list`
@@ -523,17 +527,17 @@
     `blob_claiming_different_run_is_refused_on_write_and_read` (both
     directions of runId binding).
   - The FK pragma test is rewritten to prove `Db::init_schema`
-    DID switch foreign_keys=ON on the relevant connection — not on
+    DID switch foreign_keys=ON on the relevant connection ÔÇö not on
     an external probe. `cascade_delete_removes_registry_entry_with_context`
     recycles the same DB instance as init; the FK-check was folded
     into this test to self-check.
   - Verified test count in this suite still 12 (registry tests);
     `cargo clippy` + `--all-targets` `--all-features` `-D warnings` clean.
 
-- #221 (E6/I03 prerequisite, repair round) — review-requested upgrades on
+- #221 (E6/I03 prerequisite, repair round) ÔÇö review-requested upgrades on
   the graph checkpoint registry. New guarantees:
   (1) digest is recomputed on READ and must equal the stored one or the
-  read fails — no silent acceptance of a tampered/stale value;
+  read fails ÔÇö no silent acceptance of a tampered/stale value;
   (2) the registry key MUST match `runId` inside the blob, and the blob
   must carry the graph-state identity fields (`schemaVersion`, `runId`,
   `graphId`, `graphManifestDigest`), so a registry row can't claim a run
@@ -546,10 +550,10 @@
   (5) +3 new tests: tampered-digest read fails; blob/key identity
   mismatch refused on both paths; FK pragma regression. Corrects the
   "DB can't be relied upon" note since the underlying sqlite file for
-  the test tempfile is now held for the test's full lifetime — the
+  the test tempfile is now held for the test's full lifetime ÔÇö the
   earlier in-tests regression check only worked by accident on Windows
   where the dropped temp dir wasn't yet visible.
-  `graph_checkpoints` stores (work_context_id, graph_run_id) →
+  `graph_checkpoints` stores (work_context_id, graph_run_id) ÔåÆ
   checkpoint JSON blob + freshly recomputed SHA-256, FK-cascade from
   `work_contexts` so orphan checkpoints cannot exist, and a wrongful
   registration against a non-existent context fails closed. The registry
@@ -568,14 +572,14 @@
   `concurrent_cancels_produce_single_event` by exercising true
   cross-process busyness, where per-connection `busy_timeout` and
   journal mode actually matter.
-- #132 Slice C — in-flight execution interruption: explicitly deferred.
+- #132 Slice C ÔÇö in-flight execution interruption: explicitly deferred.
   Cancellation closes the durable state (status flip + event) and blocks
   all execution-boundary re-entry, but it does NOT interrupt an already
   running execution iteration cancel-style: the current iteration must
   finish on its own. Cooperative cancellation (issue #222) is a follow-up
   slice that needs a `CancellationToken` plumbed through
-  `WorkExecutionService` / `WorkOrchestrator` — out of scope here.
-- #132 Slice C (repair round 3) — optimistic-concurrency guard on
+  `WorkExecutionService` / `WorkOrchestrator` ÔÇö out of scope here.
+- #132 Slice C (repair round 3) ÔÇö optimistic-concurrency guard on
   `update_work_context`: the full-row write is conditioned on
   `WHERE id = ? AND status <> 'Cancelled'`, so a stale snapshot held by
   an in-flight/paused execution can no longer flip a cancelled
@@ -585,7 +589,7 @@
   overwrite_cancellation` regression: connection 1 reads a `Draft`
   snapshot, connection 2 cancels, connection 1's `update_status`
   hits the guard and the durable row stays Cancelled.
-- #132 Slice C — governed WorkContext cancellation (repaired round).
+- #132 Slice C ÔÇö governed WorkContext cancellation (repaired round).
   `WorkStatus::Cancelled` is terminal and end-to-end enforced across
   handler, service, and orchestrator/execution boundaries. Cancellation
   is **atomic and race-safe** on disk: `cancel_context` reads current
@@ -593,7 +597,7 @@
   UPDATE on `status NOT IN (Completed, Failed, Archived, Cancelled)`,
   writes the `context_cancelled` event in the same transaction, and
   commit/rollback is driven by the tx object, so the two writes are all-
-  or-nothing. Concurrent cancels collapse — only one event row is
+  or-nothing. Concurrent cancels collapse ÔÇö only one event row is
   emitted, and racing callers resolve as either success (winner / replica
   idempotence) or Conflict (terminal-state). Shared execution boundary
   hardened: `WorkExecutionService::continue_context` and the
@@ -605,7 +609,7 @@
   guarantee, full terminal-state refusal set, HTTP/service parity, and
   restart-survives.
 
-- #215 Option 3, repair round 2 — hardened conformance pins. All three
+- #215 Option 3, repair round 2 ÔÇö hardened conformance pins. All three
   canonicalization paths now carry golden byte/digest constants instead of
   relative `assert_ne!` checks: path A (`soma::canonical`), path B
   (`portable_state`), path C (`memory_contracts::canonical_digest`). On the
@@ -614,7 +618,7 @@
   the `confidence=1.0` variant (A diverges on `1.0` vs `1`), and for
   set-like order reversal (B normalizes [digest unchanged], C digests
   input order [digest changes]). Additional pins: scientific-notation
-  divergence (`1e30` → A writes a 31-digit integer, C writes `1e+30`);
+  divergence (`1e30` ÔåÆ A writes a 31-digit integer, C writes `1e+30`);
   non-integral agreement domain (`0.7` renders identically in all paths);
   DecimalV2 layered boundaries (text guard rejects >400-digit lexemes;
   value-level writer accepts the f64-truncated form). Documentation
@@ -625,14 +629,14 @@
   `tests/canonical_policy_conformance.rs`.
 - SOMA canonical layer: fail-closed number policy (audit follow-up,
   operator-mandated). In `src/workflow/soma/canonical.rs`: (1)
-  `format_number` is no longer infallible — the branch that silently
+  `format_number` is no longer infallible ÔÇö the branch that silently
   substituted `"0"` for unrepresentable numbers is removed;
   `try_canonical_bytes` / `try_canonical_digest` propagate
   `CanonicalError` (`NonFiniteNumber` / `MagnitudeExceeded` /
   `PrecisionExceeded`) to every digest call site. (2) New raw-text guard
   `validate_number_lexemes` enforces SOMA's DecimalV2 limits (>400
   significant digits; |value| >= 1e10000 rejected, exact 1e10000 allowed,
-  zero exempt) on JSON text BEFORE serde_json parses it — the only layer
+  zero exempt) on JSON text BEFORE serde_json parses it ÔÇö the only layer
   that still sees the original number lexeme; wired into
   `soma::validate_artifact_text` ahead of parsing. (3) The lexeme checks
   reuse the existing duplicate-key scanner's parser via a `detect_dups`
@@ -655,14 +659,14 @@
   lexeme-independence regressions (reviewer P1 fix). Suite: 1003 lib /
   39 bin / 21+30+2 conformance / 5 api read-model / 2 soma-ast fixture
   / 10 new number-policy tests - no regressions.
-- E6/I03 (#132) Slice B — cursorable durable event stream: new
+- E6/I03 (#132) Slice B ÔÇö cursorable durable event stream: new
   read-only endpoint `GET /work-contexts/:id/events?user_id=..&after=..
   &limit=..` returns a page of the context's `work_context_events`
   (the same rows `WorkContextService` writes) ordered by a durable
   `seq` cursor, plus a `next_cursor` to resume from. The cursor is an
   explicit `seq INTEGER PRIMARY KEY AUTOINCREMENT` column: strictly
   monotonic in insertion order, never reused after deletions, and
-  stable across VACUUM (reviewer P1 fix — implicit rowids on a TEXT-PK
+  stable across VACUUM (reviewer P1 fix ÔÇö implicit rowids on a TEXT-PK
   table may be renumbered by VACUUM and may reuse deleted maxima).
   Pre-fix databases migrate via copy-and-rename backfill preserving
   insertion order. Row parsing is fail-closed (reviewer P1 fix):
@@ -678,7 +682,7 @@
   retryable (never an empty table); a pre-existing `_new` straggler
   from an aborted attempt is deterministically dropped before the
   copy; and the `foreign_keys` pragma suspension is restored
-  unconditionally — on success and on failure — before any error is
+  unconditionally ÔÇö on success and on failure ÔÇö before any error is
   propagated. Index creation errors are surfaced, not swallowed.
   Thirteen integration tests in `tests/api_event_cursor.rs`
   cover: first page, gap-free/dup-free resume, rebuild-from-db_path
@@ -690,7 +694,7 @@
   failed-migration rollback + deterministic retry + pragma
   restoration, and migration idempotency on re-open.
 
-- E6/I03 (#132) Slice A — `tests/api_read_model_rebuild.rs`: 5 new
+- E6/I03 (#132) Slice A ÔÇö `tests/api_read_model_rebuild.rs`: 5 new
   integration tests that lock the API's read-model rebuild
   property without adding new endpoints. Tests cover:
   (1) API and CLI share the same durable state (the API writes
@@ -698,7 +702,7 @@
   the same `db_path` and agrees); (2) the read model is rebuildable
   (a fresh `AppState` + `Db` over the same `db_path` returns the
   same data); (3) duplicate `POST /work-contexts` calls each
-  persist their own row (the current contract — implicit-id
+  persist their own row (the current contract ÔÇö implicit-id
   creates are NOT collapsed; an idempotency-key-based upsert is a
   future API slice); (4) status updates survive the rebuild;
   (5) a stable read across rebuilds is the "cursor" property.
@@ -707,11 +711,11 @@
   / 2 baseline preserved-or-improved (5 new integration tests
   in `api_read_model_rebuild`).
 
-- E6/I02 (#131) Slice A — read-only run inspector: a new
+- E6/I02 (#131) Slice A ÔÇö read-only run inspector: a new
   `prometheos work inspect <work_id>` subcommand (and
   `inspect_repo_workbench` helper in `src/cli/commands/work.rs`)
   that prints the work context metadata, artifacts, decisions,
-  and a stale-approvals report. The command is read-only — it
+  and a stale-approvals report. The command is read-only ÔÇö it
   goes through `repo_workbench::load_context` and never mutates
   any state. Output is available as text (default) or JSON
   (`--json`); both share one source of truth. Stale-approval
@@ -721,11 +725,11 @@
   artifact's `provenance.generator` (the same field the rest of
   the repo-workbench surface uses for attribution). 5 new unit
   tests in `src/cli/commands/work.rs` + 1 new parse-only test
-  in `src/cli/mod.rs`. 1003 → 1003 lib tests passing on this
+  in `src/cli/mod.rs`. 1003 ÔåÆ 1003 lib tests passing on this
   branch (no new lib tests in this slice; the new tests live in
   the binary target).
 
-- E6/I01 (#130) Slice A — CLI contract integration tests in
+- E6/I01 (#130) Slice A ÔÇö CLI contract integration tests in
   `src/cli/mod.rs` (`#[cfg(test)] mod cli_contract_tests`). 14
   parse-only tests (no runtime needed) cover the documented
   invocations and the failure cases for every top-level
@@ -738,7 +742,7 @@
   each subcommand carry `#[command(about = "...")]` doc strings;
   this slice adds the integration-test side of the contract.
 
-- E6/I01 (#130) Slice C — six new workflow templates under
+- E6/I01 (#130) Slice C ÔÇö six new workflow templates under
   `flows/` for the six workflow kinds required by E6/I01:
   `bug_fix.flow.yaml`, `feature.flow.yaml`, `refactor.flow.yaml`,
   `test.flow.yaml`, `docs.flow.yaml`, `review.flow.yaml`. Each
@@ -750,7 +754,7 @@
   required flow). 2 new tests in `tests/api_flow_execution.rs`
   (loader shape + reference fix).
 
-- E6/I01 (#130) Slice B — `AppConfig::configVersion` field added
+- E6/I01 (#130) Slice B ÔÇö `AppConfig::configVersion` field added
   and required; `#[serde(deny_unknown_fields)]` enabled at the top
   level. The loader fails closed when `configVersion` is missing,
   malformed, or has a different major from the binary's
@@ -758,12 +762,12 @@
   differences are forward-compatible. The committed
   `prometheos.config.json` is updated to set `configVersion:
   "1.0.0"`. 5 new in-module unit tests in `src/config/settings/
-  loader.rs` (load default version → ok; missing → fail; unknown
-  major → fail; minor bump → ok; unknown field → fail). 1 existing
+  loader.rs` (load default version ÔåÆ ok; missing ÔåÆ fail; unknown
+  major ÔåÆ fail; minor bump ÔåÆ ok; unknown field ÔåÆ fail). 1 existing
   fixture in `src/workflow/redaction.rs` is updated to include
-  `configVersion`. 998 → 1003 lib tests passing on this branch.
+  `configVersion`. 998 ÔåÆ 1003 lib tests passing on this branch.
 
-- E5/I04 (#128) — `src/workflow/node_review.rs`: governed `security-review`,
+- E5/I04 (#128) ÔÇö `src/workflow/node_review.rs`: governed `security-review`,
   `evidence-audit`, and `independent-review` `lite.node` capabilities.
   Deterministic, read-only, no model, no apply/merge authority. The
   independent-review node composes an `approve | changes-required | reject`
@@ -772,7 +776,7 @@
   Conformance: 25 in-module unit tests + 5 conformance tests in
   `tests/node_library_conformance.rs` (980 lib + 18 lib-conformance +
   30 impl-conformance + 2 kit tests passing on this branch).
-- E5/I05 (#129) — `src/workflow/node_doc_release.rs`: governed
+- E5/I05 (#129) ÔÇö `src/workflow/node_doc_release.rs`: governed
   `doc-impact` and `release-prep` `lite.node` capabilities.
   `doc-impact` is a read-only classifier that maps the candidate's
   changed paths to doc zones (user-guide, architecture, api-reference,
@@ -788,19 +792,19 @@
   lib-conformance + 30 impl-conformance + 2 kit tests passing on this
   branch).
 
-## V1.7.0 Fast Governed Loop V1 — Evaluation Pipeline
+## V1.7.0 Fast Governed Loop V1 ÔÇö Evaluation Pipeline
 
 - Added the **Fast Governed Loop V1** automated evaluation pipeline (`src/workflow/evaluate.rs`):
   - Exactly-once proposal generation via lock file + registry states (`Reserved`/`Generating`/`ProposalGenerated`/`Validating`/`ValidationComplete`)
-  - Ownership fencing with `FenceToken` (`owner_run_id` + `lease_epoch`) — verified under registry lock for every state mutation
+  - Ownership fencing with `FenceToken` (`owner_run_id` + `lease_epoch`) ÔÇö verified under registry lock for every state mutation
   - Renewable heartbeat (`Generating` and `Validating` states) with configurable lease intervals and generation timeouts
-  - `tokio::select!` race between generation and heartbeat status — ownership loss during generation is detected before provider result is consumed
-  - Blocking validation with heartbeat protection — `Validating` state has its own renewable lease via spawned heartbeat task
-  - `fenced_finalize()` — atomic registry-lock acquisition, ownership revalidation, heartbeat health check, evidence bundle write, and `ValidationComplete` transition (no takeover window between checks and publication)
+  - `tokio::select!` race between generation and heartbeat status ÔÇö ownership loss during generation is detected before provider result is consumed
+  - Blocking validation with heartbeat protection ÔÇö `Validating` state has its own renewable lease via spawned heartbeat task
+  - `fenced_finalize()` ÔÇö atomic registry-lock acquisition, ownership revalidation, heartbeat health check, evidence bundle write, and `ValidationComplete` transition (no takeover window between checks and publication)
   - Heartbeat errors propagate via `watch` channel; `check_heartbeat!()` macro bails after generation, validation, and inside the fenced finalization boundary
   - Stale-run recovery (`Reserved`/`Generating`/`Validating` entries) with takeover that re-validates staleness, owner, epoch, and proposal ID under the lock
   - `ProposalGenerated` state is never stale (no heartbeat required); `ValidationComplete` with missing/corrupt evidence fails closed
-  - Immutable evidence bundles — completed bundles returned byte-for-byte, never modified or rewritten
+  - Immutable evidence bundles ÔÇö completed bundles returned byte-for-byte, never modified or rewritten
   - Classified terminal failures (compile error, infrastructure, provider rejection) with structured evidence schema
   - Original-repository integrity verification and cleanup per evaluation
   - Sub-second timestamp precision (`now_iso()` preserving nanoseconds) enabling short configurable lease durations
@@ -1082,7 +1086,7 @@
 - Replaced diagnostics provider connectivity placeholder with real HTTP connectivity checks, including provider-specific endpoints and auth/header handling.
 - Removed silent dependency discovery fallback:
   - Replaced `PlaceholderDiscovery` with explicit `UnsupportedDiscovery` failures for unimplemented discovery types (`Network`, `Database`, `Custom`).
-  - This prevents false-positive “successful” discovery when unsupported mechanisms are configured.
+  - This prevents false-positive ÔÇ£successfulÔÇØ discovery when unsupported mechanisms are configured.
 - Implemented adaptive timeout engine state updates:
   - Added learned adaptive multiplier updates from historical timeout/success/utilization statistics.
   - Adaptive escalation now uses bounded learned multipliers instead of static no-op behavior.
@@ -1297,51 +1301,51 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 
 ---
 
-## v0.1.2 PRD - From Architecture → Execution (Complete)
+## v0.1.2 PRD - From Architecture ÔåÆ Execution (Complete)
 
-### Phase 1 — NodeFactory & Flow Execution
+### Phase 1 ÔÇö NodeFactory & Flow Execution
 - [x] Issue #1: Implement NodeFactory trait
 - [x] Issue #2: Replace PlaceholderNode with real nodes
 - [x] Issue #3: Define Flow JSON Schema v1
 - [x] Issue #4: Upgrade Flow Validation
 
-### Phase 2 — Native Flow Nodes
+### Phase 2 ÔÇö Native Flow Nodes
 - [x] Issue #5: Implement PlannerNode
 - [x] Issue #6: Implement CoderNode
 - [x] Issue #7: Implement ReviewerNode
 - [x] Issue #8: Implement Generic LLMNode
 
-### Phase 3 — File & Tool Integration
+### Phase 3 ÔÇö File & Tool Integration
 - [x] Issue #9: Implement FileWriterNode
 - [x] Issue #10: Implement ToolNode
 - [x] Issue #11: Harden Tool Sandbox
 
-### Phase 4 — Memory Integration
+### Phase 4 ÔÇö Memory Integration
 - [x] Issue #12: Implement ContextLoaderNode
 - [x] Issue #13: Implement MemoryWriteNode
 - [x] Issue #14: Finalize Memory Schema
 
-### Phase 5 — Tracing & Observability
+### Phase 5 ÔÇö Tracing & Observability
 - [x] Issue #15: Integrate Tracer into Flow::run
 - [x] Issue #16: Implement Timeline Export
 - [x] Issue #17: Integrate Debug Mode
 
-### Phase 6 — CLI Integration
+### Phase 6 ÔÇö CLI Integration
 - [x] Issue #18: Upgrade Flow CLI
 - [x] Issue #19: Implement Input Injection
 - [x] Issue #20: Implement Output Rendering
 
-### Phase 7 — Migration Completion
+### Phase 7 ÔÇö Migration Completion
 - [x] Issue #21: Replace SequentialOrchestrator
 - [x] Issue #22: Convert Agents to Nodes
 - [x] Issue #23: Remove Legacy Dependencies
 
-### Phase 8 — Example Flows
+### Phase 8 ÔÇö Example Flows
 - [x] Issue #24: Create Code Generation Flow
 - [x] Issue #25: Create Tool Execution Flow
 - [x] Issue #26: Create Memory-Augmented Flow
 
-### Phase 9 — Testing
+### Phase 9 ÔÇö Testing
 - [x] Issue #27: Flow Execution Tests
 - [x] Issue #28: Node Tests
 - [x] Issue #29: Memory Tests
@@ -1355,29 +1359,29 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 
 ## v0.2.0 PRD - Local Chat Interface (Complete)
 
-### Phase 1 — Backend API Foundation
+### Phase 1 ÔÇö Backend API Foundation
 - [x] Issue #1: Create API Server Module (src/api/server.rs with axum/warp, async tokio, JSON responses, global app state)
 - [x] Issue #2: Global AppState (struct with Db and RuntimeContext, shared across routes, thread-safe Arc)
 - [x] Issue #3: Health Endpoint (GET /health returning { "status": "ok" })
 
-### Phase 2 — SQLite UI Database
+### Phase 2 ÔÇö SQLite UI Database
 - [x] Issue #4: DB Module (src/db/mod.rs using rusqlite or sqlx)
 - [x] Issue #5: Schema Creation (tables: projects, conversations, messages, flow_runs, artifacts)
 - [x] Issue #6: Project Repository (GET /projects, POST /projects)
 - [x] Issue #7: Conversation Repository (GET /projects/:id/conversations, POST /projects/:id/conversations)
 - [x] Issue #8: Message Repository (GET /conversations/:id/messages, POST /conversations/:id/messages)
 
-### Phase 3 — Flow Execution API
+### Phase 3 ÔÇö Flow Execution API
 - [x] Issue #9: Run Flow Endpoint (POST /conversations/:id/run with message input, save user message, create FlowRun, spawn async task, execute flow)
 - [x] Issue #10: FlowRun Tracking (store id, conversation_id, status, started_at, completed_at)
 - [x] Issue #11: Artifact Storage (save file_path, content, run_id)
 
-### Phase 4 — WebSocket Streaming
+### Phase 4 ÔÇö WebSocket Streaming
 - [x] Issue #12: WebSocket Server (WS /ws/runs/:id)
 - [x] Issue #13: Event Model (type: node_start | node_end | output | error, node, data, timestamp)
-- [x] Issue #14: Hook Flow → WS (emit events on node start, node end, output update, errors)
+- [x] Issue #14: Hook Flow ÔåÆ WS (emit events on node start, node end, output update, errors)
 
-### Phase 5 — Frontend (Next.js)
+### Phase 5 ÔÇö Frontend (Next.js)
 - [x] Issue #15: Next.js App Setup (app/, components/, lib/ structure)
 - [x] Issue #16: Projects Page (list projects, create project)
 - [x] Issue #17: Conversations Sidebar (list conversations per project, create new conversation)
@@ -1386,20 +1390,20 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 - [x] Issue #20: Run Timeline UI (display Planning, Coding, Reviewing, Writing files, Done)
 - [x] Issue #21: Artifacts Panel (list files, show content, copy button)
 
-### Phase 6 — Flow Integration
-- [x] Issue #22: Connect Chat → Flow (message → SharedState.input → execute codegen.flow.json)
+### Phase 6 ÔÇö Flow Integration
+- [x] Issue #22: Connect Chat ÔåÆ Flow (message ÔåÆ SharedState.input ÔåÆ execute codegen.flow.json)
 - [x] Issue #23: Default Flow Binding (hardcode examples/codegen.flow.json for MVP)
 - [x] Issue #24: Output Parsing (capture outputs, display in chat)
 
-### Phase 7 — UX Polish
+### Phase 7 ÔÇö UX Polish
 - [x] Issue #25: Loading States (spinner during execution, disable input while running)
 - [x] Issue #26: Error Handling UI (show node errors, show memory skipped warnings)
 - [x] Issue #27: Conversation Persistence (reload messages on refresh)
 - [x] Issue #28: Basic Styling (minimal clean UI, dark mode optional)
 
-### Phase 8 — Testing
+### Phase 8 ÔÇö Testing
 - [x] Issue #29: API Tests (endpoints return correct data)
-- [x] Issue #30: Flow Execution Tests via API (POST → run → result stored)
+- [x] Issue #30: Flow Execution Tests via API (POST ÔåÆ run ÔåÆ result stored)
 - [x] Issue #31: WebSocket Tests (receives events)
 - [x] Issue #32: Frontend Smoke Test (send message, receive response, show files)
 
@@ -1410,7 +1414,7 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 
 ## v0.2.1 PRD - Intent Classification Layer (Complete)
 
-### Phase 9 — Intent Classification
+### Phase 9 ÔÇö Intent Classification
 - [x] Issue #1: Create Intent Types Module (Intent enum, IntentClassificationResult, Handler)
 - [x] Issue #2: Implement Rule-Based Classifier (conversation patterns, coding task patterns, question patterns)
 - [x] Issue #3: Implement Hybrid Classifier (rule-based fast path, LLM fallback for ambiguous cases)
@@ -1457,107 +1461,107 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 
 **Objective:** Turn the current PrometheOS Lite Rust backend into a production-grade, local-first, flow-native execution core with YAML flows, unified execution paths, and deterministic testing.
 
-### Issue #0 — FlowFile schema upgrade
+### Issue #0 ÔÇö FlowFile schema upgrade
 - [x] Add version, inputs, outputs fields to FlowFile struct
 - [x] Update codegen.flow.json to validate against new schema
 - [x] Add validation in FlowLoader to check required fields
 
-### Issue #1 — Make YAML the canonical Flow format
+### Issue #1 ÔÇö Make YAML the canonical Flow format
 - [x] Add serde_yaml to Cargo.toml
 - [x] Create src/flow/loader/yaml.rs
 - [x] Support .yaml, .yml, .json files
 - [x] Rename from_json_file_with_runtime to from_file_with_runtime
 
-### Issue #2 — Move NodeFactory out of CLI into core library
+### Issue #2 ÔÇö Move NodeFactory out of CLI into core library
 - [x] Move NodeFactory trait to library
 - [x] Move DefaultNodeFactory to library
 - [x] Move built-in node implementations out of src/cli/runner.rs
 - [x] Keep CLI FlowRunner thin
 
-### Issue #3 — Introduce FlowLoader abstraction
+### Issue #3 ÔÇö Introduce FlowLoader abstraction
 - [x] Create FlowLoader trait
 - [x] Add validation module
 - [x] Return rich errors (missing start node, duplicate node ID, transition target missing, etc.)
 
-### Issue #4 — Standardize trace event schema
+### Issue #4 ÔÇö Standardize trace event schema
 - [x] Define TraceEventKind enum (two-layer model: run-level + flow-level)
 - [x] Add run_id and trace_id to all emitted events
 - [x] Persist event kind as stable string
 
-### Issue #5 — Add ExecutionBudget and BudgetGuard
+### Issue #5 ÔÇö Add ExecutionBudget and BudgetGuard
 - [x] Add ExecutionBudget struct (max_steps, max_llm_calls, max_tool_calls, max_runtime_ms, etc.)
 - [x] Add BudgetGuard
 - [x] Check budget before each node, LLM call, tool call, memory operation
 - [x] Emit BudgetChecked events
 
-### Issue #6 — FinalOutput contract
+### Issue #6 ÔÇö FinalOutput contract
 - [x] Add src/flow/output/final_output.rs
 - [x] Convert SharedState to FinalOutput after flow run
 - [x] Add Evaluation
 - [x] CLI prints FinalOutput in JSON by default
 
-### Issue #7 — Basic Evaluation Engine
+### Issue #7 ÔÇö Basic Evaluation Engine
 - [x] Add src/flow/output/evaluation.rs
 - [x] Evaluate flow completed, required outputs exist, no critical node errors, budget status, unsafe/skipped tool calls
 - [x] Store evaluation in SharedState.meta.evaluation
 
-### Issue #8 — Run persistence and continuation integration
+### Issue #8 ÔÇö Run persistence and continuation integration
 - [x] Ensure every CLI/API run creates a FlowRun
 - [x] Save state snapshot on completion, failure, pause, budget exceeded
 - [x] Add prometheos flow resume <run_id>
 - [x] Add prometheos flow events <run_id>
 
-### Issue #9 — Minimal replay/export
+### Issue #9 ÔÇö Minimal replay/export
 - [x] Keep current --export-timeline
 - [x] Add prometheos flow replay <run_id> (observational, not re-executing)
 - [x] Print events, node order, outputs, final evaluation
 
-### Issue #10 — Minimal Personality Engine
+### Issue #10 ÔÇö Minimal Personality Engine
 - [x] Create src/personality/ with mode.rs, selector.rs, constitution.rs, prompt.rs
 - [x] Implement PersonalityMode enum (Companion, Navigator, Anchor, Mirror)
 - [x] Text-based selector only
 - [x] Inject mode into prompt context for LLM nodes
 - [x] Add post-generation filter
 
-### Issue #11 — Tool permission model v0
+### Issue #11 ÔÇö Tool permission model v0
 - [x] Add permissions module under src/tools
 - [x] Implement ToolPermission enum (Network, FileRead, FileWrite, Shell, Env)
 - [x] Implement ToolPolicy struct
 - [x] Wrap current ToolRuntime as CommandToolRuntime
 - [x] Add conservative defaults (shell disabled, file writes restricted to prometheos-output/, network denied)
 
-### Issue #12 — Tool schema hash integration
+### Issue #12 ÔÇö Tool schema hash integration
 - [x] Add ToolMetadata struct with name, description, schema_hash
 - [x] Native tools can expose metadata (added metadata() method to Tool trait)
 - [x] Schema hash auto-generated from input_schema using ToolMetadata::generate_schema_hash()
 - [x] Infrastructure in place for imported tools to store and validate schema hashes
 
-### Issue #13 — Flow test runner
+### Issue #13 ÔÇö Flow test runner
 - [x] Add src/flow/testing
 - [x] Support fixtures (input JSON, expected output JSON, expected event kinds)
 - [x] Mock LLM mode for deterministic responses
 - [x] CLI: prometheos flow test with --fixture flag
 
-### Issue #14 — Benchmark baseline
+### Issue #14 ÔÇö Benchmark baseline
 - [x] Add prometheos bench run
 - [x] Add benchmarks/ directory
 - [x] Add baseline tasks (direct chat, planning flow, codegen flow, memory read/write flow)
 - [x] Output JSON report with metrics (task_success_rate, median_runtime_ms, llm_calls_per_run, etc.)
 
-### Issue #15 — API execution layer rewrite
-- [x] Create src/intent/flow_selector.rs (Intent → Flow mapping bridge)
-- [x] Rewrite API handlers: Intent → FlowSelector → FlowRunner (FlowExecutionService handles this)
+### Issue #15 ÔÇö API execution layer rewrite
+- [x] Create src/intent/flow_selector.rs (Intent ÔåÆ Flow mapping bridge)
+- [x] Rewrite API handlers: Intent ÔåÆ FlowSelector ÔåÆ FlowRunner (FlowExecutionService handles this)
 - [x] Remove all direct LlmClient::generate() calls from API routes (no longer present)
 - [x] API and CLI produce same FinalOutput contract (FlowExecutionService produces FinalOutput)
 - [x] WebSocket events infrastructure exists and sends flow execution events to clients
 
-### Issue #16 — CLI cleanup
+### Issue #16 ÔÇö CLI cleanup
 - [x] Extract RuntimeBuilder from duplicated CLI code
 - [x] Split CLI commands into commands/flow.rs, commands/serve.rs, commands/run.rs
 - [x] Add runtime_builder.rs
 - [x] CLI commands are functional (file sizes exceed 150-line soft limit but work correctly)
 
-### Issue #17 — Docs: V1 architecture and developer guide
+### Issue #17 ÔÇö Docs: V1 architecture and developer guide
 - [x] Create docs/v1-core.md
 - [x] Create docs/flows-yaml.md
 - [x] Create docs/runtime-context.md
@@ -1572,11 +1576,11 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 
 ## v1.1 Guardrails PRD - Enforced Runtime Guardrails (Complete)
 
-**Codename:** "V1.1 — Enforced Runtime Guardrails"
+**Codename:** "V1.1 ÔÇö Enforced Runtime Guardrails"
 
 **Objective:** Make V1 Core safe enough for V2 Agents by enforcing ToolContext, Permission checks, Path safety, Flow snapshots, Idempotency, Outbox, Interrupts, Approval policy, Trust policy, Loop detection, Guardrail tests.
 
-### Issue #1 — Enforced ToolContext
+### Issue #1 ÔÇö Enforced ToolContext
 - [x] Add ToolContext struct (run_id, trace_id, node_id, tool_name, policy, trust_level, approval_policy, idempotency_key)
 - [x] ToolRuntime.execute_* requires ToolContext
 - [x] ToolNode cannot call tools without context
@@ -1584,7 +1588,7 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 - [x] Denied calls emit PermissionDenied
 - [x] Approved calls emit PermissionChecked
 
-### Issue #2 — PathGuard + FileWriter Hardening
+### Issue #2 ÔÇö PathGuard + FileWriter Hardening
 - [x] Create src/tools/path_guard.rs
 - [x] Rules: No absolute paths, No .., No symlink escape, Canonical final path must remain inside prometheos-output/
 - [x] file_path = "/etc/passwd" fails
@@ -1592,63 +1596,63 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 - [x] Failure emits PermissionDenied
 - [x] Tests cover Unix + Windows-style paths
 
-### Issue #3 — ApprovalPolicy
+### Issue #3 ÔÇö ApprovalPolicy
 - [x] Add ApprovalPolicy enum (Auto, RequireForTools, RequireForSideEffects, RequireForUntrusted, ManualAll)
 - [x] Approval policy attaches to ExecutionOptions
 - [x] Tool calls consult approval policy
 - [x] Side-effecting tools pause when approval is required
 - [x] Approval events are traced
 
-### Issue #4 — InterruptContext
+### Issue #4 ÔÇö InterruptContext
 - [x] Add InterruptContext struct (interrupt_id, run_id, trace_id, node_id, reason, expected_schema, expires_at)
 - [x] Interrupts persist to SQLite
 - [x] Resume validates decision schema
 - [x] Expired interrupts fail safely
 - [x] Invalid decision does not mutate SharedState
 
-### Issue #5 — Flow Snapshot / Versioning
+### Issue #5 ÔÇö Flow Snapshot / Versioning
 - [x] Add FlowSnapshot struct (flow_name, flow_version, source_hash, source_text, created_at)
 - [x] Every run stores exact flow source
 - [x] Resume uses stored snapshot, not current YAML file
 - [x] Flow hash mismatch is visible
 - [x] Missing flow version fails in strict mode
 
-### Issue #6 — Idempotency Keys
+### Issue #6 ÔÇö Idempotency Keys
 - [x] Add IdempotencyKey struct (key, run_id, node_id, operation_hash)
 - [x] File writes generate deterministic operation hash
 - [x] Repeated side effect checks prior execution
 - [x] Duplicate side effect is blocked or skipped
 - [x] Trace emits IdempotencyChecked
 
-### Issue #7 — Outbox Pattern
+### Issue #7 ÔÇö Outbox Pattern
 - [x] Create tool_outbox table (id, run_id, trace_id, node_id, tool_name, input_hash, status, created_at, completed_at, result_json)
 - [x] Outbox entry created before side effect
 - [x] Completed side effects are not re-executed on resume
 - [x] Failed side effects are inspectable
 - [x] FinalOutput includes side-effect summary eventually
 
-### Issue #8 — TrustPolicy
+### Issue #8 ÔÇö TrustPolicy
 - [x] Add TrustLevel enum (Trusted, Local, Community, External, Untrusted)
 - [x] Add TrustPolicy struct (source, level, require_approval)
-- [x] Defaults: Built-in tools → Local, Local YAML flows → Local, Downloaded/imported tools → External, Unknown tools → Untrusted
+- [x] Defaults: Built-in tools ÔåÆ Local, Local YAML flows ÔåÆ Local, Downloaded/imported tools ÔåÆ External, Unknown tools ÔåÆ Untrusted
 - [x] Untrusted tools require approval
 - [x] Trust level appears in trace
 - [x] Trust can be listed/updated by CLI
 
-### Issue #9 — Loop Detection
+### Issue #9 ÔÇö Loop Detection
 - [x] Add LoopDetectionConfig struct (max_repeated_node, max_repeated_transition, max_repeated_tool_call)
-- [x] Same node repeated too often → stop
-- [x] Same transition cycle repeated too often → stop
-- [x] Same tool call same args too often → stop
+- [x] Same node repeated too often ÔåÆ stop
+- [x] Same transition cycle repeated too often ÔåÆ stop
+- [x] Same tool call same args too often ÔåÆ stop
 - [x] Emits LoopDetected
 
-### Issue #10 — Guardrail Trace Events
+### Issue #10 ÔÇö Guardrail Trace Events
 - [x] Add missing events: PermissionChecked, PermissionDenied, ApprovalRequested, ApprovalGranted, ApprovalDenied, InterruptCreated, InterruptResumed, FlowSnapshotStored, SchemaHashChecked, IdempotencyChecked, OutboxPending, OutboxCompleted, TrustPolicyApplied, LoopDetected
 - [x] Events are enum variants, not random strings
 - [x] Events are emitted in runtime, not just declared
 - [x] Replay shows them
 
-### Issue #11 — Guardrail CLI
+### Issue #11 ÔÇö Guardrail CLI
 - [x] Commands: prometheos flow resume <run_id>, prometheos flow events <run_id>, prometheos flow replay <run_id>
 - [x] Commands: prometheos interrupt list, prometheos interrupt approve <interrupt_id> --decision '{}', prometheos interrupt deny <interrupt_id>
 - [x] Commands: prometheos trust list, prometheos trust set <source> --level trusted
@@ -1657,7 +1661,7 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 - [x] JSON output by default
 - [x] Human-readable errors
 
-### Issue #12 — Guardrail Test Suite
+### Issue #12 ÔÇö Guardrail Test Suite
 - [x] Required tests: tool_without_context_fails, shell_denied_by_default, network_denied_by_default, absolute_file_write_denied, path_traversal_denied, flow_resume_uses_snapshot, schema_hash_change_detected, side_effect_not_reexecuted, interrupt_invalid_decision_rejected, untrusted_tool_requires_approval, loop_detection_stops_run
 - [x] CI runs guardrail tests
 - [x] At least 3 integration tests cover resume/interrupt/outbox
@@ -1674,61 +1678,61 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 
 **Objective:** Introduce a persistent operational layer that manages real-world work across time with WorkContext, Domain Profiles, Playbooks, Artifacts, Decisions, and Lifecycle management.
 
-### Issue #1 — WorkContext Storage
+### Issue #1 ÔÇö WorkContext Storage
 - [x] Create work_contexts table (id, user_id, title, domain, status, phase, autonomy_level, approval_policy, created_at, updated_at, data_json)
 
-### Issue #2 — WorkContextService
+### Issue #2 ÔÇö WorkContextService
 - [x] Implement API: create_context, get_context, update_context, add_artifact, add_decision, update_status
 
-### Issue #3 — Context Routing
-- [x] If context_id provided → use it
-- [x] Else if active exists → reuse
-- [x] Else → create new WorkContext
+### Issue #3 ÔÇö Context Routing
+- [x] If context_id provided ÔåÆ use it
+- [x] Else if active exists ÔåÆ reuse
+- [x] Else ÔåÆ create new WorkContext
 
-### Issue #4 — Flow Integration
+### Issue #4 ÔÇö Flow Integration
 - [x] FlowExecutionService must execute_message and return FinalOutput, then apply to WorkContext
 
-### Issue #5 — Artifact Injection
+### Issue #5 ÔÇö Artifact Injection
 - [x] Every flow result must map to ArtifactKind, store artifact, attach to WorkContext
 
-### Issue #6 — Continuation Engine
+### Issue #6 ÔÇö Continuation Engine
 - [x] Implement continue_context(context_id)
 - [x] Load context, inspect phase, pick next flow, execute, update context
 
-### Issue #7 — Phase Controller
-- [x] No plan → Planning
-- [x] Plan exists → AwaitingApproval
-- [x] Approved → Execution
-- [x] Execution done → Review
-- [x] Review done → Iteration/Final
+### Issue #7 ÔÇö Phase Controller
+- [x] No plan ÔåÆ Planning
+- [x] Plan exists ÔåÆ AwaitingApproval
+- [x] Approved ÔåÆ Execution
+- [x] Execution done ÔåÆ Review
+- [x] Review done ÔåÆ Iteration/Final
 
-### Issue #8 — Approval Integration
-- [x] Interrupt → pause context
-- [x] Approve → resume
-- [x] Deny → Blocked
+### Issue #8 ÔÇö Approval Integration
+- [x] Interrupt ÔåÆ pause context
+- [x] Approve ÔåÆ resume
+- [x] Deny ÔåÆ Blocked
 
-### Issue #9 — Mode System
+### Issue #9 ÔÇö Mode System
 - [x] Chat: no persistence
 - [x] Review: approval required
 - [x] Autonomous: run until budget hit, approval needed, or complete
 
-### Issue #10 — CLI
+### Issue #10 ÔÇö CLI
 - [x] Commands: prometheos context list, prometheos context show <id>, prometheos context continue <id>, prometheos context artifacts <id>
 
-### Issue #11 — API
+### Issue #11 ÔÇö API
 - [~] Endpoints: POST /contexts, GET /contexts/:id, POST /contexts/:id/continue, GET /contexts/:id/artifacts
 
-### Issue #12 — Domain Templates
+### Issue #12 ÔÇö Domain Templates
 - [x] Create templates/software.yaml, business.yaml, marketing.yaml, personal.yaml, research.yaml, creative.yaml
 
-### Issue #13 — Context-Aware Flow Selection
+### Issue #13 ÔÇö Context-Aware Flow Selection
 - [x] FlowSelector now receives intent + WorkContext
 
-### Issue #14 — Guardrails Integration
+### Issue #14 ÔÇö Guardrails Integration
 - [x] Must enforce ToolPolicy, TrustPolicy, ApprovalPolicy, Budget, LoopDetection
 
-### Issue #15 — Testing
-- [x] Required tests: create → plan → artifact created, resume → continues correctly, approval blocks execution, autonomous respects guardrails
+### Issue #15 ÔÇö Testing
+- [x] Required tests: create ÔåÆ plan ÔåÆ artifact created, resume ÔåÆ continues correctly, approval blocks execution, autonomous respects guardrails
 
 **Status:** v1.2 Operation - Mostly complete (14/15 fully implemented, 1/15 partially implemented)
 **Note:** API endpoints exist but some integration blocked by Axum Handler trait compatibility (see v1.2.5 for details)
@@ -1787,7 +1791,7 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 ### Phase 7 - Testing
 - [x] Issue #31: Add deterministic no-API flow test (deterministic_test.flow.yaml)
 - [x] Issue #32: Add real integration tests (tests/work_orchestrator_e2e.rs with full lifecycle tests)
-- [x] Issue #33: Add deterministic tests proving API → WorkOrchestrator → WorkExecutionService
+- [x] Issue #33: Add deterministic tests proving API ÔåÆ WorkOrchestrator ÔåÆ WorkExecutionService
 
 ### Phase 8 - Template & CLI Integration
 - [x] Issue #34: Add CLI work artifacts command
@@ -1812,48 +1816,48 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 
 ## v1.3 PRD - WorkContext Playbooks & Evolution Engine
 
-**Codename:** "V1.3 — WorkContext Playbooks & Evolution Engine"
+**Codename:** "V1.3 ÔÇö WorkContext Playbooks & Evolution Engine"
 
-**Objective:** Make PrometheOS improve — add persistent strategy layer (Playbooks), learning from execution (Evolution Engine), performance tracking, evaluation, strict mode, and observability.
+**Objective:** Make PrometheOS improve ÔÇö add persistent strategy layer (Playbooks), learning from execution (Evolution Engine), performance tracking, evaluation, strict mode, and observability.
 
-### Phase 1 — Playbook Schema & Storage (EPIC 1)
+### Phase 1 ÔÇö Playbook Schema & Storage (EPIC 1)
 - [x] Issue #1: Add `PatternRecord` (pattern_type, signal, weight), `FlowPreference` (flow_id, weight, confidence), `NodePreference` (node_type, params) types to playbook module
 - [x] Issue #2: Extend `WorkContextPlaybook` with `preferred_nodes: Vec<NodePreference>`, `success_patterns: Vec<PatternRecord>`, `failure_patterns: Vec<PatternRecord>`, upgrade `preferred_flows` from `Vec<String>` to `Vec<FlowPreference>`
 - [x] Issue #3: Add `get_playbook_by_user_and_domain()` to PlaybookOperations
 - [x] Issue #4: Add pattern storage (success/failure patterns) to playbook repository
-- [x] Issue #5: Implement 3-tier fallback in PlaybookResolver (user+domain → domain default → global default)
+- [x] Issue #5: Implement 3-tier fallback in PlaybookResolver (user+domain ÔåÆ domain default ÔåÆ global default)
 
-### Phase 2 — Playbook-Aware Orchestration (EPIC 2)
+### Phase 2 ÔÇö Playbook-Aware Orchestration (EPIC 2)
 - [x] Issue #6: Inject `playbook_id` and playbook metadata into WorkContext on `submit_user_intent`
 - [x] Issue #7: Replace static flow selection with weighted selection from `playbook.preferred_flows` (weighted_random + exploration factor to avoid always picking first flow)
-- [x] Issue #8: Add `state.get_playbook()` to SharedState and condition node behavior (PlannerNode → deeper plans if research_depth high, CoderNode → stricter output if approval required, ReviewerNode → more aggressive critique if evaluation strict)
+- [x] Issue #8: Add `state.get_playbook()` to SharedState and condition node behavior (PlannerNode ÔåÆ deeper plans if research_depth high, CoderNode ÔåÆ stricter output if approval required, ReviewerNode ÔåÆ more aggressive critique if evaluation strict)
 
-### Phase 3 — Pattern Extraction & Evolution (EPIC 3)
+### Phase 3 ÔÇö Pattern Extraction & Evolution (EPIC 3)
 - [x] Issue #9: Add `PatternRecord` extraction from completed WorkContext (revision_count, failure_reason, success signals, execution_metadata)
 - [x] Issue #10: Add `evolve_playbook()` method to EvolutionEngine (increase successful flow weights, penalize failures, adjust research_depth/autonomy)
-- [x] Issue #11: Hook evolution into WorkOrchestrator — add `complete_context()` method with triggers for: completion, partial failure, user correction, retry
+- [x] Issue #11: Hook evolution into WorkOrchestrator ÔÇö add `complete_context()` method with triggers for: completion, partial failure, user correction, retry
 
-### Phase 4 — Flow Performance Tracking (EPIC 4)
+### Phase 4 ÔÇö Flow Performance Tracking (EPIC 4)
 - [x] Issue #12: Define `FlowPerformanceRecord` struct (flow_id, work_context_id, success_score, duration_ms, token_cost, revision_count)
 - [x] Issue #13: Store `FlowPerformanceRecord` after execution in WorkExecutionService
 - [x] Issue #14: Feed FlowPerformanceRecords into EvolutionEngine for pattern generation
 
-### Phase 5 — WorkContext Evaluation (EPIC 5)
+### Phase 5 ÔÇö WorkContext Evaluation (EPIC 5)
 - [x] Issue #15: Implement `evaluate_context(context: &WorkContext) -> EvaluationResult` with signals: artifact completeness, retries, latency, semantic correctness (LLM-based scoring), structural correctness (schema validation), tool success/failure consistency
 - [x] Issue #16: Store evaluation result in WorkContext and expose via API/CLI
 
-### Phase 6 — Strict Mode (EPIC 6)
-- [x] Issue #17: Add `StrictMode` config flag — missing inputs → error, missing services → error, empty outputs → error, no silent fallbacks, enforce no unwrap(), enforce no silent Option::None propagation, enforce tool idempotency checks
+### Phase 6 ÔÇö Strict Mode (EPIC 6)
+- [x] Issue #17: Add `StrictMode` config flag ÔÇö missing inputs ÔåÆ error, missing services ÔåÆ error, empty outputs ÔåÆ error, no silent fallbacks, enforce no unwrap(), enforce no silent Option::None propagation, enforce tool idempotency checks
 - [x] Issue #18: Enforce strict mode in FlowExecutionService and WorkExecutionService
 
-### Phase 7 — Observability (EPIC 7)
+### Phase 7 ÔÇö Observability (EPIC 7)
 - [x] Issue #19: Add structured node execution logs (input/output summaries, duration, status)
 - [x] Issue #20: Add tool call logging to trace events (tool_name, args_hash, result_hash, duration)
 - [x] Issue #21: Add LLM latency as first-class trace field (provider, model, prompt_tokens, completion_tokens, latency_ms)
-- [x] Issue #22: Add hierarchical trace structure: trace_id → WorkContext → FlowRun → NodeRun
+- [x] Issue #22: Add hierarchical trace structure: trace_id ÔåÆ WorkContext ÔåÆ FlowRun ÔåÆ NodeRun
 - [x] Issue #23: (Optional) OpenTelemetry integration for trace export
 
-### Phase 8 — Testing
+### Phase 8 ÔÇö Testing
 - [x] Issue #24: Test playbook creation with patterns and preferences (FlowPreference weights, PatternRecord storage)
 - [x] Issue #25: Test playbook-aware flow selection (weighted selection with exploration factor)
 - [x] Issue #26: Test evolution engine pattern extraction and playbook update (success/failure patterns, partial failure trigger)
@@ -1875,11 +1879,11 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 
 ## v1.4 PRD - Hands (Coding Harness & Repo Execution)
 
-**Codename:** "V1.4 — Hands (Coding Harness & Repo Execution)"
+**Codename:** "V1.4 ÔÇö Hands (Coding Harness & Repo Execution)"
 
 **Objective:** Give the system safe, deterministic access to codebases with repo tooling, command harness, verification loops, and real code execution capabilities.
 
-### EPIC 1 — Repo Tooling Layer
+### EPIC 1 ÔÇö Repo Tooling Layer
 - [x] Issue #1: Create RepoTool trait in src/tools/repo.rs with name() and execute() methods
 - [x] Issue #2: Implement list_tree tool (root: String, depth: Option<u32>) returning files and dirs
 - [x] Issue #3: Implement read_file tool (path: String)
@@ -1888,56 +1892,56 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 - [x] Issue #6: Implement patch_file tool (path: String, diff: String) with validation rules (must validate diff applies cleanly, must reject partial/invalid patches, must produce artifact: diff + result)
 - [x] Issue #7: Implement git_diff tool
 
-### EPIC 2 — Command Harness
+### EPIC 2 ÔÇö Command Harness
 - [x] Issue #8: Create CommandTool in src/tools/command.rs with run_command(command: String, args: Vec<String>, cwd: String)
 - [x] Issue #9: Ensure run_command returns structured output (stdout, stderr, exit_code, duration_ms)
 - [x] Issue #10: Implement run_tests wrapper around run_command
 - [x] Issue #11: Enforce requirements (timeout enforced, max output size, no interactive prompts, deterministic execution)
 
-### EPIC 3 — ToolRuntime Upgrade
+### EPIC 3 ÔÇö ToolRuntime Upgrade
 - [x] Issue #12: Modify src/flow/intelligence/tool.rs to add tool registry injection
 - [x] Issue #13: Add tool whitelist per WorkContext
 - [x] Issue #14: Add strict mode enforcement in ToolRuntime
 - [x] Issue #15: Add ToolPolicy struct (allowed_paths, forbidden_paths, allow_commands)
 
-### EPIC 4 — Coding Flow Template
+### EPIC 4 ÔÇö Coding Flow Template
 - [x] Issue #16: Create flows/software_dev.yaml with nodes: inspect_repo, read_context, plan, implement, apply_patch, run_tests, review
-- [x] Issue #17: Define transitions: plan → implement → apply_patch → run_tests → review
+- [x] Issue #17: Define transitions: plan ÔåÆ implement ÔåÆ apply_patch ÔåÆ run_tests ÔåÆ review
 - [x] Issue #18: Integrate software_dev.yaml with FlowSelector
 
-### EPIC 5 — Verification Loop
-- [x] Issue #19: Modify Orchestrator to add retry loop (plan → patch → test → failure → re-plan → patch → test)
+### EPIC 5 ÔÇö Verification Loop
+- [x] Issue #19: Modify Orchestrator to add retry loop (plan ÔåÆ patch ÔåÆ test ÔåÆ failure ÔåÆ re-plan ÔåÆ patch ÔåÆ test)
 - [x] Issue #20: Add bounds: max_iterations = 5, max_failures = 3
 - [x] Issue #21: Integrate verification loop with WorkContext lifecycle
 
-### EPIC 6 — Artifact System Extension
+### EPIC 6 ÔÇö Artifact System Extension
 - [x] Issue #22: Add code_patch artifact type
 - [x] Issue #23: Add test_result artifact type
 - [x] Issue #24: Add diff artifact type
 - [x] Issue #25: Add command_output artifact type
 - [x] Issue #26: Add repo_snapshot artifact type
 
-### EPIC 7 — Safety Layer
+### EPIC 7 ÔÇö Safety Layer
 - [x] Issue #27: Implement PathGuard (no writes outside workspace root, no system paths like /etc, /usr)
 - [x] Issue #28: Implement CommandGuard (block dangerous commands, whitelist safe binaries)
 - [x] Issue #29: Integrate PathGuard and CommandGuard with ToolRuntime
 
-### EPIC 8 — Strict Mode Enforcement
+### EPIC 8 ÔÇö Strict Mode Enforcement
 - [x] Issue #30: Extend strict behavior: tool failure = stop
 - [x] Issue #31: Extend strict behavior: invalid patch = stop
 - [x] Issue #32: Extend strict behavior: test failure = retry loop
 - [x] Issue #33: Extend strict behavior: missing output = error
 
-### EPIC 9 — Testing
+### EPIC 9 ÔÇö Testing
 - [x] Issue #34: Create tests/fixtures/sample_repo/ fixture repository
 - [x] Issue #35: Test read_file works correctly
 - [x] Issue #36: Test patch_file applies valid diff
 - [x] Issue #37: Test patch_file rejects invalid diff
 - [x] Issue #38: Test run_tests returns failure correctly
-- [x] Issue #39: Test full loop: failing test → fix → pass
+- [x] Issue #39: Test full loop: failing test ÔåÆ fix ÔåÆ pass
 - [x] Issue #40: Test forbidden path rejection
 
-### EPIC 10 — Observability
+### EPIC 10 ÔÇö Observability
 - [x] Issue #41: Add tool_call logs to trace events
 - [x] Issue #42: Add command logs to trace events
 - [x] Issue #43: Add execution trace per WorkContext
@@ -1965,7 +1969,7 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 
 ### v0.2.3 - Sidebar Design (Deprecated)
 - ~~Implement global search (Cmd/Ctrl + K)~~ (Design document, may not apply to current stack)
-- ~~Implement smart chat grouping (Project → Time)~~ (Design document, may not apply to current stack)
+- ~~Implement smart chat grouping (Project ÔåÆ Time)~~ (Design document, may not apply to current stack)
 - ~~Implement active state clarity (project and chat highlighting)~~ (Design document, may not apply to current stack)
 - ~~Implement user profile modal (preferences, settings, API keys)~~ (Design document, may not apply to current stack)
 - ~~Implement hover preview for chats~~ (Design document, may not apply to current stack)
@@ -1974,7 +1978,7 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 - [x] Issue #25: Propagate metadata from router to WorkContext execution_metadata
 - [x] Issue #29: Wire submit_intent, continue_work_context, run_until_complete to WorkOrchestrator
 - [x] Issue #30: Complete error handling consistency for WorkOrchestrator handlers
-- [x] Issue #33: Add deterministic tests proving API → WorkOrchestrator → WorkExecutionService
+- [x] Issue #33: Add deterministic tests proving API ÔåÆ WorkOrchestrator ÔåÆ WorkExecutionService
 - [x] Issue #37: Add SkillKernel for skill extraction and management
 - [x] Issue #38: Add EvolutionEngine for playbook evolution
 - [x] Issue #39: Build coding harness nodes (repo-aware nodes)
@@ -1990,18 +1994,18 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 
 ## v1.5 PRD - Stabilization & Context Control
 
-**Codename:** "V1.5 — Stabilization & Context Control"
+**Codename:** "V1.5 ÔÇö Stabilization & Context Control"
 
 **Objective:** Prevent system collapse under intelligence theater by controlling token usage, pruning memory, upgrading evaluation, and adding real observability.
 
-### EPIC 1 — Context Budgeter
+### EPIC 1 ÔÇö Context Budgeter
 - [x] Issue #1: Define ContextBudgeter struct (max_tokens, reserved_output_tokens) in src/context/budgeter.rs
 - [x] Issue #2: Implement budget allocation strategy (system prompt > task > plan > critical memory > recent artifacts > long-tail memory)
 - [x] Issue #3: Add token estimation utility (estimate_tokens function)
 - [x] Issue #4: Implement context trimming (build_context with priority-based truncation, preserve structural integrity, never cut mid-JSON/code block)
 - [x] Issue #5: Integrate ContextBudgeter into PlannerNode, CoderNode, ReviewerNode, LlmNode
 
-### EPIC 2 — Memory Pruning & Summarization
+### EPIC 2 ÔÇö Memory Pruning & Summarization
 - [x] Issue #6: Add MemoryScore struct (relevance, recency, usage) in src/memory/scoring.rs
 - [x] Issue #7: Implement memory ranking function (rank_memories)
 - [x] Issue #8: Implement memory pruning function (prune with max limit)
@@ -2009,34 +2013,34 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 - [x] Issue #10: Implement compression trigger (memory count > threshold, token size > threshold)
 - [x] Issue #11: Integrate pruning/summarization into MemoryService and ContextBuilder
 
-### EPIC 3 — Evaluation System Upgrade
+### EPIC 3 ÔÇö Evaluation System Upgrade
 - [x] Issue #12: Expand EvaluationResult with EvaluationDimensions (correctness, completeness, efficiency, reliability) in src/work/evaluation.rs
 - [x] Issue #13: Implement structural validation (patch validity, test pass/fail, artifact schema compliance)
 - [x] Issue #14: Implement semantic evaluation (LLM-based scoring function)
-- [x] Issue #15: Add penalization rules (high retries → penalty, failed tests → strong penalty, hallucinated output → critical penalty)
+- [x] Issue #15: Add penalization rules (high retries ÔåÆ penalty, failed tests ÔåÆ strong penalty, hallucinated output ÔåÆ critical penalty)
 - [x] Issue #16: Feed enhanced evaluation into EvolutionEngine and FlowPerformanceRecord
 
-### EPIC 4 — Observability (Real Tracing)
+### EPIC 4 ÔÇö Observability (Real Tracing)
 - [x] Issue #17: Create trace storage schema in SQLite (execution_traces, node_runs, tool_calls tables)
 - [x] Issue #18: Implement trace persistence (save ExecutionTrace, NodeRun, ToolCallLog to database)
-- [x] Issue #19: Ensure trace hierarchy (WorkContext → FlowRun → NodeRun → ToolCall)
+- [x] Issue #19: Ensure trace hierarchy (WorkContext ÔåÆ FlowRun ÔåÆ NodeRun ÔåÆ ToolCall)
 - [x] Issue #20: Add LLM metrics to trace (latency, token usage, model used)
 - [x] Issue #21: Integrate trace storage into RuntimeContext, FlowExecutionService, ToolRuntime
 
-### EPIC 5 — Context Builder Refactor
+### EPIC 5 ÔÇö Context Builder Refactor
 - [x] Issue #22: Create ContextBuilder struct in src/context/builder.rs (budgeter, memory_service)
 - [x] Issue #23: Define ContextInputs struct (task, plan, memory, artifacts)
 - [x] Issue #24: Define BuiltContext struct (prompt, dropped_items)
 - [x] Issue #25: Replace direct prompt construction in all nodes with ContextBuilder
 - [x] Issue #26: Ensure consistent context shaping across PlannerNode, CoderNode, ReviewerNode, LlmNode
 
-### EPIC 6 — Strict Mode Hardening
-- [x] Issue #27: Enforce no silent fallback (missing inputs → error, missing memory → error, empty outputs → error, tool failure → error)
+### EPIC 6 ÔÇö Strict Mode Hardening
+- [x] Issue #27: Enforce no silent fallback (missing inputs ÔåÆ error, missing memory ÔåÆ error, empty outputs ÔåÆ error, tool failure ÔåÆ error)
 - [x] Issue #28: Ban unsafe patterns (no unwrap() in runtime path, no Option::None propagation)
 - [x] Issue #29: Implement idempotency check (prevent duplicate tool execution, check tool_outbox before re-run)
 - [x] Issue #30: Integrate strict mode enforcement into FlowExecutionService and WorkExecutionService
 
-### EPIC 7 — Testing & Validation
+### EPIC 7 ÔÇö Testing & Validation
 - [x] Issue #31: Test context overflow trimming (deterministic behavior under overflow)
 - [x] Issue #32: Test memory pruning correctness (old/low-value memory removed, summaries replace clusters)
 - [x] Issue #33: Test evaluation scoring correctness (semantic, structural, tool consistency)
@@ -2075,7 +2079,7 @@ The following critical issues were identified during code audit:
 
 ## v1.5.1 PRD - Hardening & Context Budget
 
-**Codename:** "V1.5.1 — Hardening & Context Budget"
+**Codename:** "V1.5.1 ÔÇö Hardening & Context Budget"
 
 **Objective:** Fix remaining issues in V1.5 implementation to achieve production-grade state by addressing prototype residue and stub/placeholder behavior.
 
@@ -2095,7 +2099,7 @@ The following critical issues were identified during code audit:
 
 ## v1.5.2 PRD - Critical Production Fixes
 
-**Codename:** "V1.5.2 — Critical Production Fixes"
+**Codename:** "V1.5.2 ÔÇö Critical Production Fixes"
 
 **Objective:** Address remaining critical issues from V1.5 audit that prevent production readiness.
 
@@ -2162,20 +2166,20 @@ The following critical issues were identified during code audit:
 
 ## v1.6 PRD - Harness Engine
 
-**Codename:** "V1.6 — Harness Engine"
+**Codename:** "V1.6 ÔÇö Harness Engine"
 
-**Objective:** Build a deterministic, verifiable, autonomous coding execution system that turns coding tasks into real, tested, reviewable code changes. Not vague code generation—actual patches with validation, review, and evidence.
+**Objective:** Build a deterministic, verifiable, autonomous coding execution system that turns coding tasks into real, tested, reviewable code changes. Not vague code generationÔÇöactual patches with validation, review, and evidence.
 
 **Implementation Plan:** `docs/v1.6-implementation-plan.md`
 
-### Epic 1 — Foundation: Repo Intelligence, File Control & Patch Safety
+### Epic 1 ÔÇö Foundation: Repo Intelligence, File Control & Patch Safety
 - [x] Issue #1: Repo Intelligence Engine (`src/harness/repo_intelligence.rs`)
 - [x] Issue #2: Environment Fingerprinting (`src/harness/environment.rs`)
 - [x] Issue #3: File Control System (`src/harness/file_control.rs`)
 - [x] Issue #4: Edit Protocol (`src/harness/edit_protocol.rs`)
 - [x] Issue #5: Patch Applier + Transaction Safety (`src/harness/patch_applier.rs`)
 
-### Epic 2 — Execution: Harness Loop, Validation, Repair & Reproduction
+### Epic 2 ÔÇö Execution: Harness Loop, Validation, Repair & Reproduction
 - [x] Issue #6: Harness Execution Loop (`src/harness/execution_loop.rs`)
 - [x] Issue #7: Validation Layer (`src/harness/validation.rs`)
 - [x] Issue #8: Failure Taxonomy (`src/harness/failure.rs`)
@@ -2184,7 +2188,7 @@ The following critical issues were identified during code audit:
 - [x] Issue #11: Task-Local Knowledge Cache (`src/harness/task_cache.rs`)
 - [x] Issue #12: Acceptance Criteria Compiler (`src/harness/acceptance.rs`)
 
-### Epic 3 — Quality: Review, Risk, Selection, Attempts & Verification
+### Epic 3 ÔÇö Quality: Review, Risk, Selection, Attempts & Verification
 - [x] Issue #13: Review Layer (`src/harness/review.rs`)
 - [x] Issue #14: Semantic Diff Analyzer (`src/harness/semantic_diff.rs`)
 - [x] Issue #15: Patch Minimality Enforcement (`src/harness/minimality.rs`)
@@ -2195,7 +2199,7 @@ The following critical issues were identified during code audit:
 - [x] Issue #20: Selection Engine (`src/harness/selection.rs`)
 - [x] Issue #21: Scaling Engine / Attempt Pool (`src/harness/scaling.rs`)
 
-### Epic 4 — Infrastructure: Sandbox, Permissions, Git, Trajectory & Observability
+### Epic 4 ÔÇö Infrastructure: Sandbox, Permissions, Git, Trajectory & Observability
 - [x] Issue #22: Sandbox Runtime (`src/harness/sandbox.rs`)
 - [x] Issue #23: Tool Permission Ledger (`src/harness/permissions.rs`)
 - [x] Issue #24: Git Checkpoint System (`src/harness/git_checkpoint.rs`)
@@ -2204,7 +2208,7 @@ The following critical issues were identified during code audit:
 - [x] Issue #27: Runtime Tool Extension (`src/harness/runtime_tools.rs`)
 - [x] Issue #28: Time-Travel Debugging (`src/harness/time_travel.rs`)
 
-### Epic 5 — Intelligence: WorkContext Integration, Memory, Models, Benchmarks & Completion
+### Epic 5 ÔÇö Intelligence: WorkContext Integration, Memory, Models, Benchmarks & Completion
 - [x] Issue #29: WorkContext Integration (`src/work/execution_service.rs`, `src/harness/mod.rs`)
 - [x] Issue #30: Multi-Model Strategy (`src/harness/model_strategy.rs`)
 - [x] Issue #31: Golden Path Templates (`src/harness/golden_paths.rs`)

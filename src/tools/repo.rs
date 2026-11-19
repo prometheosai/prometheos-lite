@@ -1478,14 +1478,12 @@ fn walk_dir_chain(
 /// created exclusively with `NtCreateFile` (`FILE_CREATE`) against that
 /// handle, so a reparse point raced in at the segment cannot redirect
 /// creation — the create lands as a new plain directory inside the verified
-/// chain or fails closed. On Unix `mkdir(2)` is used after the parent
-/// handle was verified; POSIX `mkdir` does not follow a leaf symlink (a
-/// segment swapped to a link fails with EEXIST, i.e. no creation), but the
-/// std API has no fd-based create, so a parent swapped *between* the
-/// pre-create check and the call is caught at the post-create re-open
-/// (reparse refused); the outside-creation window is residual on Unix and is
-/// documented rather than denied. After creation the chain is re-verified
-/// through the live handles before any byte of the effect is written.
+/// chain or fails closed. On Unix the child is created with `mkdirat(2)`
+/// against the verified parent directory fd and reopened with `openat`
+/// (`O_NOFOLLOW|O_DIRECTORY`), so creation is anchored to the parent fd and
+/// cannot be redirected by namespace swaps at or above the component; the
+/// outside-creation race is closed on the fd-relative path. After creation
+/// the chain is re-verified through live handles before any byte is written.
 fn create_dir_chain(
     base: &Path,
     segments: &[std::ffi::OsString],
@@ -1569,22 +1567,22 @@ fn create_child_dir(
     Ok(handle)
 }
 
-/// Unix: `mkdir` against the verified pathname, then reopen the child and
-/// verify it through the parent handle chain. See the design note on
-/// `create_dir_chain` for the documented Unix residual.
+/// Unix: create `segment` exclusively against the verified parent directory
+/// fd using `mkdirat(2)`, then open the new directory fd-relative with
+/// `openat` (`O_NOFOLLOW|O_DIRECTORY`). Creation is anchored to the parent
+/// fd, so a raced namespace swap cannot redirect the mkdir to create outside
+/// the verified chain; a symlink/reparse raced in at the leaf is refused by
+/// O_NOFOLLOW / mkdirat semantics. This closes the check/create/recheck race
+/// on unauthorized directory creation.
 #[cfg(unix)]
 fn create_child_dir(
     parent: &std::fs::File,
-    _parent_path: &Path,
+    parent_path: &Path,
     segment: &std::ffi::OsStr,
     child_path: &Path,
 ) -> Result<std::fs::File> {
     interpose_at_creation(child_path);
-    std::fs::create_dir(child_path)
-        .with_context(|| format!("failed to create directory {}", child_path.display()))?;
-    let handle = open_child_dir(parent, _parent_path, segment)?;
-    verify_plain_directory(&handle, child_path)?;
-    Ok(handle)
+    unix_fd::create_child_dir(parent, parent_path, segment, child_path)
 }
 
 /// Open `full_path` for writing under `base`, verifying every ancestor and
@@ -2000,23 +1998,237 @@ fn open_fresh_leaf_write(
 }
 
 #[cfg(unix)]
+mod unix_fd {
+    use anyhow::{Context, Result, anyhow, bail};
+    use std::ffi::{CString, OsStr, OsString};
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+    use std::path::{Path, PathBuf};
+
+    fn cseg(segment: &OsStr) -> Result<CString> {
+        // A single path component must not contain NUL; embedded separators
+        // are impossible here because components are split already.
+        CString::new(segment.as_bytes())
+            .map_err(|_| anyhow!("path component contains NUL; refusing"))
+    }
+
+    fn errno(msg: &str, path: impl std::fmt::Display) -> anyhow::Error {
+        anyhow::Error::from(std::io::Error::last_os_error()).context(format!("{msg}: {path}"))
+    }
+
+    /// Open an existing directory by absolute path (base/root of the walk).
+    /// Path-based only for the initial anchor; subsequent steps are fd-relative.
+    pub fn open_dir(path: &Path) -> Result<std::fs::File> {
+        let before = std::fs::symlink_metadata(path)
+            .with_context(|| format!("failed to inspect base {}", path.display()))?;
+        if before.file_type().is_symlink() {
+            bail!("base {} is a symlink; refusing", path.display());
+        }
+        if !before.file_type().is_dir() {
+            bail!("base {} is not a directory; refusing", path.display());
+        }
+        let c = CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| anyhow!("base path contains NUL; refusing"))?;
+        let fd = unsafe {
+            libc::open(
+                c.as_ptr(),
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(errno("failed to open base directory", path.display()));
+        }
+        let file = unsafe { std::fs::File::from_raw_fd(fd) };
+        let meta = file.metadata()?;
+        if meta.dev() != before.dev() || meta.ino() != before.ino() {
+            bail!("base {} was swapped between check and open", path.display());
+        }
+        if !meta.file_type().is_dir() {
+            bail!("base {} is not a directory; refusing", path.display());
+        }
+        Ok(file)
+    }
+
+    /// Open an existing child directory relative to `parent` without following
+    /// a symlink/reparse point at the leaf. The operation is anchored to the
+    /// verified parent fd: it cannot be redirected by swapping pathnames above
+    /// or at the component during the open.
+    pub fn open_child_dir(
+        parent: &std::fs::File,
+        _parent_path: &Path,
+        segment: &OsStr,
+        child_path: &Path,
+    ) -> Result<std::fs::File> {
+        let name = cseg(segment)?;
+        let fd = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(errno(
+                "failed to open directory component",
+                child_path.display(),
+            ));
+        }
+        let file = unsafe { std::fs::File::from_raw_fd(fd) };
+        let meta = file.metadata()?;
+        if !meta.file_type().is_dir() {
+            bail!(
+                "component {} is not a directory; refusing",
+                child_path.display()
+            );
+        }
+        Ok(file)
+    }
+
+    /// Create `segment` as a new directory relative to the verified `parent`
+    /// fd, then open and return a pinned handle to it. `mkdirat` on a single
+    /// component creates inside the directory referenced by `parent`'s fd and
+    /// fails (EEXIST/ELOOP/ENOTDIR, etc.) rather than following or creating
+    /// through a raced symlink at the leaf. This prevents unauthorized
+    /// directory creation outside the verified chain even if namespace paths
+    /// are swapped around the operation.
+    pub fn create_child_dir(
+        parent: &std::fs::File,
+        _parent_path: &Path,
+        segment: &OsStr,
+        child_path: &Path,
+    ) -> Result<std::fs::File> {
+        let name = cseg(segment)?;
+        let rc = unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o777) };
+        if rc != 0 {
+            return Err(errno(
+                "failed to create directory (fd-anchored)",
+                child_path.display(),
+            ));
+        }
+        // Open the directory we just created, anchored to the same parent fd
+        // and refusing to follow a symlink at the leaf.
+        let fd = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(errno(
+                "failed to open newly created directory",
+                child_path.display(),
+            ));
+        }
+        let file = unsafe { std::fs::File::from_raw_fd(fd) };
+        let meta = file.metadata()?;
+        if !meta.file_type().is_dir() {
+            bail!(
+                "anchored directory creation produced a non-directory object: {}",
+                child_path.display()
+            );
+        }
+        Ok(file)
+    }
+
+    pub fn verify_plain_directory(handle: &std::fs::File, _path: &Path) -> Result<()> {
+        let meta = handle.metadata()?;
+        if !meta.file_type().is_dir() {
+            bail!("component is not a directory; refusing");
+        }
+        Ok(())
+    }
+
+    fn open_leaf_fd(
+        parent: &std::fs::File,
+        leaf: &OsStr,
+        flags: libc::c_int,
+        mode: libc::mode_t,
+    ) -> Result<std::fs::File> {
+        let name = cseg(leaf)?;
+        // Always refuse to follow a symlink at the final component.
+        let fd = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                flags | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                mode,
+            )
+        };
+        if fd < 0 {
+            return Err(errno("failed to open leaf", name.to_string_lossy()));
+        }
+        Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+    }
+
+    pub fn open_leaf_read(base: &Path, dir: &[OsString], leaf: &OsString) -> Result<std::fs::File> {
+        let (handles, _leaf_parent) = super::walk_dir_chain(base, dir)?;
+        let parent = handles.last().expect("base handle");
+        let file = open_leaf_fd(parent, leaf.as_os_str(), libc::O_RDONLY, 0)
+            .with_context(|| format!("failed to open leaf for read: {}", leaf.to_string_lossy()))?;
+        let meta = file.metadata()?;
+        if !meta.file_type().is_file() {
+            bail!("leaf is not a regular file; refusing to read");
+        }
+        Ok(file)
+    }
+
+    pub fn open_write_ordinary(
+        base: &Path,
+        dir: &[OsString],
+        leaf: &OsString,
+    ) -> Result<std::fs::File> {
+        let (handles, _leaf_parent) = super::walk_dir_chain(base, dir)?;
+        let parent = handles.last().expect("base handle");
+        let file = open_leaf_fd(parent, leaf.as_os_str(), libc::O_RDWR, 0).with_context(|| {
+            format!("failed to open leaf for write: {}", leaf.to_string_lossy())
+        })?;
+        let meta = file.metadata()?;
+        if !meta.file_type().is_file() {
+            bail!("leaf is not a regular file; refusing to write");
+        }
+        file.set_len(0).context("truncate after verified open")?;
+        Ok(file)
+    }
+
+    pub fn open_fresh_leaf_write(
+        base: &Path,
+        dir: &[OsString],
+        leaf: &OsString,
+    ) -> Result<std::fs::File> {
+        let (handles, _leaf_parent) = super::walk_dir_chain(base, dir)?;
+        let parent = handles.last().expect("base handle");
+        let file = open_leaf_fd(
+            parent,
+            leaf.as_os_str(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+            0o666,
+        )
+        .with_context(|| {
+            format!(
+                "failed to create leaf for write: {}",
+                leaf.to_string_lossy()
+            )
+        })?;
+        let meta = file.metadata()?;
+        if !meta.file_type().is_file() {
+            bail!("leaf is not a regular file; refusing to write");
+        }
+        Ok(file)
+    }
+
+    // Keep the PathBuf-building walk helpers available for callers that need
+    // the leaf_parent path for messages; the fd-relative operations above are
+    // the containment boundary.
+    pub fn _leaf_parent_path(base: &Path, dir: &[OsString]) -> Result<PathBuf> {
+        let (_h, p) = super::walk_dir_chain(base, dir)?;
+        Ok(p)
+    }
+}
+
+#[cfg(unix)]
 fn open_dir(path: &Path) -> Result<std::fs::File> {
-    let before = std::fs::symlink_metadata(path)?;
-    if before.file_type().is_symlink() {
-        bail!("base {} is a symlink; refusing", path.display());
-    }
-    if !before.file_type().is_dir() {
-        bail!("base {} is not a directory; refusing", path.display());
-    }
-    let file = std::fs::File::open(path).with_context(|| format!("open dir {}", path.display()))?;
-    let meta = file.metadata()?;
-    if meta.dev() != before.dev() || meta.ino() != before.ino() {
-        bail!("base {} was swapped between check and open", path.display());
-    }
-    if !meta.file_type().is_dir() {
-        bail!("base {} is not a directory; refusing", path.display());
-    }
-    Ok(file)
+    unix_fd::open_dir(path)
 }
 
 #[cfg(unix)]
@@ -2025,38 +2237,13 @@ fn open_child_dir(
     parent_path: &Path,
     segment: &std::ffi::OsStr,
 ) -> Result<std::fs::File> {
-    let _ = parent;
-    let path = parent_path.join(segment);
-    let before = std::fs::symlink_metadata(&path)?;
-    if before.file_type().is_symlink() {
-        bail!("component {} is a symlink; refusing", path.display());
-    }
-    if !before.file_type().is_dir() {
-        bail!("component {} is not a directory; refusing", path.display());
-    }
-    let file =
-        std::fs::File::open(&path).with_context(|| format!("open dir {}", path.display()))?;
-    let meta = file.metadata()?;
-    if meta.dev() != before.dev() || meta.ino() != before.ino() {
-        bail!(
-            "component {} was swapped between check and open",
-            path.display()
-        );
-    }
-    if !meta.file_type().is_dir() {
-        bail!("component {} is not a directory; refusing", path.display());
-    }
-    Ok(file)
+    let child_path = parent_path.join(segment);
+    unix_fd::open_child_dir(parent, parent_path, segment, &child_path)
 }
 
 #[cfg(unix)]
 fn verify_plain_directory(handle: &std::fs::File, path: &Path) -> Result<()> {
-    let _ = path;
-    let meta = handle.metadata()?;
-    if !meta.file_type().is_dir() {
-        bail!("component is not a directory; refusing");
-    }
-    Ok(())
+    unix_fd::verify_plain_directory(handle, path)
 }
 
 #[cfg(unix)]
@@ -2065,25 +2252,7 @@ fn open_leaf_read(
     dir: &[std::ffi::OsString],
     leaf: &std::ffi::OsString,
 ) -> Result<std::fs::File> {
-    let (handles, leaf_parent) = walk_dir_chain(base, dir)?;
-    let _ = handles;
-    let leaf_path = leaf_parent.join(leaf);
-    let before = std::fs::symlink_metadata(&leaf_path)?;
-    if before.file_type().is_symlink() {
-        bail!("leaf is a symlink; refusing to read");
-    }
-    if !before.file_type().is_file() {
-        bail!("leaf is not a regular file; refusing to read");
-    }
-    let file = std::fs::File::open(&leaf_path)?;
-    let meta = file.metadata()?;
-    if meta.dev() != before.dev() || meta.ino() != before.ino() {
-        bail!("leaf was swapped between check and open");
-    }
-    if !meta.file_type().is_file() {
-        bail!("leaf is not a regular file; refusing to read");
-    }
-    Ok(file)
+    unix_fd::open_leaf_read(base, dir, leaf)
 }
 
 #[cfg(unix)]
@@ -2092,29 +2261,7 @@ fn open_write_ordinary(
     dir: &[std::ffi::OsString],
     leaf: &std::ffi::OsString,
 ) -> Result<std::fs::File> {
-    let (handles, leaf_parent) = walk_dir_chain(base, dir)?;
-    let _ = handles;
-    let leaf_path = leaf_parent.join(leaf);
-    let before = std::fs::symlink_metadata(&leaf_path)?;
-    if before.file_type().is_symlink() {
-        bail!("leaf is a symlink; refusing to write");
-    }
-    if !before.file_type().is_file() {
-        bail!("leaf is not a regular file; refusing to write");
-    }
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&leaf_path)?;
-    let meta = file.metadata()?;
-    if meta.dev() != before.dev() || meta.ino() != before.ino() {
-        bail!("leaf was swapped between check and open");
-    }
-    if !meta.file_type().is_file() {
-        bail!("leaf is not a regular file; refusing to write");
-    }
-    file.set_len(0).context("truncate after verified open")?;
-    Ok(file)
+    unix_fd::open_write_ordinary(base, dir, leaf)
 }
 
 #[cfg(unix)]
@@ -2123,20 +2270,7 @@ fn open_fresh_leaf_write(
     dir: &[std::ffi::OsString],
     leaf: &std::ffi::OsString,
 ) -> Result<std::fs::File> {
-    let (handles, leaf_parent) = walk_dir_chain(base, dir)?;
-    let _ = handles;
-    let leaf_path = leaf_parent.join(leaf);
-    use std::os::unix::fs::OpenOptionsExt;
-    let _ = OpenOptionsExt::mode;
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&leaf_path)?;
-    let meta = file.metadata()?;
-    if !meta.file_type().is_file() {
-        bail!("leaf is not a regular file; refusing to write");
-    }
-    Ok(file)
+    unix_fd::open_fresh_leaf_write(base, dir, leaf)
 }
 
 // ---------------------------------------------------------------------------
@@ -2525,7 +2659,7 @@ mod adversarial_tests {
         }
     }
 
-    /// FIX B regression: bounded property probe — thousands of deterministic
+    /// FIX B regression: bounded property probe - thousands of deterministic
     /// pseudo-random odd diffs must not panic. Panics fail the test itself;
     /// rejections are expected and ignored.
     #[test]
@@ -2549,5 +2683,165 @@ mod adversarial_tests {
             let diff = format!("--- a/f\n+++ b/f\n{hunk}{body}");
             let _ = apply_unified_diff("a\nb\nc\n", &diff);
         }
+    }
+
+    /// Dispatch 318: ancestor swapped immediately before mkdir (fd-relative
+    /// creation). Creation must be anchored to the verified parent fd so no
+    /// directory is created outside the repo, even if a namespace ancestor is
+    /// replaced with a symlink to outside at the creation interposition point.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_ancestor_swapped_immediately_before_mkdir_creates_nothing_outside_repo() {
+        let base = tempfile::tempdir().expect("tempdir");
+        let repo = base.path().join("repo");
+        let outside = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(repo.join("sub")).unwrap();
+        let victim = outside.path().join("victim");
+        std::fs::create_dir_all(&victim).unwrap();
+
+        let repo_clone = repo.clone();
+        let outside_clone = outside.path().to_path_buf();
+        arm("a", move |_path| {
+            let sub_orig = repo_clone.join("sub-orig");
+            let _ = std::fs::rename(repo_clone.join("sub"), &sub_orig);
+            let _ = junction_or_symlink(&repo_clone.join("sub"), &outside_clone.join("victim"));
+        });
+
+        let tool = WriteFileTool::new(repo.clone());
+        let out = tool
+            .call(serde_json::json!({"path": "sub/a/file.txt", "content": "owned"}))
+            .await
+            .expect("write");
+        // The operation must not create anything outside the repo. The call
+        // itself may fail closed (namespace changed under a held fd context)
+        // or succeed only inside the verified directory object; either way the
+        // outside sentinel stays empty.
+        assert!(
+            std::fs::read_dir(&victim)
+                .map(|mut e| e.next().is_none())
+                .unwrap_or(false),
+            "no directory may be created outside the repo: {out}"
+        );
+        assert!(
+            !outside.path().join("victim/a").exists(),
+            "segment must not appear outside repo: {out}"
+        );
+        let _ = out; // success/failure is implementation-dependent; containment is the invariant
+    }
+
+    /// Dispatch 318: ancestor swapped during creation (same interposition
+    /// window, fd-anchored mkdirat). Outside directory must remain absent.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_ancestor_swapped_during_creation_creates_nothing_outside_repo() {
+        let base = tempfile::tempdir().expect("tempdir");
+        let repo = base.path().join("repo");
+        let outside = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(repo.join("p/q")).unwrap();
+        let victim = outside.path().join("victim");
+        std::fs::create_dir_all(&victim).unwrap();
+
+        let repo_clone = repo.clone();
+        let outside_clone = outside.path().to_path_buf();
+        arm("newdir", move |_path| {
+            // Swap an ancestor (p) to point outside while creating "newdir".
+            let p_orig = repo_clone.join("p-orig");
+            let _ = std::fs::rename(repo_clone.join("p"), &p_orig);
+            let _ = junction_or_symlink(&repo_clone.join("p"), &outside_clone.join("victim"));
+        });
+
+        let tool = WriteFileTool::new(repo.clone());
+        let out = tool
+            .call(serde_json::json!({"path": "p/q/newdir/file.txt", "content": "owned"}))
+            .await
+            .expect("write");
+        assert!(
+            std::fs::read_dir(&victim)
+                .map(|mut e| e.next().is_none())
+                .unwrap_or(false),
+            "no directory may be created outside the repo during creation race: {out}"
+        );
+        assert!(
+            !outside.path().join("victim/q").exists()
+                && !outside.path().join("victim/newdir").exists(),
+            "no segment may appear outside repo: {out}"
+        );
+    }
+
+    /// Dispatch 318: existing symlink ancestor on the directory-creation path
+    /// must be refused (no traversal, no creation through it).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_existing_symlink_ancestor_refused_on_nested_create() {
+        let base = tempfile::tempdir().expect("tempdir");
+        let repo = base.path().join("repo");
+        let outside = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(outside.path().join("victim")).unwrap();
+        assert!(
+            junction_or_symlink(&repo.join("link"), &outside.path().join("victim")),
+            "symlink creation must be permitted in this environment"
+        );
+        let tool = WriteFileTool::new(repo.clone());
+        let out = tool
+            .call(serde_json::json!({"path": "link/newdir/file.txt", "content": "owned"}))
+            .await
+            .expect("write");
+        assert_eq!(
+            out["success"], false,
+            "existing symlink ancestor must fail closed: {out}"
+        );
+        assert!(
+            !outside.path().join("victim/newdir").exists(),
+            "must not create through existing symlink ancestor"
+        );
+    }
+
+    /// Dispatch 318: dangling symlink ancestor must be refused and must not
+    /// create the dangling target or any outside directory.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_dangling_symlink_ancestor_refused_on_nested_create() {
+        let base = tempfile::tempdir().expect("tempdir");
+        let repo = base.path().join("repo");
+        let outside = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(&repo).unwrap();
+        // dangling: target does not exist
+        std::os::unix::fs::symlink(outside.path().join("nope"), repo.join("dang")).unwrap();
+        let tool = WriteFileTool::new(repo.clone());
+        let out = tool
+            .call(serde_json::json!({"path": "dang/newdir/file.txt", "content": "owned"}))
+            .await
+            .expect("write");
+        assert_eq!(
+            out["success"], false,
+            "dangling symlink ancestor must fail closed: {out}"
+        );
+        assert!(
+            !outside.path().join("nope").exists(),
+            "dangling target must never be created"
+        );
+    }
+
+    /// Dispatch 318: ordinary authorized nested directory creation still works
+    /// (supported path, no symlink/race).
+    #[tokio::test]
+    async fn ordinary_authorized_nested_directory_creation_still_works() {
+        let base = tempfile::tempdir().expect("tempdir");
+        let repo = base.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let tool = WriteFileTool::new(repo.clone());
+        let out = tool
+            .call(serde_json::json!({"path": "a/b/c/file.txt", "content": "owned-nested"}))
+            .await
+            .expect("write");
+        assert_eq!(
+            out["success"], true,
+            "ordinary nested creation must work: {out}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("a/b/c/file.txt")).unwrap(),
+            "owned-nested"
+        );
     }
 }
