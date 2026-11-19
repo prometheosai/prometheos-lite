@@ -16,6 +16,7 @@
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 
+pub use crate::work::types::{ApprovalPolicy, AutonomyLevel};
 pub use crate::work::types::{
     FlowPerformanceRecord, HarnessQualityMetrics, HarnessRunMetricsRecord, HarnessTraceSummary,
     TokenUsageSummary,
@@ -158,6 +159,28 @@ pub fn decode_harness_run_metrics(row: HarnessRunMetricsRow) -> Result<HarnessRu
     })
 }
 
+/// The control-plane settings a context starts with: the autonomy level
+/// and the approval policy. The tables store them as JSON-encoded enum tags.
+/// This module is the only place that knows those spellings; a mismatch
+/// surfaces as a typed error naming the column, never as a fabricated value.
+pub fn encode_approval_policy(policy: &ApprovalPolicy) -> String {
+    serde_json::to_string(policy).expect("approval policy serializes")
+}
+
+pub fn parse_approval_policy(text: &str, column: &str) -> Result<ApprovalPolicy> {
+    serde_json::from_str(text)
+        .with_context(|| format!("corrupt approval policy in {column}: {text:?}"))
+}
+
+pub fn encode_autonomy_level(level: &AutonomyLevel) -> String {
+    serde_json::to_string(level).expect("autonomy level serializes")
+}
+
+pub fn parse_autonomy_level(text: &str, column: &str) -> Result<AutonomyLevel> {
+    serde_json::from_str(text)
+        .with_context(|| format!("corrupt autonomy level in {column}: {text:?}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,5 +298,55 @@ mod tests {
         row.created_at = "2026-13-40T99:99:99Z".to_string();
         let error = decode_harness_run_metrics(row).expect_err("corrupt timestamp must error");
         assert!(format!("{error:#}").contains("created_at"));
+    }
+
+    #[test]
+    fn approval_policy_round_trip_every_variant() {
+        for policy in [
+            ApprovalPolicy::Auto,
+            ApprovalPolicy::RequireForTools,
+            ApprovalPolicy::RequireForSideEffects,
+            ApprovalPolicy::RequireForUntrusted,
+            ApprovalPolicy::ManualAll,
+        ] {
+            let tag = encode_approval_policy(&policy);
+            assert_eq!(parse_approval_policy(&tag, "test.column").unwrap(), policy);
+        }
+        assert_eq!(encode_approval_policy(&ApprovalPolicy::Auto), "\"Auto\"");
+        assert_eq!(
+            encode_approval_policy(&ApprovalPolicy::ManualAll),
+            "\"ManualAll\""
+        );
+    }
+
+    #[test]
+    fn approval_policy_rejects_unknown_and_malformed_tags() {
+        for bad in ["\"Sometimes\"", "1", "auto", "\"auto\"", "[]", "{}"] {
+            let error = parse_approval_policy(bad, "test.column")
+                .expect_err(&format!("{bad:?} must be refused"));
+            assert!(format!("{error:#}").contains("test.column"));
+        }
+    }
+
+    #[test]
+    fn autonomy_level_round_trip_every_variant() {
+        for level in [
+            AutonomyLevel::Chat,
+            AutonomyLevel::Review,
+            AutonomyLevel::Autonomous,
+        ] {
+            let tag = encode_autonomy_level(&level);
+            assert_eq!(parse_autonomy_level(&tag, "test.column").unwrap(), level);
+        }
+        assert_eq!(encode_autonomy_level(&AutonomyLevel::Review), "\"Review\"");
+    }
+
+    #[test]
+    fn autonomy_level_rejects_unknown_and_malformed_tags() {
+        for bad in ["\"Fully\"", "2", "review", "\"review\""] {
+            let error = parse_autonomy_level(bad, "test.column")
+                .expect_err(&format!("{bad:?} must be refused"));
+            assert!(format!("{error:#}").contains("test.column"));
+        }
     }
 }

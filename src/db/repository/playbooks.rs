@@ -117,9 +117,11 @@ impl PlaybookOperations for crate::db::Db {
                         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
 
                 let default_approval_policy_json: String = row.get(7)?;
-                let default_approval_policy: crate::work::types::ApprovalPolicy =
-                    serde_json::from_str(&default_approval_policy_json)
-                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                let default_approval_policy = crate::work::persistence::parse_approval_policy(
+                    &default_approval_policy_json,
+                    "work_context_playbooks.default_approval_policy",
+                )
+                .map_err(super::mapping_error)?;
 
                 let default_research_depth_json: String = row.get(8)?;
                 let default_research_depth: crate::work::playbook::ResearchDepth =
@@ -201,9 +203,11 @@ impl PlaybookOperations for crate::db::Db {
                         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
 
                 let default_approval_policy_json: String = row.get(7)?;
-                let default_approval_policy: crate::work::types::ApprovalPolicy =
-                    serde_json::from_str(&default_approval_policy_json)
-                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                let default_approval_policy = crate::work::persistence::parse_approval_policy(
+                    &default_approval_policy_json,
+                    "work_context_playbooks.default_approval_policy",
+                )
+                .map_err(super::mapping_error)?;
 
                 let default_research_depth_json: String = row.get(8)?;
                 let default_research_depth: crate::work::playbook::ResearchDepth =
@@ -292,9 +296,11 @@ impl PlaybookOperations for crate::db::Db {
                         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
 
                 let default_approval_policy_json: String = row.get(7)?;
-                let default_approval_policy: crate::work::types::ApprovalPolicy =
-                    serde_json::from_str(&default_approval_policy_json)
-                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                let default_approval_policy = crate::work::persistence::parse_approval_policy(
+                    &default_approval_policy_json,
+                    "work_context_playbooks.default_approval_policy",
+                )
+                .map_err(super::mapping_error)?;
 
                 let default_research_depth_json: String = row.get(8)?;
                 let default_research_depth: crate::work::playbook::ResearchDepth =
