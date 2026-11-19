@@ -43,7 +43,7 @@ pub trait FlowPerformanceOperations {
 impl FlowPerformanceOperations for Db {
     fn create_flow_performance(&self, record: &FlowPerformanceRecord) -> Result<()> {
         let conn = self.conn();
-        let row = encode_flow_performance(record);
+        let row = encode_flow_performance(record)?;
 
         conn.execute(
             "INSERT INTO flow_performance_records (

@@ -35,9 +35,35 @@ pub struct FlowPerformanceRow {
     pub executed_at: String,
 }
 
-/// Map a domain record to its persisted representation.
-pub fn encode_flow_performance(record: &FlowPerformanceRecord) -> FlowPerformanceRow {
-    FlowPerformanceRow {
+/// Map a domain record to its persisted representation. Values that cannot
+/// be represented or round-tripped faithfully are rejected here, never
+/// wrapped or silently truncated.
+pub fn encode_flow_performance(record: &FlowPerformanceRecord) -> Result<FlowPerformanceRow> {
+    if record.duration_ms > i64::MAX as u64 {
+        bail!(
+            "duration_ms {} exceeds the i64 range of the flow_performance_records.duration_ms column",
+            record.duration_ms
+        );
+    }
+    if record.revision_count > i64::MAX as u32 {
+        bail!(
+            "revision_count {} exceeds the i64 range of the flow_performance_records.revision_count column",
+            record.revision_count
+        );
+    }
+    if !record.success_score.is_finite() {
+        bail!(
+            "success_score {} is not finite; refusing to persist a fabricated measurement",
+            record.success_score
+        );
+    }
+    if !record.token_cost.is_finite() {
+        bail!(
+            "token_cost {} is not finite; refusing to persist a fabricated measurement",
+            record.token_cost
+        );
+    }
+    Ok(FlowPerformanceRow {
         id: record.id.clone(),
         flow_id: record.flow_id.clone(),
         work_context_id: record.work_context_id.clone(),
@@ -46,7 +72,7 @@ pub fn encode_flow_performance(record: &FlowPerformanceRecord) -> FlowPerformanc
         token_cost: record.token_cost,
         revision_count: record.revision_count as i64,
         executed_at: record.executed_at.to_rfc3339(),
-    }
+    })
 }
 
 /// Rebuild a domain record from a stored row. Corrupt values are refused:
@@ -73,6 +99,20 @@ pub fn decode_flow_performance(row: FlowPerformanceRow) -> Result<FlowPerformanc
             "corrupt revision_count in flow_performance_records (id {}): {}",
             row.id,
             row.revision_count
+        );
+    }
+    if !row.success_score.is_finite() {
+        bail!(
+            "corrupt success_score in flow_performance_records (id {}): {}",
+            row.id,
+            row.success_score
+        );
+    }
+    if !row.token_cost.is_finite() {
+        bail!(
+            "corrupt token_cost in flow_performance_records (id {}): {}",
+            row.id,
+            row.token_cost
         );
     }
     Ok(FlowPerformanceRecord {
@@ -233,7 +273,7 @@ mod tests {
     #[test]
     fn flow_performance_round_trips() {
         let record = flow_record();
-        let row = encode_flow_performance(&record);
+        let row = encode_flow_performance(&record).expect("encodes");
         let decoded = decode_flow_performance(row).expect("round trip");
         assert_eq!(decoded.id, record.id);
         assert_eq!(decoded.duration_ms, record.duration_ms);
@@ -244,7 +284,7 @@ mod tests {
 
     #[test]
     fn corrupt_executed_at_is_refused_not_fabricated() {
-        let mut row = encode_flow_performance(&flow_record());
+        let mut row = encode_flow_performance(&flow_record()).expect("encodes");
         row.executed_at = "not-a-timestamp".to_string();
         let error = decode_flow_performance(row).expect_err("corrupt timestamp must error");
         assert!(format!("{error:#}").contains("executed_at"));
@@ -252,7 +292,7 @@ mod tests {
 
     #[test]
     fn negative_duration_is_refused_not_wrapped() {
-        let mut row = encode_flow_performance(&flow_record());
+        let mut row = encode_flow_performance(&flow_record()).expect("encodes");
         row.duration_ms = -1;
         let error = decode_flow_performance(row).expect_err("negative duration must error");
         assert!(format!("{error:#}").contains("duration_ms"));
@@ -348,5 +388,42 @@ mod tests {
                 .expect_err(&format!("{bad:?} must be refused"));
             assert!(format!("{error:#}").contains("test.column"));
         }
+    fn encode_flow_performance_rejects_unsnappable_duration() {
+        let mut record = flow_record();
+        record.duration_ms = u64::MAX;
+        let error = encode_flow_performance(&record).expect_err("must refuse to wrap");
+        assert!(format!("{error:#}").contains("duration_ms"));
+    }
+
+    #[test]
+    fn encode_flow_performance_rejects_nan_success_score() {
+        let mut record = flow_record();
+        record.success_score = f32::NAN;
+        let error = encode_flow_performance(&record).expect_err("NaN must be refused");
+        assert!(format!("{error:#}").contains("success_score"));
+    }
+
+    #[test]
+    fn encode_flow_performance_rejects_infinite_token_cost() {
+        let mut record = flow_record();
+        record.token_cost = f64::INFINITY;
+        let error = encode_flow_performance(&record).expect_err("infinity must be refused");
+        assert!(format!("{error:#}").contains("token_cost"));
+    }
+
+    #[test]
+    fn decode_flow_performance_rejects_non_finite_success_score() {
+        let mut row = encode_flow_performance(&flow_record()).expect("encodes");
+        row.success_score = f64::NAN;
+        let error = decode_flow_performance(row).expect_err("NaN must be refused");
+        assert!(format!("{error:#}").contains("success_score"));
+    }
+
+    #[test]
+    fn decode_flow_performance_rejects_non_finite_token_cost() {
+        let mut row = encode_flow_performance(&flow_record()).expect("encodes");
+        row.token_cost = f64::INFINITY;
+        let error = decode_flow_performance(row).expect_err("infinity must be refused");
+        assert!(format!("{error:#}").contains("token_cost"));
     }
 }
