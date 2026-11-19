@@ -1,0 +1,17 @@
+# Reproducible Python environment for the local CI checks.
+#
+# `scripts/local_ci.py` runs the core suite with the interpreter on PATH
+# (`python`). Every Python check it invokes is stdlib-only except the
+# harness catalog schema validator (`scripts/validate_harness_catalog.py`),
+# which imports `jsonschema` and fails closed without it.
+#
+# Install into the interpreter used by the suite, before running:
+#
+#     python -m pip install -r requirements-local-ci.txt
+#     python scripts/local_ci.py run --suite core
+#
+# jsonschema 4.26.0 pulls: attrs>=22.2.0, jsonschema-specifications>=2023.03.6,
+# referencing>=0.28.4, rpds-py>=0.4.0. Do not bump jsonschema casually: the
+# validator asserts fail-closed behavior on every malformed instance, and the
+# version pin is what makes that assertion reproducible.
+jsonschema==4.26.0
