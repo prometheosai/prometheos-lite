@@ -32,7 +32,7 @@ fn is_leaf_reparse_point(path: &Path) -> bool {
 /// the exact post-validation boundary under a controlled swap. Not a public
 /// API contract.
 #[doc(hidden)]
-pub fn open_write_fail_closed(full_path: &Path) -> Result<std::fs::File> {
+fn open_write_fail_closed(full_path: &Path) -> Result<std::fs::File> {
     // Never follow a link that landed at the leaf between validation and this open.
     if is_leaf_reparse_point(full_path) {
         anyhow::bail!("leaf is a symlink/junction after validation; refusing to follow the link");
@@ -1201,5 +1201,101 @@ mod tests {
 
         let diff = "--- a/test.txt\n+++ b/test.txt\n@@ -1,1 +1,1 @@\n-old\n+new\n+another";
         assert_eq!(tool.count_changes(diff), 3);
+    }
+
+    fn reparse_entry_present(link: &std::path::Path) -> bool {
+        std::fs::symlink_metadata(link)
+            .map(|meta| meta.file_type().is_symlink())
+            .unwrap_or(false)
+    }
+
+    fn swap_leaf_with_file_reparse(link: &std::path::Path, target: &std::path::Path) -> bool {
+        #[cfg(windows)]
+        {
+            if std::os::windows::fs::symlink_file(target, link).is_ok()
+                && reparse_entry_present(link)
+            {
+                return true;
+            }
+            let out = std::process::Command::new("cmd")
+                .args(["/c", "mklink", "/J"])
+                .arg(link)
+                .arg(target)
+                .output();
+            if let Ok(out) = out
+                && out.status.success()
+                && reparse_entry_present(link)
+            {
+                return true;
+            }
+            false
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target, link).is_ok() && reparse_entry_present(link)
+        }
+    }
+
+    // Post-validation boundary: the same production fail-closed open that
+    // WriteFileTool calls after validation and before the filesystem effect.
+    #[tokio::test]
+    async fn security_repo_swap_after_validation_write_fails_closed() {
+        let base = TempDir::new().unwrap();
+        let repo = base.path().join("repo");
+        let outside = TempDir::new().unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
+        let victim = outside.path().join("victim.txt");
+        std::fs::write(&victim, "outside-of-repo").unwrap();
+
+        let tool = WriteFileTool::new(repo.clone());
+        let guard = crate::tools::PathGuard::new(repo.to_string_lossy().into_owned());
+        let validated = guard
+            .validate_path("swapped.txt")
+            .expect("a fresh target inside the repo validates");
+
+        // The attacker wins the race: AFTER validation, the leaf is swapped
+        // for a reparse point to the outside victim, BEFORE the write effect.
+        let link = repo.join("swapped.txt");
+        if !swap_leaf_with_file_reparse(&link, &victim) {
+            eprintln!(
+                "SKIP: reparse point creation not permitted on this host; security assertions NOT exercised"
+            );
+            return;
+        }
+        assert!(
+            reparse_entry_present(&link),
+            "the swapped leaf must be observable as a reparse point after the swap"
+        );
+
+        let out = tool
+            .call(serde_json::json!({"path": "swapped.txt", "content": "owned"}))
+            .await
+            .expect("write");
+        assert_eq!(
+            out["success"], false,
+            "a swapped path must also fail the tool's validation: {out}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            "outside-of-repo",
+            "the outside victim must be unchanged after the refused call"
+        );
+
+        let boundary_result =
+            open_write_fail_closed(std::path::PathBuf::from(&validated).as_path());
+        assert!(
+            boundary_result.is_err(),
+            "the post-validation fail-closed open must refuse the swapped leaf"
+        );
+
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            "outside-of-repo",
+            "the outside victim file is untouched by the post-validation refusal"
+        );
+        assert!(
+            reparse_entry_present(&link),
+            "the swap must leave no effect behind other than the attacker's own link"
+        );
     }
 }
