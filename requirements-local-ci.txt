@@ -1,17 +1,36 @@
-# Reproducible Python environment for the local CI checks.
+# Reproducible, hash-verified Python environment for the local CI checks.
 #
-# `scripts/local_ci.py` runs the core suite with the interpreter on PATH
-# (`python`). Every Python check it invokes is stdlib-only except the
-# harness catalog schema validator (`scripts/validate_harness_catalog.py`),
-# which imports `jsonschema` and fails closed without it.
+# `scripts/local_ci.py` runs the core suite with an interpreter on PATH (`python`).
+# Every Python check it invokes is stdlib-only except the harness catalog schema
+# validator (`scripts/validate_harness_catalog.py`), which imports `jsonschema`
+# and fails closed without it.
 #
-# Install into the interpreter used by the suite, before running:
+# This file pins the FULL transitive closure of `jsonschema==4.26.0` to exact
+# versions with SHA-256 integrity hashes, for the actual supported platform of
+# this repository: Windows x86_64, CPython 3.14 (the interpreter used by the
+# recorded core-suite runs). `pip install --require-hashes` enforces them.
+# On any other platform, installation FAILS LOUDLY (it does not silently fetch
+# an unpinned artifact) until the matching wheels/hashes are appended here.
 #
-#     python -m pip install -r requirements-local-ci.txt
-#     python scripts/local_ci.py run --suite core
+# Installation is deliberately a MANUAL, SEPARATE, TRUSTED PREFLIGHT step —
+# it is never run implicitly by `local_ci.py`, never from a compromised
+# checkout, and never fetches anything beyond what the hashes below pin.
+# Use the isolated venv under the (gitignored) `.local-ci/` directory:
 #
-# jsonschema 4.26.0 pulls: attrs>=22.2.0, jsonschema-specifications>=2023.03.6,
-# referencing>=0.28.4, rpds-py>=0.4.0. Do not bump jsonschema casually: the
-# validator asserts fail-closed behavior on every malformed instance, and the
-# version pin is what makes that assertion reproducible.
-jsonschema==4.26.0
+#     scripts/local_ci_python_env.sh
+#     <repo>/.local-ci/python-env/Scripts/python.exe scripts/local_ci.py run --suite core   (Windows)
+#     <repo>/.local-ci/python-env/bin/python        scripts/local_ci.py run --suite core     (POSIX)
+#
+# Selecting the installed interpreter on PATH is what makes the core suite
+# use the hash-verified environment; `local_ci.py` itself performs no installs.
+
+attrs==26.1.0 \
+    --hash=sha256:c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309
+jsonschema==4.26.0 \
+    --hash=sha256:d489f15263b8d200f8387e64b4c3a75f06629559fb73deb8fdfb525f2dab50ce
+jsonschema-specifications==2025.9.1 \
+    --hash=sha256:98802fee3a11ee76ecaca44429fda8a41bff98b00a0f2838151b113f210cc6fe
+referencing==0.37.0 \
+    --hash=sha256:381329a9f99628c9069361716891d34ad94af76e461dcb0335825aecc7692231
+rpds-py==2026.9.1 \
+    --hash=sha256:837c6b305e26fe0f75b15c92cf3b2ba29e0ae19dc40b1c557b026cb426347d0c
