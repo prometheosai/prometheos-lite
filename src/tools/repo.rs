@@ -1139,6 +1139,15 @@ mod tests {
 // Bounded unified-diff application
 // ---------------------------------------------------------------------------
 
+// D325 Finding A: finite, documented ceilings for *untrusted* patch input.
+// A diff is an operator/model artifact, never an unbounded stream. These make
+// worst-case parser work independent of attacker-supplied header counts.
+// 8 MiB of text can hold at most ~4M one-byte lines, so the per-hunk/total line
+// caps below are generous for any legitimate patch while remaining finite.
+const MAX_PATCH_BYTES: usize = 8 * 1024 * 1024;
+const MAX_HUNK_LINES: usize = 100_000;
+const MAX_TOTAL_HUNK_LINES: usize = 200_000;
+
 /// A parsed hunk: `-<start>[,<count>]`, its body lines with prefixes stripped,
 /// and `+<start>[,<count>]`'s body lines with prefixes stripped.
 #[derive(Debug, Clone)]
@@ -1159,6 +1168,15 @@ fn apply_unified_diff(original: &str, diff: &str) -> Result<String> {
     if diff.trim().is_empty() {
         bail!("empty diff");
     }
+    // D325 Finding A (1,2): reject oversized patches up front, before any
+    // per-line collection. This bounds the input itself independently of the
+    // counts the header claims.
+    if diff.len() > MAX_PATCH_BYTES {
+        bail!(
+            "unified diff is {} bytes; maximum accepted size is {MAX_PATCH_BYTES} bytes",
+            diff.len()
+        );
+    }
     let original_trailing_newline = original.ends_with('\n');
     let original_lines: Vec<String> = original.lines().map(str::to_string).collect();
     let diff_lines: Vec<&str> = diff.lines().collect();
@@ -1170,6 +1188,7 @@ fn apply_unified_diff(original: &str, diff: &str) -> Result<String> {
         index += 1;
     }
     let mut hunks: Vec<Hunk> = Vec::new();
+    let mut total_body_lines = 0usize;
     while index < diff_lines.len() {
         let header = diff_lines[index];
         if !header.starts_with("@@ ") {
@@ -1180,10 +1199,37 @@ fn apply_unified_diff(original: &str, diff: &str) -> Result<String> {
         }
         let (old_start, mut old_count, new_count) = parse_hunk_header(header)?;
         index += 1;
+        // D325 Finding A (1,3,4): validate the declared counts against the
+        // *actual* remaining input and against finite ceilings BEFORE any
+        // allocation. A hunk needs at least max(old_count, new_count) body
+        // lines (context lines count for both sides), so a larger declaration
+        // is impossible and is rejected here. `usize::MAX` therefore never
+        // reaches `Vec::with_capacity`.
+        let remaining_lines = diff_lines.len().saturating_sub(index);
+        let declared_span = old_count.max(new_count);
+        if declared_span > MAX_HUNK_LINES {
+            bail!("hunk declares {declared_span} lines; per-hunk limit is {MAX_HUNK_LINES}");
+        }
+        if declared_span > remaining_lines {
+            bail!(
+                "hunk declares {declared_span} lines but only {remaining_lines} diff lines remain"
+            );
+        }
+        // D325 Finding A (5): capacity now derives only from counts proven to
+        // be <= the finite per-hunk ceiling AND <= the real remaining input.
+        // No unchecked capacity growth from raw header numbers.
         let mut old_lines = Vec::with_capacity(old_count);
         let mut new_lines = Vec::with_capacity(new_count);
         let mut old_seen = 0usize;
         while index < diff_lines.len() && !diff_lines[index].starts_with("@@ ") {
+            // D325 Finding A (2,3): bound cumulative parsed work across all
+            // hunks with checked arithmetic; overflow is a typed error.
+            total_body_lines = total_body_lines
+                .checked_add(1)
+                .context("unified-diff total line count overflow")?;
+            if total_body_lines > MAX_TOTAL_HUNK_LINES {
+                bail!("unified diff exceeds maximum total hunk lines {MAX_TOTAL_HUNK_LINES}");
+            }
             let line = diff_lines[index];
             if line.starts_with("\\") {
                 // "\ No newline at end of file" marker — tolerated, ignored.
@@ -2657,6 +2703,119 @@ mod adversarial_tests {
                 "expected rejection: {diff:?}"
             );
         }
+    }
+
+    /// D325 Finding A: `old_count = usize::MAX` must be rejected by a typed
+    /// error before any allocation — no panic, no unbounded reservation.
+    #[test]
+    fn parser_rejects_usize_max_old_count_before_allocation() {
+        let diff = format!("@@ -1,{} +1,1 @@\n x\n", usize::MAX);
+        let err = apply_unified_diff("x\n", &diff).expect_err("extreme count must be refused");
+        assert!(
+            format!("{err:#}").contains("per-hunk limit"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    /// D325 Finding A: `new_count = usize::MAX` is rejected the same way.
+    #[test]
+    fn parser_rejects_usize_max_new_count_before_allocation() {
+        let diff = format!("@@ -1,1 +1,{} @@\n x\n", usize::MAX);
+        let err = apply_unified_diff("x\n", &diff).expect_err("extreme count must be refused");
+        assert!(
+            format!("{err:#}").contains("per-hunk limit"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    /// D325 Finding A: numeric fields beyond the `usize` range are typed
+    /// parse errors, not panics or wrapped counts.
+    #[test]
+    fn parser_rejects_overflowing_numeric_fields() {
+        for diff in [
+            "@@ -1,99999999999999999999999999999999999999999 +1,1 @@\n x\n",
+            "@@ -1,1 +1,99999999999999999999999999999999999999999 @@\n x\n",
+            "@@ -99999999999999999999999999999999999999999,1 +1,1 @@\n x\n",
+        ] {
+            assert!(
+                apply_unified_diff("x\n", diff).is_err(),
+                "overflowing numeric field must be refused: {diff:?}"
+            );
+        }
+    }
+
+    /// D325 Finding A: a large but parseable count paired with a tiny body is
+    /// impossible and is rejected against the real remaining input before any
+    /// capacity reservation.
+    #[test]
+    fn parser_rejects_large_count_with_tiny_body() {
+        let diff = "@@ -1,100000 +1,100000 @@\n x\n";
+        let err = apply_unified_diff("x\n", diff).expect_err("impossible count must be refused");
+        assert!(
+            format!("{err:#}").contains("diff lines remain"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    /// D325 Finding A: many individually small hunks past the cumulative
+    /// line limit are rejected deterministically.
+    #[test]
+    fn parser_rejects_many_small_hunks_over_total_limit() {
+        let mut diff = String::new();
+        for i in 0..=MAX_TOTAL_HUNK_LINES {
+            diff.push_str(&format!("@@ -{},1 +{},1 @@\n x\n", i + 1, i + 1));
+        }
+        assert!(
+            diff.len() <= MAX_PATCH_BYTES,
+            "fixture must stay under the patch byte cap"
+        );
+        let err = apply_unified_diff("x\n", &diff).expect_err("cumulative limit must be enforced");
+        assert!(
+            format!("{err:#}").contains("maximum total hunk lines"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    /// D325 Finding A: legitimate patches (replacement and insertion) still
+    /// apply with the original semantics after the bounds hardening.
+    #[test]
+    fn parser_applies_legitimate_patches_after_bounds_hardening() {
+        let replace = "--- a/f\n+++ b/f\n@@ -1,2 +1,2 @@\n-a\n+A\n b\n";
+        assert_eq!(apply_unified_diff("a\nb\n", replace).unwrap(), "A\nb\n");
+        let insert = "--- a/f\n+++ b/f\n@@ -1,0 +2,1 @@\n+inserted\n";
+        assert_eq!(
+            apply_unified_diff("a\nb\n", insert).unwrap(),
+            "inserted\na\nb\n"
+        );
+    }
+
+    /// D325 Finding A: a rejected extreme-count patch must leave the original
+    /// file byte-for-byte unchanged (no effect before validation).
+    #[tokio::test]
+    async fn extreme_count_refusal_leaves_original_file_unchanged() {
+        let base = tempfile::tempdir().expect("tempdir");
+        let repo = base.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let file = repo.join("f.txt");
+        std::fs::write(&file, "original\n").unwrap();
+        let diff = format!(
+            "--- a/f.txt\n+++ b/f.txt\n@@ -1,{} +1,1 @@\n x\n",
+            usize::MAX
+        );
+        let tool = PatchFileTool::new(repo);
+        let out = tool
+            .call(serde_json::json!({"path": "f.txt", "diff": diff}))
+            .await
+            .expect("patch call");
+        assert_eq!(
+            out["success"], false,
+            "extreme count must be refused: {out}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "original\n",
+            "a rejected patch must not modify the file"
+        );
     }
 
     /// FIX B regression: bounded property probe - thousands of deterministic

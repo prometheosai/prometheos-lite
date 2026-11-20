@@ -21,6 +21,16 @@ use super::resource::{
     CLASSIFICATION_TIMEOUT, ResourceLimits,
 };
 
+// D325 Finding B: test-only instrumentation proving the RAII job-handle guard
+// calls CloseHandle exactly once per monitor exit. Process-wide handle counts
+// are too noisy to assert under parallel test execution; this counter is
+// deterministic and directly observes the guard's Drop path.
+#[cfg(all(test, windows))]
+static WIN_JOB_CLOSE_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[cfg(all(test, windows))]
+static WIN_JOB_WATCH_HANDLE: std::sync::atomic::AtomicIsize =
+    std::sync::atomic::AtomicIsize::new(0);
+
 // ---------------------------------------------------------------------------
 // Validation (isolated worktree)
 // ---------------------------------------------------------------------------
@@ -1318,14 +1328,38 @@ fn spawn_resource_monitor_win(
     kind: Arc<AtomicU8>,
 ) -> std::thread::JoinHandle<()> {
     use std::mem;
-    use winapi::um::handleapi::CloseHandle;
     use winapi::um::jobapi2::{QueryInformationJobObject, TerminateJobObject};
     use winapi::um::winnt::{
         JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
         JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
     };
+
+    // D325 Finding B: sole RAII owner of the job handle. `apply_job_limits`
+    // transfers ownership to this monitor thread, and `Drop` closes the handle
+    // exactly once on EVERY exit path — including the breach early return that
+    // previously bypassed `CloseHandle` and leaked a handle per breach. The raw
+    // pointer is used only while the guard is alive (no use-after-close), no
+    // other code closes it (no double-close), and the guard is created and
+    // dropped inside this thread so no raw handle crosses an await and the
+    // caller's Send/ownership contract is unchanged.
+    struct JobHandleGuard(*mut winapi::ctypes::c_void);
+    impl Drop for JobHandleGuard {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                let handle = self.0;
+                unsafe { winapi::um::handleapi::CloseHandle(handle) };
+                self.0 = std::ptr::null_mut();
+                #[cfg(test)]
+                if WIN_JOB_WATCH_HANDLE.load(Ordering::SeqCst) == handle as isize {
+                    WIN_JOB_CLOSE_COUNT.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }
+    }
+
     std::thread::spawn(move || {
-        let job_handle = job as *mut winapi::ctypes::c_void;
+        let job_handle = JobHandleGuard(job as *mut winapi::ctypes::c_void);
+        let raw = job_handle.0;
         // Returns true if a breach was detected and classified (job terminated).
         let check = |kind: &Arc<AtomicU8>| -> bool {
             unsafe {
@@ -1333,7 +1367,7 @@ fn spawn_resource_monitor_win(
                 if limits.max_memory_bytes.is_some() {
                     let mut ext: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = mem::zeroed();
                     let ok = QueryInformationJobObject(
-                        job_handle as *mut _,
+                        raw,
                         JobObjectExtendedLimitInformation,
                         &mut ext as *mut _ as *mut winapi::ctypes::c_void,
                         mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
@@ -1344,7 +1378,7 @@ fn spawn_resource_monitor_win(
                         && ext.PeakJobMemoryUsed >= ext.JobMemoryLimit
                     {
                         kind.store(2, Ordering::SeqCst);
-                        TerminateJobObject(job_handle, 0xC000_0142u32);
+                        TerminateJobObject(raw, 0xC000_0142u32);
                         return true;
                     }
                 }
@@ -1352,7 +1386,7 @@ fn spawn_resource_monitor_win(
                 if limits.max_cpu_time.is_some() {
                     let mut acct: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = mem::zeroed();
                     let ok = QueryInformationJobObject(
-                        job_handle as *mut _,
+                        raw,
                         JobObjectBasicAccountingInformation,
                         &mut acct as *mut _ as *mut winapi::ctypes::c_void,
                         mem::size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
@@ -1363,7 +1397,7 @@ fn spawn_resource_monitor_win(
                         && (*acct.TotalUserTime.QuadPart() as u64) >= cpu.as_secs() * 10_000_000
                     {
                         kind.store(1, Ordering::SeqCst);
-                        TerminateJobObject(job_handle, 0xC000_0142u32);
+                        TerminateJobObject(raw, 0xC000_0142u32);
                         return true;
                     }
                 }
@@ -1373,7 +1407,7 @@ fn spawn_resource_monitor_win(
 
         while !done.load(Ordering::SeqCst) {
             if check(&kind) {
-                return;
+                return; // guard drops here: handle closed on the breach path
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
@@ -1382,11 +1416,7 @@ fn spawn_resource_monitor_win(
         // next scheduled poll. Without this pass the breach would be missed and
         // misrecorded as an ordinary failure (non-deterministic under load).
         let _ = check(&kind);
-        // Ownership transferred here: close the job handle now that the tree is
-        // stopped and the caller has joined.
-        unsafe {
-            CloseHandle(job_handle);
-        }
+        // guard drops here on normal completion: handle closed exactly once
     })
 }
 
@@ -2287,6 +2317,191 @@ mod tests {
         assert_eq!(
             failure_to_terminal_state(CLASSIFICATION_MEMORY),
             crate::workflow::evaluate::identity::EvaluationState::InfraBlocked
+        );
+    }
+
+    // D325 Finding B: run the monitor under a watchdog that signals `done` at
+    // the deadline, so a missing breach cannot hang a test forever.
+    #[cfg(windows)]
+    fn run_monitor_bounded(
+        job: isize,
+        limits: ResourceLimits,
+        done: Arc<AtomicBool>,
+        kind: Arc<AtomicU8>,
+        deadline: std::time::Duration,
+    ) {
+        let finished = Arc::new(AtomicBool::new(false));
+        let finished_w = finished.clone();
+        let done_w = done.clone();
+        let watchdog = std::thread::spawn(move || {
+            let until = std::time::Instant::now() + deadline;
+            while !finished_w.load(Ordering::SeqCst) && std::time::Instant::now() < until {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            done_w.store(true, Ordering::SeqCst);
+        });
+        let handle = spawn_resource_monitor_win(job, limits, done, kind);
+        handle.join().expect("monitor thread must not panic");
+        finished.store(true, Ordering::SeqCst);
+        watchdog.join().expect("watchdog thread must not panic");
+    }
+
+    // D325 Finding B: the CPU breach early-return path must close the job
+    // handle exactly once. A 0-second CPU limit makes the first poll breach a
+    // fresh job deterministically (0 >= 0 against the aggregate user time).
+    #[cfg(windows)]
+    #[test]
+    fn monitor_closes_job_handle_on_cpu_breach() {
+        use winapi::um::jobapi2::CreateJobObjectW;
+        let job = unsafe { CreateJobObjectW(std::ptr::null_mut(), std::ptr::null_mut()) };
+        assert!(!job.is_null(), "CreateJobObjectW must succeed");
+        WIN_JOB_CLOSE_COUNT.store(0, Ordering::SeqCst);
+        WIN_JOB_WATCH_HANDLE.store(job as isize, Ordering::SeqCst);
+        let done = Arc::new(AtomicBool::new(false));
+        let kind = Arc::new(AtomicU8::new(0));
+        let limits = ResourceLimits {
+            max_cpu_time: Some(std::time::Duration::from_secs(0)),
+            ..ResourceLimits::default()
+        };
+        run_monitor_bounded(
+            job as isize,
+            limits,
+            done,
+            kind.clone(),
+            std::time::Duration::from_secs(3),
+        );
+        assert_eq!(
+            kind.load(Ordering::SeqCst),
+            1,
+            "CPU breach must classify kind=1 (durable typed evidence)"
+        );
+        assert_eq!(
+            WIN_JOB_CLOSE_COUNT.load(Ordering::SeqCst),
+            1,
+            "CPU breach early return must call CloseHandle exactly once"
+        );
+    }
+
+    // D325 Finding B: memory breach must close the job handle exactly once and
+    // preserve the kind=2 classification. Uses the same 64 MiB job limit +
+    // 300 MiB burner pattern as the already-verified end-to-end memory test.
+    #[cfg(windows)]
+    #[test]
+    fn monitor_closes_job_handle_on_memory_breach() {
+        if std::process::Command::new("powershell")
+            .arg("-NoProfile")
+            .arg("-Command")
+            .arg("$null")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let script = std::env::temp_dir().join("prometheos_d325_mem_burn.ps1");
+        std::fs::write(
+            &script,
+            "$b=New-Object byte[] (300MB); $b[0]=1; Start-Sleep 30\r\n",
+        )
+        .expect("write burner script");
+        let limits = ResourceLimits {
+            max_memory_bytes: Some(64 * 1024 * 1024),
+            ..ResourceLimits::default()
+        };
+        let mut child = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(&script)
+            .spawn()
+            .expect("spawn memory-breach burner");
+        let job =
+            apply_job_limits(child.id(), &limits).expect("apply job limits for memory breach");
+        WIN_JOB_CLOSE_COUNT.store(0, Ordering::SeqCst);
+        WIN_JOB_WATCH_HANDLE.store(job as isize, Ordering::SeqCst);
+        let done = Arc::new(AtomicBool::new(false));
+        let kind = Arc::new(AtomicU8::new(0));
+        run_monitor_bounded(
+            job as isize,
+            limits,
+            done,
+            kind.clone(),
+            std::time::Duration::from_secs(10),
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_file(&script);
+        assert_eq!(
+            kind.load(Ordering::SeqCst),
+            2,
+            "memory breach must classify kind=2 (durable typed evidence)"
+        );
+        assert_eq!(
+            WIN_JOB_CLOSE_COUNT.load(Ordering::SeqCst),
+            1,
+            "memory breach must call CloseHandle exactly once"
+        );
+    }
+
+    // D325 Finding B: normal completion must close the handle exactly once.
+    #[cfg(windows)]
+    #[test]
+    fn monitor_closes_job_handle_on_normal_completion() {
+        use winapi::um::jobapi2::CreateJobObjectW;
+        let job = unsafe { CreateJobObjectW(std::ptr::null_mut(), std::ptr::null_mut()) };
+        assert!(!job.is_null(), "CreateJobObjectW must succeed");
+        WIN_JOB_CLOSE_COUNT.store(0, Ordering::SeqCst);
+        WIN_JOB_WATCH_HANDLE.store(job as isize, Ordering::SeqCst);
+        // Already signaled: the poll loop is skipped and only the final poll
+        // runs (no limits configured, so no breach).
+        let done = Arc::new(AtomicBool::new(true));
+        let kind = Arc::new(AtomicU8::new(0));
+        run_monitor_bounded(
+            job as isize,
+            ResourceLimits::default(),
+            done,
+            kind.clone(),
+            std::time::Duration::from_secs(3),
+        );
+        assert_eq!(kind.load(Ordering::SeqCst), 0, "no breach expected");
+        assert_eq!(
+            WIN_JOB_CLOSE_COUNT.load(Ordering::SeqCst),
+            1,
+            "normal completion must call CloseHandle exactly once"
+        );
+    }
+
+    // D325 Finding B: a breach detected only by the final accounting poll must
+    // also close the handle and still classify the CPU violation.
+    #[cfg(windows)]
+    #[test]
+    fn monitor_closes_job_handle_on_final_poll_breach() {
+        use winapi::um::jobapi2::CreateJobObjectW;
+        let job = unsafe { CreateJobObjectW(std::ptr::null_mut(), std::ptr::null_mut()) };
+        assert!(!job.is_null(), "CreateJobObjectW must succeed");
+        WIN_JOB_CLOSE_COUNT.store(0, Ordering::SeqCst);
+        WIN_JOB_WATCH_HANDLE.store(job as isize, Ordering::SeqCst);
+        // `done` is already true so the loop is skipped and the breach is
+        // observed only in the preserved final poll.
+        let done = Arc::new(AtomicBool::new(true));
+        let kind = Arc::new(AtomicU8::new(0));
+        let limits = ResourceLimits {
+            max_cpu_time: Some(std::time::Duration::from_secs(0)),
+            ..ResourceLimits::default()
+        };
+        run_monitor_bounded(
+            job as isize,
+            limits,
+            done,
+            kind.clone(),
+            std::time::Duration::from_secs(3),
+        );
+        assert_eq!(
+            kind.load(Ordering::SeqCst),
+            1,
+            "final poll must classify the CPU breach as kind=1"
+        );
+        assert_eq!(
+            WIN_JOB_CLOSE_COUNT.load(Ordering::SeqCst),
+            1,
+            "final-poll breach must call CloseHandle exactly once"
         );
     }
 
