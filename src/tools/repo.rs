@@ -1628,7 +1628,7 @@ fn create_child_dir(
     child_path: &Path,
 ) -> Result<std::fs::File> {
     interpose_at_creation(child_path);
-    unix_fd::create_child_dir(parent, parent_path, segment, child_path)
+    unix_create_child_dir(parent, parent_path, segment, child_path)
 }
 
 /// Open `full_path` for writing under `base`, verifying every ancestor and
@@ -2043,238 +2043,245 @@ fn open_fresh_leaf_write(
     Ok(handle)
 }
 
+// D326: Unix fd-relative containment helpers, flattened into this private
+// module as ordinary private functions. Previously these were `pub fn`s in a
+// nested platform module, which the G-B public-surface guard correctly flags.
+// Containment semantics are unchanged: mkdirat/openat anchored on verified fds,
+// O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC, verified-open-before-truncate, and
+// exclusive fresh-file creation. The platform wrappers below are the only
+// call surface.
 #[cfg(unix)]
-mod unix_fd {
-    use anyhow::{Context, Result, anyhow, bail};
-    use std::ffi::{CString, OsStr, OsString};
-    use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::io::{AsRawFd, FromRawFd};
-    use std::path::{Path, PathBuf};
+use anyhow::anyhow;
+#[cfg(unix)]
+use std::ffi::{CString, OsStr, OsString};
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
+use std::os::unix::io::{AsRawFd, FromRawFd};
 
-    fn cseg(segment: &OsStr) -> Result<CString> {
-        // A single path component must not contain NUL; embedded separators
-        // are impossible here because components are split already.
-        CString::new(segment.as_bytes())
-            .map_err(|_| anyhow!("path component contains NUL; refusing"))
+#[cfg(unix)]
+fn unix_cseg(segment: &OsStr) -> Result<CString> {
+    // A single path component must not contain NUL; embedded separators
+    // are impossible here because components are split already.
+    CString::new(segment.as_bytes()).map_err(|_| anyhow!("path component contains NUL; refusing"))
+}
+
+#[cfg(unix)]
+fn unix_errno(msg: &str, path: impl std::fmt::Display) -> anyhow::Error {
+    anyhow::Error::from(std::io::Error::last_os_error()).context(format!("{msg}: {path}"))
+}
+
+/// Open an existing directory by absolute path (base/root of the walk).
+/// Path-based only for the initial anchor; subsequent steps are fd-relative.
+#[cfg(unix)]
+fn unix_open_dir(path: &Path) -> Result<std::fs::File> {
+    let before = std::fs::symlink_metadata(path)
+        .with_context(|| format!("failed to inspect base {}", path.display()))?;
+    if before.file_type().is_symlink() {
+        bail!("base {} is a symlink; refusing", path.display());
     }
-
-    fn errno(msg: &str, path: impl std::fmt::Display) -> anyhow::Error {
-        anyhow::Error::from(std::io::Error::last_os_error()).context(format!("{msg}: {path}"))
+    if !before.file_type().is_dir() {
+        bail!("base {} is not a directory; refusing", path.display());
     }
-
-    /// Open an existing directory by absolute path (base/root of the walk).
-    /// Path-based only for the initial anchor; subsequent steps are fd-relative.
-    pub fn open_dir(path: &Path) -> Result<std::fs::File> {
-        let before = std::fs::symlink_metadata(path)
-            .with_context(|| format!("failed to inspect base {}", path.display()))?;
-        if before.file_type().is_symlink() {
-            bail!("base {} is a symlink; refusing", path.display());
-        }
-        if !before.file_type().is_dir() {
-            bail!("base {} is not a directory; refusing", path.display());
-        }
-        let c = CString::new(path.as_os_str().as_bytes())
-            .map_err(|_| anyhow!("base path contains NUL; refusing"))?;
-        let fd = unsafe {
-            libc::open(
-                c.as_ptr(),
-                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC,
-            )
-        };
-        if fd < 0 {
-            return Err(errno("failed to open base directory", path.display()));
-        }
-        let file = unsafe { std::fs::File::from_raw_fd(fd) };
-        let meta = file.metadata()?;
-        if meta.dev() != before.dev() || meta.ino() != before.ino() {
-            bail!("base {} was swapped between check and open", path.display());
-        }
-        if !meta.file_type().is_dir() {
-            bail!("base {} is not a directory; refusing", path.display());
-        }
-        Ok(file)
-    }
-
-    /// Open an existing child directory relative to `parent` without following
-    /// a symlink/reparse point at the leaf. The operation is anchored to the
-    /// verified parent fd: it cannot be redirected by swapping pathnames above
-    /// or at the component during the open.
-    pub fn open_child_dir(
-        parent: &std::fs::File,
-        _parent_path: &Path,
-        segment: &OsStr,
-        child_path: &Path,
-    ) -> Result<std::fs::File> {
-        let name = cseg(segment)?;
-        let fd = unsafe {
-            libc::openat(
-                parent.as_raw_fd(),
-                name.as_ptr(),
-                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC,
-            )
-        };
-        if fd < 0 {
-            return Err(errno(
-                "failed to open directory component",
-                child_path.display(),
-            ));
-        }
-        let file = unsafe { std::fs::File::from_raw_fd(fd) };
-        let meta = file.metadata()?;
-        if !meta.file_type().is_dir() {
-            bail!(
-                "component {} is not a directory; refusing",
-                child_path.display()
-            );
-        }
-        Ok(file)
-    }
-
-    /// Create `segment` as a new directory relative to the verified `parent`
-    /// fd, then open and return a pinned handle to it. `mkdirat` on a single
-    /// component creates inside the directory referenced by `parent`'s fd and
-    /// fails (EEXIST/ELOOP/ENOTDIR, etc.) rather than following or creating
-    /// through a raced symlink at the leaf. This prevents unauthorized
-    /// directory creation outside the verified chain even if namespace paths
-    /// are swapped around the operation.
-    pub fn create_child_dir(
-        parent: &std::fs::File,
-        _parent_path: &Path,
-        segment: &OsStr,
-        child_path: &Path,
-    ) -> Result<std::fs::File> {
-        let name = cseg(segment)?;
-        let rc = unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o777) };
-        if rc != 0 {
-            return Err(errno(
-                "failed to create directory (fd-anchored)",
-                child_path.display(),
-            ));
-        }
-        // Open the directory we just created, anchored to the same parent fd
-        // and refusing to follow a symlink at the leaf.
-        let fd = unsafe {
-            libc::openat(
-                parent.as_raw_fd(),
-                name.as_ptr(),
-                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC,
-            )
-        };
-        if fd < 0 {
-            return Err(errno(
-                "failed to open newly created directory",
-                child_path.display(),
-            ));
-        }
-        let file = unsafe { std::fs::File::from_raw_fd(fd) };
-        let meta = file.metadata()?;
-        if !meta.file_type().is_dir() {
-            bail!(
-                "anchored directory creation produced a non-directory object: {}",
-                child_path.display()
-            );
-        }
-        Ok(file)
-    }
-
-    pub fn verify_plain_directory(handle: &std::fs::File, _path: &Path) -> Result<()> {
-        let meta = handle.metadata()?;
-        if !meta.file_type().is_dir() {
-            bail!("component is not a directory; refusing");
-        }
-        Ok(())
-    }
-
-    fn open_leaf_fd(
-        parent: &std::fs::File,
-        leaf: &OsStr,
-        flags: libc::c_int,
-        mode: libc::mode_t,
-    ) -> Result<std::fs::File> {
-        let name = cseg(leaf)?;
-        // Always refuse to follow a symlink at the final component.
-        let fd = unsafe {
-            libc::openat(
-                parent.as_raw_fd(),
-                name.as_ptr(),
-                flags | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                mode,
-            )
-        };
-        if fd < 0 {
-            return Err(errno("failed to open leaf", name.to_string_lossy()));
-        }
-        Ok(unsafe { std::fs::File::from_raw_fd(fd) })
-    }
-
-    pub fn open_leaf_read(base: &Path, dir: &[OsString], leaf: &OsString) -> Result<std::fs::File> {
-        let (handles, _leaf_parent) = super::walk_dir_chain(base, dir)?;
-        let parent = handles.last().expect("base handle");
-        let file = open_leaf_fd(parent, leaf.as_os_str(), libc::O_RDONLY, 0)
-            .with_context(|| format!("failed to open leaf for read: {}", leaf.to_string_lossy()))?;
-        let meta = file.metadata()?;
-        if !meta.file_type().is_file() {
-            bail!("leaf is not a regular file; refusing to read");
-        }
-        Ok(file)
-    }
-
-    pub fn open_write_ordinary(
-        base: &Path,
-        dir: &[OsString],
-        leaf: &OsString,
-    ) -> Result<std::fs::File> {
-        let (handles, _leaf_parent) = super::walk_dir_chain(base, dir)?;
-        let parent = handles.last().expect("base handle");
-        let file = open_leaf_fd(parent, leaf.as_os_str(), libc::O_RDWR, 0).with_context(|| {
-            format!("failed to open leaf for write: {}", leaf.to_string_lossy())
-        })?;
-        let meta = file.metadata()?;
-        if !meta.file_type().is_file() {
-            bail!("leaf is not a regular file; refusing to write");
-        }
-        file.set_len(0).context("truncate after verified open")?;
-        Ok(file)
-    }
-
-    pub fn open_fresh_leaf_write(
-        base: &Path,
-        dir: &[OsString],
-        leaf: &OsString,
-    ) -> Result<std::fs::File> {
-        let (handles, _leaf_parent) = super::walk_dir_chain(base, dir)?;
-        let parent = handles.last().expect("base handle");
-        let file = open_leaf_fd(
-            parent,
-            leaf.as_os_str(),
-            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
-            0o666,
+    let c = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| anyhow!("base path contains NUL; refusing"))?;
+    let fd = unsafe {
+        libc::open(
+            c.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC,
         )
-        .with_context(|| {
-            format!(
-                "failed to create leaf for write: {}",
-                leaf.to_string_lossy()
-            )
-        })?;
-        let meta = file.metadata()?;
-        if !meta.file_type().is_file() {
-            bail!("leaf is not a regular file; refusing to write");
-        }
-        Ok(file)
+    };
+    if fd < 0 {
+        return Err(unix_errno("failed to open base directory", path.display()));
     }
+    let file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let meta = file.metadata()?;
+    if meta.dev() != before.dev() || meta.ino() != before.ino() {
+        bail!("base {} was swapped between check and open", path.display());
+    }
+    if !meta.file_type().is_dir() {
+        bail!("base {} is not a directory; refusing", path.display());
+    }
+    Ok(file)
+}
 
-    // Keep the PathBuf-building walk helpers available for callers that need
-    // the leaf_parent path for messages; the fd-relative operations above are
-    // the containment boundary.
-    pub fn _leaf_parent_path(base: &Path, dir: &[OsString]) -> Result<PathBuf> {
-        let (_h, p) = super::walk_dir_chain(base, dir)?;
-        Ok(p)
+/// Open an existing child directory relative to `parent` without following
+/// a symlink/reparse point at the leaf. The operation is anchored to the
+/// verified parent fd: it cannot be redirected by swapping pathnames above
+/// or at the component during the open.
+#[cfg(unix)]
+fn unix_open_child_dir(
+    parent: &std::fs::File,
+    _parent_path: &Path,
+    segment: &OsStr,
+    child_path: &Path,
+) -> Result<std::fs::File> {
+    let name = unix_cseg(segment)?;
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(unix_errno(
+            "failed to open directory component",
+            child_path.display(),
+        ));
     }
+    let file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let meta = file.metadata()?;
+    if !meta.file_type().is_dir() {
+        bail!(
+            "component {} is not a directory; refusing",
+            child_path.display()
+        );
+    }
+    Ok(file)
+}
+
+/// Create `segment` as a new directory relative to the verified `parent`
+/// fd, then open and return a pinned handle to it. `mkdirat` on a single
+/// component creates inside the directory referenced by `parent`'s fd and
+/// fails (EEXIST/ELOOP/ENOTDIR, etc.) rather than following or creating
+/// through a raced symlink at the leaf. This prevents unauthorized
+/// directory creation outside the verified chain even if namespace paths
+/// are swapped around the operation.
+#[cfg(unix)]
+fn unix_create_child_dir(
+    parent: &std::fs::File,
+    _parent_path: &Path,
+    segment: &OsStr,
+    child_path: &Path,
+) -> Result<std::fs::File> {
+    let name = unix_cseg(segment)?;
+    let rc = unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o777) };
+    if rc != 0 {
+        return Err(unix_errno(
+            "failed to create directory (fd-anchored)",
+            child_path.display(),
+        ));
+    }
+    // Open the directory we just created, anchored to the same parent fd
+    // and refusing to follow a symlink at the leaf.
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(unix_errno(
+            "failed to open newly created directory",
+            child_path.display(),
+        ));
+    }
+    let file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let meta = file.metadata()?;
+    if !meta.file_type().is_dir() {
+        bail!(
+            "anchored directory creation produced a non-directory object: {}",
+            child_path.display()
+        );
+    }
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn unix_verify_plain_directory(handle: &std::fs::File, _path: &Path) -> Result<()> {
+    let meta = handle.metadata()?;
+    if !meta.file_type().is_dir() {
+        bail!("component is not a directory; refusing");
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn unix_open_leaf_fd(
+    parent: &std::fs::File,
+    leaf: &OsStr,
+    flags: libc::c_int,
+    mode: libc::mode_t,
+) -> Result<std::fs::File> {
+    let name = unix_cseg(leaf)?;
+    // Always refuse to follow a symlink at the final component.
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            flags | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            mode,
+        )
+    };
+    if fd < 0 {
+        return Err(unix_errno("failed to open leaf", name.to_string_lossy()));
+    }
+    Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+}
+
+#[cfg(unix)]
+fn unix_open_leaf_read(base: &Path, dir: &[OsString], leaf: &OsString) -> Result<std::fs::File> {
+    let (handles, _leaf_parent) = walk_dir_chain(base, dir)?;
+    let parent = handles.last().expect("base handle");
+    let file = unix_open_leaf_fd(parent, leaf.as_os_str(), libc::O_RDONLY, 0)
+        .with_context(|| format!("failed to open leaf for read: {}", leaf.to_string_lossy()))?;
+    let meta = file.metadata()?;
+    if !meta.file_type().is_file() {
+        bail!("leaf is not a regular file; refusing to read");
+    }
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn unix_open_write_ordinary(
+    base: &Path,
+    dir: &[OsString],
+    leaf: &OsString,
+) -> Result<std::fs::File> {
+    let (handles, _leaf_parent) = walk_dir_chain(base, dir)?;
+    let parent = handles.last().expect("base handle");
+    let file = unix_open_leaf_fd(parent, leaf.as_os_str(), libc::O_RDWR, 0)
+        .with_context(|| format!("failed to open leaf for write: {}", leaf.to_string_lossy()))?;
+    let meta = file.metadata()?;
+    if !meta.file_type().is_file() {
+        bail!("leaf is not a regular file; refusing to write");
+    }
+    file.set_len(0).context("truncate after verified open")?;
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn unix_open_fresh_leaf_write(
+    base: &Path,
+    dir: &[OsString],
+    leaf: &OsString,
+) -> Result<std::fs::File> {
+    let (handles, _leaf_parent) = walk_dir_chain(base, dir)?;
+    let parent = handles.last().expect("base handle");
+    let file = unix_open_leaf_fd(
+        parent,
+        leaf.as_os_str(),
+        libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+        0o666,
+    )
+    .with_context(|| {
+        format!(
+            "failed to create leaf for write: {}",
+            leaf.to_string_lossy()
+        )
+    })?;
+    let meta = file.metadata()?;
+    if !meta.file_type().is_file() {
+        bail!("leaf is not a regular file; refusing to write");
+    }
+    Ok(file)
 }
 
 #[cfg(unix)]
 fn open_dir(path: &Path) -> Result<std::fs::File> {
-    unix_fd::open_dir(path)
+    unix_open_dir(path)
 }
 
 #[cfg(unix)]
@@ -2284,12 +2291,12 @@ fn open_child_dir(
     segment: &std::ffi::OsStr,
 ) -> Result<std::fs::File> {
     let child_path = parent_path.join(segment);
-    unix_fd::open_child_dir(parent, parent_path, segment, &child_path)
+    unix_open_child_dir(parent, parent_path, segment, &child_path)
 }
 
 #[cfg(unix)]
 fn verify_plain_directory(handle: &std::fs::File, path: &Path) -> Result<()> {
-    unix_fd::verify_plain_directory(handle, path)
+    unix_verify_plain_directory(handle, path)
 }
 
 #[cfg(unix)]
@@ -2298,7 +2305,7 @@ fn open_leaf_read(
     dir: &[std::ffi::OsString],
     leaf: &std::ffi::OsString,
 ) -> Result<std::fs::File> {
-    unix_fd::open_leaf_read(base, dir, leaf)
+    unix_open_leaf_read(base, dir, leaf)
 }
 
 #[cfg(unix)]
@@ -2307,7 +2314,7 @@ fn open_write_ordinary(
     dir: &[std::ffi::OsString],
     leaf: &std::ffi::OsString,
 ) -> Result<std::fs::File> {
-    unix_fd::open_write_ordinary(base, dir, leaf)
+    unix_open_write_ordinary(base, dir, leaf)
 }
 
 #[cfg(unix)]
@@ -2316,7 +2323,7 @@ fn open_fresh_leaf_write(
     dir: &[std::ffi::OsString],
     leaf: &std::ffi::OsString,
 ) -> Result<std::fs::File> {
-    unix_fd::open_fresh_leaf_write(base, dir, leaf)
+    unix_open_fresh_leaf_write(base, dir, leaf)
 }
 
 // ---------------------------------------------------------------------------
