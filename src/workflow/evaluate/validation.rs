@@ -21,15 +21,12 @@ use super::resource::{
     CLASSIFICATION_TIMEOUT, ResourceLimits,
 };
 
-// D325 Finding B: test-only instrumentation proving the RAII job-handle guard
-// calls CloseHandle exactly once per monitor exit. Process-wide handle counts
-// are too noisy to assert under parallel test execution; this counter is
-// deterministic and directly observes the guard's Drop path.
+// D326: test-only instrumentation proving the RAII job-handle guard calls
+// CloseHandle exactly once per monitor exit. A per-handle log (rather than a
+// single global counter, which concurrent tests overwrite) stays deterministic
+// under parallel execution: each test observes only its own handle value.
 #[cfg(all(test, windows))]
-static WIN_JOB_CLOSE_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-#[cfg(all(test, windows))]
-static WIN_JOB_WATCH_HANDLE: std::sync::atomic::AtomicIsize =
-    std::sync::atomic::AtomicIsize::new(0);
+static WIN_JOB_CLOSED: std::sync::Mutex<Vec<isize>> = std::sync::Mutex::new(Vec::new());
 
 // ---------------------------------------------------------------------------
 // Validation (isolated worktree)
@@ -1347,12 +1344,15 @@ fn spawn_resource_monitor_win(
         fn drop(&mut self) {
             if !self.0.is_null() {
                 let handle = self.0;
+                // Record the closure BEFORE releasing the handle value: Windows
+                // may immediately reuse a closed handle number, and a test that
+                // observes the reused value must already see this log entry.
+                #[cfg(test)]
+                if let Ok(mut closed) = WIN_JOB_CLOSED.lock() {
+                    closed.push(handle as isize);
+                }
                 unsafe { winapi::um::handleapi::CloseHandle(handle) };
                 self.0 = std::ptr::null_mut();
-                #[cfg(test)]
-                if WIN_JOB_WATCH_HANDLE.load(Ordering::SeqCst) == handle as isize {
-                    WIN_JOB_CLOSE_COUNT.fetch_add(1, Ordering::SeqCst);
-                }
             }
         }
     }
@@ -2320,6 +2320,15 @@ mod tests {
         );
     }
 
+    // D326: number of recorded closes for a specific job handle value.
+    #[cfg(windows)]
+    fn closed_handle_count(handle: isize) -> usize {
+        WIN_JOB_CLOSED
+            .lock()
+            .map(|v| v.iter().filter(|&&h| h == handle).count())
+            .unwrap_or(0)
+    }
+
     // D325 Finding B: run the monitor under a watchdog that signals `done` at
     // the deadline, so a missing breach cannot hang a test forever.
     #[cfg(windows)]
@@ -2355,8 +2364,7 @@ mod tests {
         use winapi::um::jobapi2::CreateJobObjectW;
         let job = unsafe { CreateJobObjectW(std::ptr::null_mut(), std::ptr::null_mut()) };
         assert!(!job.is_null(), "CreateJobObjectW must succeed");
-        WIN_JOB_CLOSE_COUNT.store(0, Ordering::SeqCst);
-        WIN_JOB_WATCH_HANDLE.store(job as isize, Ordering::SeqCst);
+        let closes_before = closed_handle_count(job as isize);
         let done = Arc::new(AtomicBool::new(false));
         let kind = Arc::new(AtomicU8::new(0));
         let limits = ResourceLimits {
@@ -2376,8 +2384,8 @@ mod tests {
             "CPU breach must classify kind=1 (durable typed evidence)"
         );
         assert_eq!(
-            WIN_JOB_CLOSE_COUNT.load(Ordering::SeqCst),
-            1,
+            closed_handle_count(job as isize),
+            closes_before + 1,
             "CPU breach early return must call CloseHandle exactly once"
         );
     }
@@ -2414,8 +2422,7 @@ mod tests {
             .expect("spawn memory-breach burner");
         let job =
             apply_job_limits(child.id(), &limits).expect("apply job limits for memory breach");
-        WIN_JOB_CLOSE_COUNT.store(0, Ordering::SeqCst);
-        WIN_JOB_WATCH_HANDLE.store(job as isize, Ordering::SeqCst);
+        let closes_before = closed_handle_count(job as isize);
         let done = Arc::new(AtomicBool::new(false));
         let kind = Arc::new(AtomicU8::new(0));
         run_monitor_bounded(
@@ -2434,8 +2441,8 @@ mod tests {
             "memory breach must classify kind=2 (durable typed evidence)"
         );
         assert_eq!(
-            WIN_JOB_CLOSE_COUNT.load(Ordering::SeqCst),
-            1,
+            closed_handle_count(job as isize),
+            closes_before + 1,
             "memory breach must call CloseHandle exactly once"
         );
     }
@@ -2447,8 +2454,7 @@ mod tests {
         use winapi::um::jobapi2::CreateJobObjectW;
         let job = unsafe { CreateJobObjectW(std::ptr::null_mut(), std::ptr::null_mut()) };
         assert!(!job.is_null(), "CreateJobObjectW must succeed");
-        WIN_JOB_CLOSE_COUNT.store(0, Ordering::SeqCst);
-        WIN_JOB_WATCH_HANDLE.store(job as isize, Ordering::SeqCst);
+        let closes_before = closed_handle_count(job as isize);
         // Already signaled: the poll loop is skipped and only the final poll
         // runs (no limits configured, so no breach).
         let done = Arc::new(AtomicBool::new(true));
@@ -2462,8 +2468,8 @@ mod tests {
         );
         assert_eq!(kind.load(Ordering::SeqCst), 0, "no breach expected");
         assert_eq!(
-            WIN_JOB_CLOSE_COUNT.load(Ordering::SeqCst),
-            1,
+            closed_handle_count(job as isize),
+            closes_before + 1,
             "normal completion must call CloseHandle exactly once"
         );
     }
@@ -2476,8 +2482,7 @@ mod tests {
         use winapi::um::jobapi2::CreateJobObjectW;
         let job = unsafe { CreateJobObjectW(std::ptr::null_mut(), std::ptr::null_mut()) };
         assert!(!job.is_null(), "CreateJobObjectW must succeed");
-        WIN_JOB_CLOSE_COUNT.store(0, Ordering::SeqCst);
-        WIN_JOB_WATCH_HANDLE.store(job as isize, Ordering::SeqCst);
+        let closes_before = closed_handle_count(job as isize);
         // `done` is already true so the loop is skipped and the breach is
         // observed only in the preserved final poll.
         let done = Arc::new(AtomicBool::new(true));
@@ -2499,8 +2504,8 @@ mod tests {
             "final poll must classify the CPU breach as kind=1"
         );
         assert_eq!(
-            WIN_JOB_CLOSE_COUNT.load(Ordering::SeqCst),
-            1,
+            closed_handle_count(job as isize),
+            closes_before + 1,
             "final-poll breach must call CloseHandle exactly once"
         );
     }
