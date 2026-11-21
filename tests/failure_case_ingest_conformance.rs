@@ -168,6 +168,58 @@ fn foreign_digest_and_case_id_mismatch_are_refused() {
     assert!(LiteFailureCase::parse_json(&mutated).is_err());
 }
 
+/// D329 (#156): an unknown/future schemaVersion must fail closed at re-ingest,
+/// and the version gate itself must be reported (not only a digest mismatch).
+#[test]
+fn unsupported_schema_version_is_refused_at_reverify() {
+    let case = minimal_case();
+    let exported = prometheos_lite::workflow::failure_case::case_export_json(&case, &[])
+        .expect("export succeeds");
+    let mutated = exported.replacen(
+        &format!("\"schemaVersion\": \"{FAILURE_CASE_SCHEMA_VERSION}\""),
+        "\"schemaVersion\": \"9.9.9\"",
+        1,
+    );
+    assert_ne!(
+        mutated, exported,
+        "fixture must actually mutate schemaVersion"
+    );
+    // Re-seal after the mutation so the digest gate is satisfied and the
+    // schema-version gate itself is what rejects the document.
+    let mut parsed: LiteFailureCase = serde_json::from_str(&mutated).expect("deserialize");
+    parsed.content_digest = Some(parsed.compute_digest().expect("digest computes"));
+    let err = parsed
+        .verify()
+        .expect_err("unknown schema must fail closed");
+    assert!(
+        format!("{err:#}").contains("unsupported failure-case schema version"),
+        "the version gate must fire, not only the digest check: {err:#}"
+    );
+}
+
+/// D329 (#156): the Lite-internal document version is pinned independently of
+/// the schema version and must also fail closed at re-ingest.
+#[test]
+fn unsupported_document_version_is_refused_at_reverify() {
+    let case = minimal_case();
+    let exported = prometheos_lite::workflow::failure_case::case_export_json(&case, &[])
+        .expect("export succeeds");
+    let mutated = exported.replacen("\"version\": \"1.0.0\"", "\"version\": \"9.9.9\"", 1);
+    assert_ne!(
+        mutated, exported,
+        "fixture must actually mutate the document version"
+    );
+    let mut parsed: LiteFailureCase = serde_json::from_str(&mutated).expect("deserialize");
+    parsed.content_digest = Some(parsed.compute_digest().expect("digest computes"));
+    let err = parsed
+        .verify()
+        .expect_err("unknown version must fail closed");
+    assert!(
+        format!("{err:#}").contains("unsupported version"),
+        "the document-version gate must fire: {err:#}"
+    );
+}
+
 #[test]
 fn external_evaluation_format_is_never_silently_present() {
     let case = minimal_case();
