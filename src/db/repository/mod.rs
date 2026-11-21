@@ -53,3 +53,10 @@ pub use work_artifacts::*;
 pub use work_context::*;
 pub use work_context_events::*;
 pub use work_run_metrics::*;
+
+/// Map a domain-mapping failure to a sqlite conversion failure (row
+/// conversion boundary). Keeps `?` ergonomics inside `query_map` closures
+/// without fabricating values or losing provenance.
+pub(crate) fn mapping_error(error: anyhow::Error) -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(error.to_string().into())
+}

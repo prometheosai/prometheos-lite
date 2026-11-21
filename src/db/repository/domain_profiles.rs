@@ -67,9 +67,11 @@ impl DomainProfileOperations for crate::db::Db {
                     .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
 
                 let approval_defaults_json: String = row.get(5)?;
-                let approval_defaults: crate::work::types::ApprovalPolicy =
-                    serde_json::from_str(&approval_defaults_json)
-                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                let approval_defaults = crate::work::persistence::parse_approval_policy(
+                    &approval_defaults_json,
+                    "work_domain_profiles.approval_defaults",
+                )
+                .map_err(super::mapping_error)?;
 
                 let lifecycle_template_json: String = row.get(6)?;
                 let lifecycle_template: crate::work::domain::LifecycleTemplate =
@@ -115,9 +117,11 @@ impl DomainProfileOperations for crate::db::Db {
                     .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
 
                 let approval_defaults_json: String = row.get(5)?;
-                let approval_defaults: crate::work::types::ApprovalPolicy =
-                    serde_json::from_str(&approval_defaults_json)
-                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                let approval_defaults = crate::work::persistence::parse_approval_policy(
+                    &approval_defaults_json,
+                    "work_domain_profiles.approval_defaults",
+                )
+                .map_err(super::mapping_error)?;
 
                 let lifecycle_template_json: String = row.get(6)?;
                 let lifecycle_template: crate::work::domain::LifecycleTemplate =
