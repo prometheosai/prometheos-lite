@@ -12,6 +12,7 @@ pub mod event;
 pub mod evolution_engine;
 pub mod execution_service;
 pub mod human_principal;
+pub mod journal_contract;
 pub mod orchestrator;
 pub mod phase_controller;
 pub mod plan;

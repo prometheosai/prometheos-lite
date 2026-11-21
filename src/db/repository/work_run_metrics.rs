@@ -123,10 +123,10 @@ impl<T: AsDb> WorkRunMetricsOperations for T {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn journal() -> crate::work::provenance::JournalContext {
-        crate::work::provenance::JournalContext::internal_system(
+    fn journal() -> crate::work::journal_contract::JournalContext {
+        crate::work::journal_contract::JournalContext::internal_system(
             format!("test-{}", uuid::Uuid::new_v4()),
-            crate::work::provenance::JournalContext::work_authority(
+            crate::work::journal_contract::JournalContext::work_authority(
                 crate::work::types::AutonomyLevel::Review,
                 crate::work::types::ApprovalPolicy::Auto,
             ),
