@@ -690,19 +690,21 @@ fn junction_or_symlink(source: &Path, target: &Path) -> bool {
             .output();
         if let Ok(out) = out
             && out.status.success()
-            && source.exists()
+            && reparse_entry_present(source)
         {
             return true;
         }
         if target.is_dir() {
             std::os::windows::fs::symlink_dir(target, source).is_ok()
+                && reparse_entry_present(source)
         } else {
             std::os::windows::fs::symlink_file(target, source).is_ok()
+                && reparse_entry_present(source)
         }
     }
     #[cfg(unix)]
     {
-        std::os::unix::fs::symlink(target, source).is_ok()
+        std::os::unix::fs::symlink(target, source).is_ok() && reparse_entry_present(source)
     }
 }
 
@@ -925,4 +927,149 @@ fn security_permission_ledger_curdir_normalization_cannot_escape_grant() {
             "dot-segment traversal must not borrow the prefix grant: {hostile}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// E. Dangling (unresolvable) reparse points and swap-before-effect fail-closed
+// ---------------------------------------------------------------------------
+
+/// Non-dereferencing check: is there a directory entry at `link` and is it a
+/// symlink/junction (reparse point)? Never follows the link target, so a
+/// *dangling* junction is still detected as present.
+fn reparse_entry_present(link: &Path) -> bool {
+    std::fs::symlink_metadata(link)
+        .map(|meta| meta.file_type().is_symlink())
+        .unwrap_or(false)
+}
+
+/// Create a reparse point at `link` targeting `target`. On Windows `mklink /J`
+/// creates a MOUNT_POINT junction to a possibly nonexistent directory (no
+/// elevation); falls back to symlink where permitted. Returns false when
+/// neither is permitted — in which case the caller must skip loudly rather
+/// than count the test as evidence. When creation succeeds, the caller MUST
+/// observe `reparse_entry_present(link) == true` and exercise the security
+/// assertions; a successful creation that cannot be observed fails the test.
+fn dangling_reparse(link: &Path, target: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        let out = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output();
+        if let Ok(out) = out
+            && out.status.success()
+        {
+            if reparse_entry_present(link) {
+                return true;
+            }
+            // The creation command claimed success but no reparse entry is
+            // observable — treat as failure so the test cannot pass vacuously.
+            eprintln!(
+                "mklink /J reported success but no reparse entry is visible at {}",
+                link.display()
+            );
+            return false;
+        }
+        if std::os::windows::fs::symlink_dir(target, link).is_ok() && reparse_entry_present(link) {
+            return true;
+        }
+        if std::os::windows::fs::symlink_file(target, link).is_ok() && reparse_entry_present(link) {
+            return true;
+        }
+        false
+    }
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, link).is_ok() && reparse_entry_present(link)
+    }
+}
+
+#[tokio::test]
+async fn security_repo_dangling_symlink_final_component_write_and_patch_refused() {
+    let base = tempdir();
+    let repo = base.path().join("repo");
+    let outside = tempdir();
+    std::fs::create_dir_all(&repo).unwrap();
+    // Target deliberately absent (dangling link — the "missing external
+    // file" scenario the review calls out).
+    let outside_target = outside.path().join("dangling_victim.txt");
+    let link = repo.join("dangling.txt");
+    if !dangling_reparse(&link, &outside_target) {
+        eprintln!(
+            "SKIP: reparse point creation not permitted on this host; security assertions NOT exercised"
+        );
+        return;
+    }
+    assert!(
+        reparse_entry_present(&link),
+        "successful dangling-junction creation must be observable without dereferencing"
+    );
+    eprintln!("dangling reparse point created; exercising security assertions");
+
+    let out = WriteFileTool::new(repo.clone())
+        .call(serde_json::json!({"path": "dangling.txt", "content": "owned"}))
+        .await
+        .expect("write");
+    assert_eq!(
+        out["success"], false,
+        "a dangling final-component link must fail closed: {out}"
+    );
+    assert!(
+        !outside_target.exists(),
+        "the dangling outside victim must never be created by a refused write"
+    );
+
+    let out = PatchFileTool::new(repo)
+        .call(serde_json::json!({
+            "path": "dangling.txt",
+            "diff": "--- a/dangling.txt\n+++ b/dangling.txt\n@@ -1 +1 @@\n-x\n+owned\n"
+        }))
+        .await
+        .expect("patch");
+    assert_eq!(
+        out["success"], false,
+        "patch through a dangling final-component link must be refused: {out}"
+    );
+    assert!(
+        !outside_target.exists(),
+        "a refused patch must not create a file outside the repo"
+    );
+}
+
+#[tokio::test]
+async fn security_repo_dangling_ancestor_symlink_read_refused() {
+    let base = tempdir();
+    let repo = base.path().join("repo");
+    let outside = tempdir();
+    std::fs::create_dir_all(&repo).unwrap();
+    // Ancestor link whose target does not exist — the unresolvable-ancestor
+    // case. The path guard must refuse before the read effect runs.
+    let nonexistent = outside.path().join("nonexistent_ancestor");
+    let link = repo.join("escape");
+    if !dangling_reparse(&link, &nonexistent) {
+        eprintln!(
+            "SKIP: reparse point creation not permitted on this host; security assertions NOT exercised"
+        );
+        return;
+    }
+    assert!(
+        reparse_entry_present(&link),
+        "successful dangling-junction creation must be observable without dereferencing"
+    );
+    eprintln!("dangling reparse point created; exercising security assertions");
+
+    let tool = RepoReadFileTool::new(repo.clone());
+    let out = tool
+        .call(serde_json::json!({"path": "escape/victim.txt"}))
+        .await
+        .expect("read");
+    assert_eq!(
+        out["success"], false,
+        "read through an unresolvable ancestor link must be refused: {out}"
+    );
+    assert!(
+        !outside.path().join("escape/victim.txt").exists(),
+        "the ancestor target does not exist; no read may occur or create it"
+    );
 }

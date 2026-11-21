@@ -132,7 +132,10 @@ fn repair_spec(worktree: &Path, rev: &str) -> ModelRepairSpec {
         validator: validator(),
         validator_timeout: std::time::Duration::from_secs(240),
         max_attempts: 4,
-        validator_target_dir: None,
+        // Reuse a single validator target dir within this repair execution to
+        // avoid redundant recompiles under parallel test contention (baseline
+        // and attempts share incremental state; tree_digest excludes it).
+        validator_target_dir: Some(worktree.join(".lite-validator-shared")),
         prompt_context: None,
         source: None,
         egress_grant: None,
