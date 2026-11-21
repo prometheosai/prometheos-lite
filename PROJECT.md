@@ -4,7 +4,7 @@
 PrometheOS Lite
 
 ## Version
-v1.2.1
+1.6.1 (matches Cargo.toml and CHANGELOG.md)
 
 ## Stack
 - Backend: Rust (Axum web framework)
@@ -21,7 +21,7 @@ v1.2.1
 - Efficient resource usage
 
 ## Current Phase
-v1.2.1 - Intent Classification Layer
+1.6.1 - Stable alpha: Repo Workbench (`prometheos work`). Experimental: flow execution, harness, API server, frontend, local-model validation. See docs/guides/product-surface-inventory.md and AGENTS.md.
 
 ## Important Paths
 - Backend: src/
