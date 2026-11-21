@@ -2623,12 +2623,21 @@ mod adversarial_tests {
 
         let repo_clone = repo.clone();
         let outside_clone = outside.path().to_path_buf();
+        // D330: platform junction creation (`mklink /J`) can fail transiently
+        // under parallel test load. Record whether the race was actually
+        // planted; only a planted junction exercises the fail-closed outcome.
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let planted = std::sync::Arc::new(AtomicBool::new(false));
+        let planted_hook = planted.clone();
         // Fires once, between the stat that says "missing" and the anchored
         // creation of "a" (the write target is sub/a/file.txt).
         arm("a", move |_path| {
             let sub_orig = repo_clone.join("sub-orig");
             let _ = std::fs::rename(repo_clone.join("sub"), &sub_orig);
-            let _ = junction_or_symlink(&repo_clone.join("sub"), &outside_clone.join("victim-dir"));
+            planted_hook.store(
+                junction_or_symlink(&repo_clone.join("sub"), &outside_clone.join("victim-dir")),
+                Ordering::SeqCst,
+            );
         });
 
         let tool = WriteFileTool::new(repo.clone());
@@ -2636,10 +2645,16 @@ mod adversarial_tests {
             .call(serde_json::json!({"path": "sub/a/file.txt", "content": "owned"}))
             .await
             .expect("write");
-        assert_eq!(
-            out["success"], false,
-            "a write through a raced ancestor must fail closed: {out}"
-        );
+        if !planted.load(Ordering::SeqCst) {
+            eprintln!(
+                "SKIP fail-closed assertion: the junction could not be planted, so no ancestor swap was simulated"
+            );
+        } else {
+            assert_eq!(
+                out["success"], false,
+                "a write through a raced ancestor must fail closed: {out}"
+            );
+        }
         assert!(
             std::fs::read_dir(&victim_dir)
                 .map(|mut entries| entries.next().is_none())
