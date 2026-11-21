@@ -13,6 +13,7 @@ pub mod graph_checkpoints;
 mod interrupts;
 pub mod iteration_persist;
 mod messages;
+mod migrations;
 mod outbox;
 mod playbooks;
 mod projects;

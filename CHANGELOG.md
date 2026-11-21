@@ -1,5 +1,40 @@
 ## Unreleased
 
+- #138 E7/I03 Slice A - independent-review R1-R5 follow-up repair (corrected local
+  candidate lineage 4feb2d1 -> b255686 -> current). `WriteFileTool`, `RepoReadFileTool`
+  and `PatchFileTool` no longer decide on pathnames: the filesystem effect runs through
+  a verified handle-relative open (`NtCreateFile` with `RootDirectory` on Windows;
+  fd-relative `openat`/`mkdirat` with `O_NOFOLLOW|O_DIRECTORY|O_CLOEXEC` on Unix for
+  traversal, leaf opens, and directory creation). Every ancestor component is opened as
+  a handle/fd and verified non-reparse before the effect; the leaf is classified on the
+  verified handle (ordinary vs reparse point vs nonexistent vs inspection failure -
+  any unexpected inspection error fails closed); existing leaves are opened, verified,
+  and only then truncated; fresh leaves are created exclusively (`FILE_CREATE` /
+  `O_CREAT|O_EXCL`). Directory creation is anchored to the verified parent handle/fd
+  (FIX A), closing unauthorized outside-directory creation races on Windows and Unix
+  (Linux execution NOT RUN on the Unix path; code-level fd-relative fix implemented).
+  External `patch(1)` is removed; a bounded, self-contained unified-diff applier with
+  strict parsing, checked/clamped delta arithmetic, checked bounds, and typed rejection
+  of malformed/out-of-order/extreme hunks is used (panic-free on untrusted input, FIX B).
+  PathGuard is unchanged from the merged repair (#318 lineage). The repair adds ZERO
+  new public items and no unapproved dependencies (uses existing `libc` on Unix).
+  Deterministic adversarial validation-effect swap and parser-hardening tests live
+  in-crate (`tools::repo::adversarial_tests`) plus `tests/security_regression_slice_a.rs`.
+  `local_ci_policy.py` (G-B static guard) passes with zero findings.
+  Linux/macOS NOT RUN (Windows fully verified).
+
+- #138 E7/I03 Slice A - independent-review repair (PR #315 round 2). Dangling-symlink
+  and unresolved-ancestor reparse points are now rejected by `PathGuard` on every
+  segment (no exception between parent and leaf); arbitrary inspection errors other
+  than `NotFound` fail closed; `WriteFileTool`/`PatchFileTool` re-check the leaf and
+  refuse when a reparse point landed between validation and effect, and fresh-file
+  writes open with `create_new(true)` (a post-validation swap now fails closed, with
+  zero side effects). Deterministic swap-before-effect regression test added. Residual
+  TOCTOU window for the `patch` branch (external `patch(1)` executable, not under our
+  open()) documented in the threat matrix. Tests added: `dangling_symlink_final_component_write_and_patch_refused`,
+  `dangling_ancestor_symlink_read_refused`, `swap_after_validation_write_fails_closed`.
+  Linux/macOS NOT RUN.
+
 - #138 E7/I03 Slice A - security regression suite + threat-boundary matrix
   for the independent security assessment (Lite-internal, experimental; NOT
   an independent assessment; NOT a release gate). PR #315 (2026-11-17):
@@ -147,7 +182,7 @@
   tests, and never reported as such. Same pinned pattern as Slice B:
   content digest, deterministic revision, writable `git-worktree`, pinned
   validator command/argv, expected exit code, expected file-after digest and
-  expected post-run tree digest. (2) A replayable failure → replay →
+  expected post-run tree digest. (2) A replayable failure ÔåÆ replay ÔåÆ
   verified-repair chain on the pinned Slice B bytes:
   `lite-rust-bugfix-arithmetic-replay-001`
   (`tests/fixtures/scenarios/rust-bugfix-arithmetic-replay/descriptor.json`)
@@ -274,13 +309,13 @@
   (`HarnessCatalog`, entries ordered by id, digest-sealed), so there is no
   separate catalogue file to drift, and duplicate or unsealed declarations
   are refused at registration. The reusable conformance kit
-  (`HCONF-0001…0024`) EXECUTES the adapter rather than only reading its
+  (`HCONF-0001ÔÇª0024`) EXECUTES the adapter rather than only reading its
   declaration, and proves declaration/behaviour agreement (a declared
   `checkpointExport` must export; a declared resume must resume). Two
   distinct in-repo implementations — an in-process `native` worker and a
   `protocol-bridged` scripted worker — pass it in
   `tests/execution_harness_conformance.rs`. No concrete external adapter
-  (Claude Code, Codex, Goose, …) and no transport is claimed; real adapter
+  (Claude Code, Codex, Goose, ÔÇª) and no transport is claimed; real adapter
   families and harness selection (#133) remain follow-ups.
 - #154 E6/I07 Slice B — harness selection is now bound to the published
   SPEC 007 negotiation instead of being a string lookup. `HarnessRegistry::select`
@@ -438,8 +473,8 @@
   boundaries, `GraphDisclosurePolicy` (validated, sorted, non-cascading,
   `PROJ-0003`), domain-separated `childSubgraphDigest` (acyclic
   bottom-up) and `policyDigest`, the fail-closed boundary-port dataflow
-  algorithm (R1-R9, §7.4 outcome labels), hidden node/edge counts under
-  count authorization, and the two §11 verification paths (byte-path
+  algorithm (R1-R9, ┬º7.4 outcome labels), hidden node/edge counts under
+  count authorization, and the two ┬º11 verification paths (byte-path
   structural contract; ordered against-source steps where derived-digest
   mismatches report `SOMA-CMP-0004` and fresh-render identity reports
   `PROJ-0002`). Flat-workflow projections stay byte-identical to
@@ -518,7 +553,7 @@
   the test tempfile is now held for the test's full lifetime — the
   earlier in-tests regression check only worked by accident on Windows
   where the dropped temp dir wasn't yet visible.
-  `graph_checkpoints` stores (work_context_id, graph_run_id) →
+  `graph_checkpoints` stores (work_context_id, graph_run_id) ÔåÆ
   checkpoint JSON blob + freshly recomputed SHA-256, FK-cascade from
   `work_contexts` so orphan checkpoints cannot exist, and a wrongful
   registration against a non-existent context fails closed. The registry
@@ -583,7 +618,7 @@
   the `confidence=1.0` variant (A diverges on `1.0` vs `1`), and for
   set-like order reversal (B normalizes [digest unchanged], C digests
   input order [digest changes]). Additional pins: scientific-notation
-  divergence (`1e30` → A writes a 31-digit integer, C writes `1e+30`);
+  divergence (`1e30` ÔåÆ A writes a 31-digit integer, C writes `1e+30`);
   non-integral agreement domain (`0.7` renders identically in all paths);
   DecimalV2 layered boundaries (text guard rejects >400-digit lexemes;
   value-level writer accepts the f64-truncated form). Documentation
@@ -690,7 +725,7 @@
   artifact's `provenance.generator` (the same field the rest of
   the repo-workbench surface uses for attribution). 5 new unit
   tests in `src/cli/commands/work.rs` + 1 new parse-only test
-  in `src/cli/mod.rs`. 1003 → 1003 lib tests passing on this
+  in `src/cli/mod.rs`. 1003 ÔåÆ 1003 lib tests passing on this
   branch (no new lib tests in this slice; the new tests live in
   the binary target).
 
@@ -727,10 +762,10 @@
   differences are forward-compatible. The committed
   `prometheos.config.json` is updated to set `configVersion:
   "1.0.0"`. 5 new in-module unit tests in `src/config/settings/
-  loader.rs` (load default version → ok; missing → fail; unknown
-  major → fail; minor bump → ok; unknown field → fail). 1 existing
+  loader.rs` (load default version ÔåÆ ok; missing ÔåÆ fail; unknown
+  major ÔåÆ fail; minor bump ÔåÆ ok; unknown field ÔåÆ fail). 1 existing
   fixture in `src/workflow/redaction.rs` is updated to include
-  `configVersion`. 998 → 1003 lib tests passing on this branch.
+  `configVersion`. 998 ÔåÆ 1003 lib tests passing on this branch.
 
 - E5/I04 (#128) — `src/workflow/node_review.rs`: governed `security-review`,
   `evidence-audit`, and `independent-review` `lite.node` capabilities.
@@ -1051,7 +1086,7 @@
 - Replaced diagnostics provider connectivity placeholder with real HTTP connectivity checks, including provider-specific endpoints and auth/header handling.
 - Removed silent dependency discovery fallback:
   - Replaced `PlaceholderDiscovery` with explicit `UnsupportedDiscovery` failures for unimplemented discovery types (`Network`, `Database`, `Custom`).
-  - This prevents false-positive “successful” discovery when unsupported mechanisms are configured.
+  - This prevents false-positive ÔÇ£successfulÔÇØ discovery when unsupported mechanisms are configured.
 - Implemented adaptive timeout engine state updates:
   - Added learned adaptive multiplier updates from historical timeout/success/utilization statistics.
   - Adaptive escalation now uses bounded learned multipliers instead of static no-op behavior.
@@ -1266,7 +1301,7 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 
 ---
 
-## v0.1.2 PRD - From Architecture → Execution (Complete)
+## v0.1.2 PRD - From Architecture ÔåÆ Execution (Complete)
 
 ### Phase 1 — NodeFactory & Flow Execution
 - [x] Issue #1: Implement NodeFactory trait
@@ -1344,7 +1379,7 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 ### Phase 4 — WebSocket Streaming
 - [x] Issue #12: WebSocket Server (WS /ws/runs/:id)
 - [x] Issue #13: Event Model (type: node_start | node_end | output | error, node, data, timestamp)
-- [x] Issue #14: Hook Flow → WS (emit events on node start, node end, output update, errors)
+- [x] Issue #14: Hook Flow ÔåÆ WS (emit events on node start, node end, output update, errors)
 
 ### Phase 5 — Frontend (Next.js)
 - [x] Issue #15: Next.js App Setup (app/, components/, lib/ structure)
@@ -1356,7 +1391,7 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 - [x] Issue #21: Artifacts Panel (list files, show content, copy button)
 
 ### Phase 6 — Flow Integration
-- [x] Issue #22: Connect Chat → Flow (message → SharedState.input → execute codegen.flow.json)
+- [x] Issue #22: Connect Chat ÔåÆ Flow (message ÔåÆ SharedState.input ÔåÆ execute codegen.flow.json)
 - [x] Issue #23: Default Flow Binding (hardcode examples/codegen.flow.json for MVP)
 - [x] Issue #24: Output Parsing (capture outputs, display in chat)
 
@@ -1368,7 +1403,7 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 
 ### Phase 8 — Testing
 - [x] Issue #29: API Tests (endpoints return correct data)
-- [x] Issue #30: Flow Execution Tests via API (POST → run → result stored)
+- [x] Issue #30: Flow Execution Tests via API (POST ÔåÆ run ÔåÆ result stored)
 - [x] Issue #31: WebSocket Tests (receives events)
 - [x] Issue #32: Frontend Smoke Test (send message, receive response, show files)
 
@@ -1514,8 +1549,8 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 - [x] Output JSON report with metrics (task_success_rate, median_runtime_ms, llm_calls_per_run, etc.)
 
 ### Issue #15 — API execution layer rewrite
-- [x] Create src/intent/flow_selector.rs (Intent → Flow mapping bridge)
-- [x] Rewrite API handlers: Intent → FlowSelector → FlowRunner (FlowExecutionService handles this)
+- [x] Create src/intent/flow_selector.rs (Intent ÔåÆ Flow mapping bridge)
+- [x] Rewrite API handlers: Intent ÔåÆ FlowSelector ÔåÆ FlowRunner (FlowExecutionService handles this)
 - [x] Remove all direct LlmClient::generate() calls from API routes (no longer present)
 - [x] API and CLI produce same FinalOutput contract (FlowExecutionService produces FinalOutput)
 - [x] WebSocket events infrastructure exists and sends flow execution events to clients
@@ -1599,16 +1634,16 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 ### Issue #8 — TrustPolicy
 - [x] Add TrustLevel enum (Trusted, Local, Community, External, Untrusted)
 - [x] Add TrustPolicy struct (source, level, require_approval)
-- [x] Defaults: Built-in tools → Local, Local YAML flows → Local, Downloaded/imported tools → External, Unknown tools → Untrusted
+- [x] Defaults: Built-in tools ÔåÆ Local, Local YAML flows ÔåÆ Local, Downloaded/imported tools ÔåÆ External, Unknown tools ÔåÆ Untrusted
 - [x] Untrusted tools require approval
 - [x] Trust level appears in trace
 - [x] Trust can be listed/updated by CLI
 
 ### Issue #9 — Loop Detection
 - [x] Add LoopDetectionConfig struct (max_repeated_node, max_repeated_transition, max_repeated_tool_call)
-- [x] Same node repeated too often → stop
-- [x] Same transition cycle repeated too often → stop
-- [x] Same tool call same args too often → stop
+- [x] Same node repeated too often ÔåÆ stop
+- [x] Same transition cycle repeated too often ÔåÆ stop
+- [x] Same tool call same args too often ÔåÆ stop
 - [x] Emits LoopDetected
 
 ### Issue #10 — Guardrail Trace Events
@@ -1650,9 +1685,9 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 - [x] Implement API: create_context, get_context, update_context, add_artifact, add_decision, update_status
 
 ### Issue #3 — Context Routing
-- [x] If context_id provided → use it
-- [x] Else if active exists → reuse
-- [x] Else → create new WorkContext
+- [x] If context_id provided ÔåÆ use it
+- [x] Else if active exists ÔåÆ reuse
+- [x] Else ÔåÆ create new WorkContext
 
 ### Issue #4 — Flow Integration
 - [x] FlowExecutionService must execute_message and return FinalOutput, then apply to WorkContext
@@ -1665,16 +1700,16 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 - [x] Load context, inspect phase, pick next flow, execute, update context
 
 ### Issue #7 — Phase Controller
-- [x] No plan → Planning
-- [x] Plan exists → AwaitingApproval
-- [x] Approved → Execution
-- [x] Execution done → Review
-- [x] Review done → Iteration/Final
+- [x] No plan ÔåÆ Planning
+- [x] Plan exists ÔåÆ AwaitingApproval
+- [x] Approved ÔåÆ Execution
+- [x] Execution done ÔåÆ Review
+- [x] Review done ÔåÆ Iteration/Final
 
 ### Issue #8 — Approval Integration
-- [x] Interrupt → pause context
-- [x] Approve → resume
-- [x] Deny → Blocked
+- [x] Interrupt ÔåÆ pause context
+- [x] Approve ÔåÆ resume
+- [x] Deny ÔåÆ Blocked
 
 ### Issue #9 — Mode System
 - [x] Chat: no persistence
@@ -1697,7 +1732,7 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 - [x] Must enforce ToolPolicy, TrustPolicy, ApprovalPolicy, Budget, LoopDetection
 
 ### Issue #15 — Testing
-- [x] Required tests: create → plan → artifact created, resume → continues correctly, approval blocks execution, autonomous respects guardrails
+- [x] Required tests: create ÔåÆ plan ÔåÆ artifact created, resume ÔåÆ continues correctly, approval blocks execution, autonomous respects guardrails
 
 **Status:** v1.2 Operation - Mostly complete (14/15 fully implemented, 1/15 partially implemented)
 **Note:** API endpoints exist but some integration blocked by Axum Handler trait compatibility (see v1.2.5 for details)
@@ -1756,7 +1791,7 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 ### Phase 7 - Testing
 - [x] Issue #31: Add deterministic no-API flow test (deterministic_test.flow.yaml)
 - [x] Issue #32: Add real integration tests (tests/work_orchestrator_e2e.rs with full lifecycle tests)
-- [x] Issue #33: Add deterministic tests proving API → WorkOrchestrator → WorkExecutionService
+- [x] Issue #33: Add deterministic tests proving API ÔåÆ WorkOrchestrator ÔåÆ WorkExecutionService
 
 ### Phase 8 - Template & CLI Integration
 - [x] Issue #34: Add CLI work artifacts command
@@ -1790,12 +1825,12 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 - [x] Issue #2: Extend `WorkContextPlaybook` with `preferred_nodes: Vec<NodePreference>`, `success_patterns: Vec<PatternRecord>`, `failure_patterns: Vec<PatternRecord>`, upgrade `preferred_flows` from `Vec<String>` to `Vec<FlowPreference>`
 - [x] Issue #3: Add `get_playbook_by_user_and_domain()` to PlaybookOperations
 - [x] Issue #4: Add pattern storage (success/failure patterns) to playbook repository
-- [x] Issue #5: Implement 3-tier fallback in PlaybookResolver (user+domain → domain default → global default)
+- [x] Issue #5: Implement 3-tier fallback in PlaybookResolver (user+domain ÔåÆ domain default ÔåÆ global default)
 
 ### Phase 2 — Playbook-Aware Orchestration (EPIC 2)
 - [x] Issue #6: Inject `playbook_id` and playbook metadata into WorkContext on `submit_user_intent`
 - [x] Issue #7: Replace static flow selection with weighted selection from `playbook.preferred_flows` (weighted_random + exploration factor to avoid always picking first flow)
-- [x] Issue #8: Add `state.get_playbook()` to SharedState and condition node behavior (PlannerNode → deeper plans if research_depth high, CoderNode → stricter output if approval required, ReviewerNode → more aggressive critique if evaluation strict)
+- [x] Issue #8: Add `state.get_playbook()` to SharedState and condition node behavior (PlannerNode ÔåÆ deeper plans if research_depth high, CoderNode ÔåÆ stricter output if approval required, ReviewerNode ÔåÆ more aggressive critique if evaluation strict)
 
 ### Phase 3 — Pattern Extraction & Evolution (EPIC 3)
 - [x] Issue #9: Add `PatternRecord` extraction from completed WorkContext (revision_count, failure_reason, success signals, execution_metadata)
@@ -1812,14 +1847,14 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 - [x] Issue #16: Store evaluation result in WorkContext and expose via API/CLI
 
 ### Phase 6 — Strict Mode (EPIC 6)
-- [x] Issue #17: Add `StrictMode` config flag — missing inputs → error, missing services → error, empty outputs → error, no silent fallbacks, enforce no unwrap(), enforce no silent Option::None propagation, enforce tool idempotency checks
+- [x] Issue #17: Add `StrictMode` config flag — missing inputs ÔåÆ error, missing services ÔåÆ error, empty outputs ÔåÆ error, no silent fallbacks, enforce no unwrap(), enforce no silent Option::None propagation, enforce tool idempotency checks
 - [x] Issue #18: Enforce strict mode in FlowExecutionService and WorkExecutionService
 
 ### Phase 7 — Observability (EPIC 7)
 - [x] Issue #19: Add structured node execution logs (input/output summaries, duration, status)
 - [x] Issue #20: Add tool call logging to trace events (tool_name, args_hash, result_hash, duration)
 - [x] Issue #21: Add LLM latency as first-class trace field (provider, model, prompt_tokens, completion_tokens, latency_ms)
-- [x] Issue #22: Add hierarchical trace structure: trace_id → WorkContext → FlowRun → NodeRun
+- [x] Issue #22: Add hierarchical trace structure: trace_id ÔåÆ WorkContext ÔåÆ FlowRun ÔåÆ NodeRun
 - [x] Issue #23: (Optional) OpenTelemetry integration for trace export
 
 ### Phase 8 — Testing
@@ -1871,11 +1906,11 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 
 ### EPIC 4 — Coding Flow Template
 - [x] Issue #16: Create flows/software_dev.yaml with nodes: inspect_repo, read_context, plan, implement, apply_patch, run_tests, review
-- [x] Issue #17: Define transitions: plan → implement → apply_patch → run_tests → review
+- [x] Issue #17: Define transitions: plan ÔåÆ implement ÔåÆ apply_patch ÔåÆ run_tests ÔåÆ review
 - [x] Issue #18: Integrate software_dev.yaml with FlowSelector
 
 ### EPIC 5 — Verification Loop
-- [x] Issue #19: Modify Orchestrator to add retry loop (plan → patch → test → failure → re-plan → patch → test)
+- [x] Issue #19: Modify Orchestrator to add retry loop (plan ÔåÆ patch ÔåÆ test ÔåÆ failure ÔåÆ re-plan ÔåÆ patch ÔåÆ test)
 - [x] Issue #20: Add bounds: max_iterations = 5, max_failures = 3
 - [x] Issue #21: Integrate verification loop with WorkContext lifecycle
 
@@ -1903,7 +1938,7 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 - [x] Issue #36: Test patch_file applies valid diff
 - [x] Issue #37: Test patch_file rejects invalid diff
 - [x] Issue #38: Test run_tests returns failure correctly
-- [x] Issue #39: Test full loop: failing test → fix → pass
+- [x] Issue #39: Test full loop: failing test ÔåÆ fix ÔåÆ pass
 - [x] Issue #40: Test forbidden path rejection
 
 ### EPIC 10 — Observability
@@ -1934,7 +1969,7 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 
 ### v0.2.3 - Sidebar Design (Deprecated)
 - ~~Implement global search (Cmd/Ctrl + K)~~ (Design document, may not apply to current stack)
-- ~~Implement smart chat grouping (Project → Time)~~ (Design document, may not apply to current stack)
+- ~~Implement smart chat grouping (Project ÔåÆ Time)~~ (Design document, may not apply to current stack)
 - ~~Implement active state clarity (project and chat highlighting)~~ (Design document, may not apply to current stack)
 - ~~Implement user profile modal (preferences, settings, API keys)~~ (Design document, may not apply to current stack)
 - ~~Implement hover preview for chats~~ (Design document, may not apply to current stack)
@@ -1943,7 +1978,7 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 - [x] Issue #25: Propagate metadata from router to WorkContext execution_metadata
 - [x] Issue #29: Wire submit_intent, continue_work_context, run_until_complete to WorkOrchestrator
 - [x] Issue #30: Complete error handling consistency for WorkOrchestrator handlers
-- [x] Issue #33: Add deterministic tests proving API → WorkOrchestrator → WorkExecutionService
+- [x] Issue #33: Add deterministic tests proving API ÔåÆ WorkOrchestrator ÔåÆ WorkExecutionService
 - [x] Issue #37: Add SkillKernel for skill extraction and management
 - [x] Issue #38: Add EvolutionEngine for playbook evolution
 - [x] Issue #39: Build coding harness nodes (repo-aware nodes)
@@ -1982,13 +2017,13 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 - [x] Issue #12: Expand EvaluationResult with EvaluationDimensions (correctness, completeness, efficiency, reliability) in src/work/evaluation.rs
 - [x] Issue #13: Implement structural validation (patch validity, test pass/fail, artifact schema compliance)
 - [x] Issue #14: Implement semantic evaluation (LLM-based scoring function)
-- [x] Issue #15: Add penalization rules (high retries → penalty, failed tests → strong penalty, hallucinated output → critical penalty)
+- [x] Issue #15: Add penalization rules (high retries ÔåÆ penalty, failed tests ÔåÆ strong penalty, hallucinated output ÔåÆ critical penalty)
 - [x] Issue #16: Feed enhanced evaluation into EvolutionEngine and FlowPerformanceRecord
 
 ### EPIC 4 — Observability (Real Tracing)
 - [x] Issue #17: Create trace storage schema in SQLite (execution_traces, node_runs, tool_calls tables)
 - [x] Issue #18: Implement trace persistence (save ExecutionTrace, NodeRun, ToolCallLog to database)
-- [x] Issue #19: Ensure trace hierarchy (WorkContext → FlowRun → NodeRun → ToolCall)
+- [x] Issue #19: Ensure trace hierarchy (WorkContext ÔåÆ FlowRun ÔåÆ NodeRun ÔåÆ ToolCall)
 - [x] Issue #20: Add LLM metrics to trace (latency, token usage, model used)
 - [x] Issue #21: Integrate trace storage into RuntimeContext, FlowExecutionService, ToolRuntime
 
@@ -2000,7 +2035,7 @@ This document tracks all issues from the PRDs organized by milestone, with imple
 - [x] Issue #26: Ensure consistent context shaping across PlannerNode, CoderNode, ReviewerNode, LlmNode
 
 ### EPIC 6 — Strict Mode Hardening
-- [x] Issue #27: Enforce no silent fallback (missing inputs → error, missing memory → error, empty outputs → error, tool failure → error)
+- [x] Issue #27: Enforce no silent fallback (missing inputs ÔåÆ error, missing memory ÔåÆ error, empty outputs ÔåÆ error, tool failure ÔåÆ error)
 - [x] Issue #28: Ban unsafe patterns (no unwrap() in runtime path, no Option::None propagation)
 - [x] Issue #29: Implement idempotency check (prevent duplicate tool execution, check tool_outbox before re-run)
 - [x] Issue #30: Integrate strict mode enforcement into FlowExecutionService and WorkExecutionService
