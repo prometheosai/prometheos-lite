@@ -4,7 +4,9 @@
 //! storing flow execution performance metrics for analysis and optimization.
 
 use crate::db::Db;
-use crate::work::types::FlowPerformanceRecord;
+use crate::work::persistence::{
+    FlowPerformanceRecord, FlowPerformanceRow, decode_flow_performance, encode_flow_performance,
+};
 use anyhow::{Context, Result};
 use rusqlite::params;
 
@@ -41,6 +43,7 @@ pub trait FlowPerformanceOperations {
 impl FlowPerformanceOperations for Db {
     fn create_flow_performance(&self, record: &FlowPerformanceRecord) -> Result<()> {
         let conn = self.conn();
+        let row = encode_flow_performance(record)?;
 
         conn.execute(
             "INSERT INTO flow_performance_records (
@@ -48,14 +51,14 @@ impl FlowPerformanceOperations for Db {
                 token_cost, revision_count, executed_at
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
-                record.id,
-                record.flow_id,
-                record.work_context_id,
-                record.success_score,
-                record.duration_ms as i64,
-                record.token_cost,
-                record.revision_count as i64,
-                record.executed_at.to_rfc3339(),
+                row.id,
+                row.flow_id,
+                row.work_context_id,
+                row.success_score,
+                row.duration_ms,
+                row.token_cost,
+                row.revision_count,
+                row.executed_at,
             ],
         )
         .context("Failed to create flow performance record")?;
@@ -77,24 +80,22 @@ impl FlowPerformanceOperations for Db {
              ORDER BY executed_at DESC",
         )?;
 
-        let records = stmt
+        let rows = stmt
             .query_map(params![work_context_id], |row| {
-                Ok(FlowPerformanceRecord {
+                Ok(FlowPerformanceRow {
                     id: row.get(0)?,
                     flow_id: row.get(1)?,
                     work_context_id: row.get(2)?,
                     success_score: row.get(3)?,
-                    duration_ms: row.get::<_, i64>(4)? as u64,
+                    duration_ms: row.get(4)?,
                     token_cost: row.get(5)?,
-                    revision_count: row.get::<_, i64>(6)? as u32,
-                    executed_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(7)?)
-                        .unwrap_or_else(|_| chrono::Utc::now().into())
-                        .with_timezone(&chrono::Utc),
+                    revision_count: row.get(6)?,
+                    executed_at: row.get(7)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
 
-        Ok(records)
+        rows.into_iter().map(decode_flow_performance).collect()
     }
 
     fn get_performance_by_flow(&self, flow_id: &str) -> Result<Vec<FlowPerformanceRecord>> {
@@ -108,24 +109,22 @@ impl FlowPerformanceOperations for Db {
              ORDER BY executed_at DESC",
         )?;
 
-        let records = stmt
+        let rows = stmt
             .query_map(params![flow_id], |row| {
-                Ok(FlowPerformanceRecord {
+                Ok(FlowPerformanceRow {
                     id: row.get(0)?,
                     flow_id: row.get(1)?,
                     work_context_id: row.get(2)?,
                     success_score: row.get(3)?,
-                    duration_ms: row.get::<_, i64>(4)? as u64,
+                    duration_ms: row.get(4)?,
                     token_cost: row.get(5)?,
-                    revision_count: row.get::<_, i64>(6)? as u32,
-                    executed_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(7)?)
-                        .unwrap_or_else(|_| chrono::Utc::now().into())
-                        .with_timezone(&chrono::Utc),
+                    revision_count: row.get(6)?,
+                    executed_at: row.get(7)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
 
-        Ok(records)
+        rows.into_iter().map(decode_flow_performance).collect()
     }
 
     fn get_latest_performance(
@@ -146,18 +145,17 @@ impl FlowPerformanceOperations for Db {
         let mut rows = stmt.query(params![work_context_id])?;
 
         if let Some(row) = rows.next()? {
-            Ok(Some(FlowPerformanceRecord {
+            let row = FlowPerformanceRow {
                 id: row.get(0)?,
                 flow_id: row.get(1)?,
                 work_context_id: row.get(2)?,
                 success_score: row.get(3)?,
-                duration_ms: row.get::<_, i64>(4)? as u64,
+                duration_ms: row.get(4)?,
                 token_cost: row.get(5)?,
-                revision_count: row.get::<_, i64>(6)? as u32,
-                executed_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(7)?)
-                    .unwrap_or_else(|_| chrono::Utc::now().into())
-                    .with_timezone(&chrono::Utc),
-            }))
+                revision_count: row.get(6)?,
+                executed_at: row.get(7)?,
+            };
+            Ok(Some(decode_flow_performance(row)?))
         } else {
             Ok(None)
         }
