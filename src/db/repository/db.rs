@@ -4,6 +4,8 @@ use anyhow::Context;
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
 
+use super::migrations::ensure_column;
+
 use super::artifacts::ArtifactOperations;
 use super::conversations::ConversationOperations;
 use super::flow_runs::FlowRunOperations;
@@ -58,736 +60,7 @@ impl Db {
             anyhow::bail!("foreign_keys pragma failed to engage at startup");
         }
 
-        self.conn
-            .execute(
-                "CREATE TABLE IF NOT EXISTS projects (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )",
-                [],
-            )
-            .context("Failed to create projects table")?;
-
-        self.conn
-            .execute(
-                "CREATE TABLE IF NOT EXISTS conversations (
-                id TEXT PRIMARY KEY,
-                project_id TEXT NOT NULL,
-                title TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )",
-                [],
-            )
-            .context("Failed to create conversations table")?;
-
-        self.conn
-            .execute(
-                "CREATE TABLE IF NOT EXISTS messages (
-                id TEXT PRIMARY KEY,
-                conversation_id TEXT NOT NULL,
-                role TEXT NOT NULL,
-                content TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
-            )",
-                [],
-            )
-            .context("Failed to create messages table")?;
-
-        self.conn
-            .execute(
-                "CREATE TABLE IF NOT EXISTS flow_runs (
-                id TEXT PRIMARY KEY,
-                conversation_id TEXT NOT NULL,
-                status TEXT NOT NULL,
-                started_at TEXT NOT NULL,
-                completed_at TEXT,
-                FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
-            )",
-                [],
-            )
-            .context("Failed to create flow_runs table")?;
-
-        self.conn
-            .execute(
-                "CREATE TABLE IF NOT EXISTS artifacts (
-                id TEXT PRIMARY KEY,
-                run_id TEXT NOT NULL,
-                file_path TEXT NOT NULL,
-                content TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (run_id) REFERENCES flow_runs(id) ON DELETE CASCADE
-            )",
-                [],
-            )
-            .context("Failed to create artifacts table")?;
-
-        self.conn
-            .execute(
-                "CREATE TABLE IF NOT EXISTS interrupts (
-                id TEXT PRIMARY KEY,
-                run_id TEXT NOT NULL,
-                trace_id TEXT NOT NULL,
-                node_id TEXT NOT NULL,
-                reason TEXT NOT NULL,
-                expected_schema TEXT NOT NULL,
-                status TEXT NOT NULL,
-                decision TEXT,
-                expires_at TEXT,
-                work_context_id TEXT,
-                created_at TEXT NOT NULL
-            )",
-                [],
-            )
-            .context("Failed to create interrupts table")?;
-
-        self.conn
-            .execute(
-                "CREATE TABLE IF NOT EXISTS flow_snapshots (
-                id TEXT PRIMARY KEY,
-                flow_name TEXT NOT NULL,
-                flow_version TEXT NOT NULL,
-                source_hash TEXT NOT NULL,
-                source_text TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )",
-                [],
-            )
-            .context("Failed to create flow_snapshots table")?;
-
-        self.conn
-            .execute(
-                "CREATE TABLE IF NOT EXISTS tool_outbox (
-                id TEXT PRIMARY KEY,
-                run_id TEXT NOT NULL,
-                trace_id TEXT NOT NULL,
-                node_id TEXT NOT NULL,
-                tool_name TEXT NOT NULL,
-                input_hash TEXT NOT NULL,
-                status TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                completed_at TEXT,
-                result_json TEXT
-            )",
-                [],
-            )
-            .context("Failed to create tool_outbox table")?;
-
-        self.conn
-            .execute(
-                "CREATE TABLE IF NOT EXISTS trust_policies (
-                id TEXT PRIMARY KEY,
-                source TEXT NOT NULL UNIQUE,
-                trust_level TEXT NOT NULL,
-                require_approval INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )",
-                [],
-            )
-            .context("Failed to create trust_policies table")?;
-
-        // V1.2 WorkContext tables
-        self.conn
-            .execute(
-                "CREATE TABLE IF NOT EXISTS work_contexts (
-                id TEXT PRIMARY KEY,
-                user_id TEXT NOT NULL,
-                title TEXT NOT NULL,
-                domain TEXT NOT NULL,
-                domain_profile_id TEXT,
-                context_type TEXT NOT NULL,
-                project_id TEXT,
-                conversation_id TEXT,
-                parent_context_id TEXT,
-                priority TEXT NOT NULL,
-                due_at TEXT,
-                goal TEXT NOT NULL,
-                requirements TEXT,
-                constraints TEXT,
-                status TEXT NOT NULL,
-                current_phase TEXT NOT NULL,
-                blocked_reason TEXT,
-                plan TEXT,
-                approved_plan TEXT,
-                artifacts TEXT,
-                memory_refs TEXT,
-                decisions TEXT,
-                flow_runs TEXT,
-                tool_trace TEXT,
-                open_questions TEXT,
-                autonomy_level TEXT NOT NULL,
-                approval_policy TEXT NOT NULL,
-                summary TEXT,
-                completion_criteria TEXT,
-                last_activity_at TEXT NOT NULL,
-                metadata TEXT,
-                execution_metadata TEXT,
-                playbook_id TEXT,
-                evaluation_result TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )",
-                [],
-            )
-            .context("Failed to create work_contexts table")?;
-
-        self.conn
-            .execute(
-                "CREATE TABLE IF NOT EXISTS work_context_events (
-                seq INTEGER PRIMARY KEY AUTOINCREMENT,
-                id TEXT UNIQUE NOT NULL,
-                work_context_id TEXT NOT NULL,
-                event_type TEXT NOT NULL,
-                data TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                provenance_json TEXT,
-                source_digest TEXT,
-                run_id TEXT,
-                principal_id TEXT,
-                correlation_id TEXT,
-                FOREIGN KEY (work_context_id) REFERENCES work_contexts(id) ON DELETE CASCADE
-            )",
-                [],
-            )
-            .context("Failed to create work_context_events table")?;
-
-        // Migration (E6/I03 Slice B P1): databases created before the
-        // durable-cursor fix have `id TEXT PRIMARY KEY` with no `seq`
-        // column and an implicit rowid cursor. Rebuild the table so the
-        // cursor is an explicit `INTEGER PRIMARY KEY AUTOINCREMENT`
-        // sequence: AUTOINCREMENT advances `sqlite_sequence`, never reuses
-        // deleted maxima, and is stable across VACUUM — unlike implicit
-        // rowids on a TEXT-PK table, which VACUUM may renumber.
-        // `ALTER TABLE ... ADD COLUMN` cannot add a PRIMARY KEY, so this
-        // is a copy-and-rename migration preserving insertion order.
-        let has_seq: bool = self
-            .conn
-            .prepare(
-                "SELECT COUNT(*) FROM pragma_table_info('work_context_events') WHERE name = 'seq'",
-            )
-            .context("Failed to inspect work_context_events schema")?
-            .query_row([], |row| row.get::<_, i64>(0))
-            .map(|count| count > 0)
-            .context("Failed to inspect work_context_events schema")?;
-        if !has_seq {
-            // Backfill must preserve every legacy row, including any event
-            // whose parent context row is absent (foreign-key enforcement
-            // varies by environment: the `bundled` rusqlite build enforces
-            // FKs, so a plain INSERT...SELECT would fail the migration on
-            // orphans instead of preserving them). Disable enforcement for
-            // the copy and restore the previous setting afterwards.
-            let fk_on: i64 = self
-                .conn
-                .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
-                .context("Failed to read foreign_keys pragma")?;
-            // Deterministic retry cleanup: any prior failed run may have
-            // left a straggler `_new` table; drop it before retrying the
-            // copy so the retry is non-retryable-state-free.
-            self.conn
-                .execute("DROP TABLE IF EXISTS work_context_events_new", [])
-                .context("Failed to drop prior migration attempt's work_context_events_new")?;
-            if fk_on != 0 {
-                self.conn
-                    .execute("PRAGMA foreign_keys=OFF", [])
-                    .context("Failed to suspend foreign_keys pragma")?;
-            }
-            // Atomic migration: a rusqlite transaction wraps
-            // create/copy/drop/rename. On error the transaction object's
-            // Drop issues ROLLBACK, so a failed migration leaves the
-            // original table fully intact (never an empty table) and the
-            // whole attempt is safely retryable. FK pragma changes are
-            // no-ops inside a transaction per SQLite, so the suspension
-            // above and the restoration below both happen outside it.
-            let migration_result = (|| -> rusqlite::Result<()> {
-                let tx = self.conn.unchecked_transaction()?;
-                tx.execute_batch(
-                    "CREATE TABLE work_context_events_new (
-                         seq INTEGER PRIMARY KEY AUTOINCREMENT,
-                         id TEXT UNIQUE NOT NULL,
-                         work_context_id TEXT NOT NULL,
-                         event_type TEXT NOT NULL,
-                         data TEXT NOT NULL,
-                         created_at TEXT NOT NULL,
-                         FOREIGN KEY (work_context_id) REFERENCES work_contexts(id) ON DELETE CASCADE
-                     );
-                     INSERT INTO work_context_events_new
-                         (id, work_context_id, event_type, data, created_at)
-                         SELECT id, work_context_id, event_type, data, created_at
-                         FROM work_context_events ORDER BY rowid ASC;
-                     DROP TABLE work_context_events;
-                     ALTER TABLE work_context_events_new RENAME TO work_context_events;",
-                )?;
-                tx.commit()
-            })();
-            // Guaranteed pragma restoration: runs unconditionally, on every
-            // success AND failure path, before any error is propagated. The
-            // FK setting never leaks out of a failed migration.
-            let restore_result = if fk_on != 0 {
-                Some(
-                    self.conn
-                        .execute("PRAGMA foreign_keys=ON", [])
-                        .context("Failed to restore foreign_keys pragma"),
-                )
-            } else {
-                None
-            };
-            migration_result.context("work_context_events migration failed")?;
-            if let Some(restore) = restore_result {
-                restore?;
-            }
-        }
-        self.conn
-            .execute(
-                "CREATE INDEX IF NOT EXISTS idx_work_context_events_context_seq
-                 ON work_context_events(work_context_id, seq)",
-                [],
-            )
-            .context("Failed to create work_context_events(seq) index")?;
-
-        // Slice 1A (#132): durable provenance columns. Additive and
-        // nullable: legacy rows keep their honest NULLs (the read model
-        // surfaces them as `LegacyUnverified`); the database triggers
-        // below enforce complete provenance for NEW writes. Idempotent:
-        // each column is checked and added only when missing, so a
-        // partially migrated database converges on re-run.
-        for (column, ddl_type) in [
-            ("provenance_json", "TEXT"),
-            ("source_digest", "TEXT"),
-            ("run_id", "TEXT"),
-            ("principal_id", "TEXT"),
-            ("correlation_id", "TEXT"),
-        ] {
-            let has_column: bool = self
-                .conn
-                .prepare(
-                    "SELECT COUNT(*) FROM pragma_table_info('work_context_events') WHERE name = ?1",
-                )
-                .context("Failed to inspect work_context_events schema")?
-                .query_row([column], |row| row.get::<_, i64>(0))
-                .map(|count| count > 0)
-                .context("Failed to inspect work_context_events schema")?;
-            if !has_column {
-                self.conn
-                    .execute(
-                        &format!("ALTER TABLE work_context_events ADD COLUMN {column} {ddl_type}"),
-                        [],
-                    )
-                    .with_context(|| {
-                        format!("Failed to add work_context_events({column}) provenance column")
-                    })?;
-            }
-        }
-
-        // Query keys over the flat identity columns (the columns are
-        // derived from the envelope at write time and must match it —
-        // enforced by the single writer path plus tests).
-        self.conn
-            .execute(
-                "CREATE INDEX IF NOT EXISTS idx_work_context_events_run_id
-                 ON work_context_events(run_id)",
-                [],
-            )
-            .context("Failed to create work_context_events(run_id) index")?;
-        self.conn
-            .execute(
-                "CREATE INDEX IF NOT EXISTS idx_work_context_events_principal_id
-                 ON work_context_events(principal_id)",
-                [],
-            )
-            .context("Failed to create work_context_events(principal_id) index")?;
-        self.conn
-            .execute(
-                "CREATE INDEX IF NOT EXISTS idx_work_context_events_correlation_id
-                 ON work_context_events(correlation_id)",
-                [],
-            )
-            .context("Failed to create work_context_events(correlation_id) index")?;
-
-        // Database-boundary enforcement (Slice 1A): new inserts MUST
-        // carry complete provenance — a NULL envelope, source digest, run
-        // identity, or correlation aborts at the database, not only in
-        // Rust. `principal_id` is deliberately not enforced: an honestly
-        // absent principal is a NULL column that matches the envelope.
-        // Legacy rows are unaffected: triggers bind new writes, never
-        // history.
-        // #232 finding 4: upgrade the provenance trigger to the
-        // strengthened version — but ONLY when the current trigger lacks
-        // the json_extract checks (detected by inspecting its SQL). On
-        // already-upgraded databases this is a no-op that needs no
-        // write lock, so concurrent connections are unaffected.
-        let trigger_sql: Option<String> = self
-            .conn
-            .query_row(
-                "SELECT sql FROM sqlite_master
-                 WHERE type = 'trigger' AND name = 'work_context_events_provenance_required'",
-                [],
-                |r| r.get(0),
-            )
-            .optional()
-            .context("Failed to inspect provenance trigger")?;
-        // #232 P1: exact version-marker detection — the trigger SQL
-        // embeds a `provenance-trigger-v<N>` marker. The upgrade fires
-        // ONLY when the marker is absent or a different version. This is
-        // immune to partial-marker false positives (three separate
-        // string checks could all be present in an incomplete trigger).
-        let provenance_trigger_version = "provenance-trigger-v3";
-        let needs_upgrade = match trigger_sql {
-            Some(sql) => !sql.contains(provenance_trigger_version),
-            None => true, // trigger doesn't exist — create it
-        };
-        if needs_upgrade {
-            self.conn
-                .execute(
-                    "DROP TRIGGER IF EXISTS work_context_events_provenance_required",
-                    [],
-                )
-                .context("Failed to drop prior provenance trigger for upgrade")?;
-
-            self.conn
-                .execute(
-                    "CREATE TRIGGER work_context_events_provenance_required
-                     -- provenance-trigger-v3
-                     BEFORE INSERT ON work_context_events
-                     WHEN NEW.provenance_json IS NULL
-                       OR NEW.source_digest IS NULL
-                       OR NEW.run_id IS NULL
-                       OR NEW.correlation_id IS NULL
-                       OR json_valid(NEW.provenance_json) = 0
-                       OR json_extract(NEW.provenance_json, '$.schemaVersion') != '1.0.0'
-                       OR json_extract(NEW.provenance_json, '$.run.requestId') IS NULL
-                       OR json_extract(NEW.provenance_json, '$.run.requestId') = ''
-                       OR json_extract(NEW.provenance_json, '$.causation.correlationId') IS NULL
-                       OR json_extract(NEW.provenance_json, '$.causation.correlationId') = ''
-                       OR json_extract(NEW.provenance_json, '$.producer.identity') IS NULL
-                       OR json_extract(NEW.provenance_json, '$.producer.identity') = ''
-                       OR length(NEW.source_digest) != 64
-                       OR NEW.source_digest GLOB '*[^0-9a-f]*'
-                       OR length(NEW.run_id) = 0
-                       OR length(NEW.correlation_id) = 0
-                       OR NEW.run_id != COALESCE(
-                           json_extract(NEW.provenance_json, '$.run.workRunId'),
-                           json_extract(NEW.provenance_json, '$.run.graphRunId'),
-                           json_extract(NEW.provenance_json, '$.run.requestId'))
-                       OR NEW.correlation_id != COALESCE(
-                           json_extract(NEW.provenance_json, '$.run.workRunId'),
-                           json_extract(NEW.provenance_json, '$.run.requestId'))
-                       OR (NEW.principal_id IS NOT NULL
-                           AND json_extract(NEW.provenance_json, '$.principal.human.identity') != NEW.principal_id)
-                       OR (NEW.principal_id IS NULL
-                           AND json_extract(NEW.provenance_json, '$.principal.human.identity') IS NOT NULL)
-                     BEGIN
-                         SELECT RAISE(ABORT, 'journal insert requires complete, well-formed provenance');
-                     END",
-                    [],
-                )
-                .context("Failed to create work_context_events provenance trigger")?;
-        }
-
-        // Entire journal rows are append-only: no UPDATE may modify any
-        // journal row, provenance included — a tampered or rewritten
-        // record is refused at the database boundary.
-        self.conn
-            .execute(
-                "CREATE TRIGGER IF NOT EXISTS work_context_events_append_only
-                 BEFORE UPDATE ON work_context_events
-                 BEGIN
-                     SELECT RAISE(ABORT, 'journal rows are append-only');
-                 END",
-                [],
-            )
-            .context("Failed to create work_context_events append-only trigger")?;
-
-        self.conn
-            .execute(
-                "CREATE TABLE IF NOT EXISTS harness_run_metrics (
-                work_context_id TEXT NOT NULL,
-                run_id TEXT NOT NULL,
-                trace_summary TEXT NOT NULL,
-                token_usage TEXT NOT NULL,
-                quality_metrics TEXT NOT NULL,
-                trajectory TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                PRIMARY KEY (work_context_id, run_id),
-                FOREIGN KEY (work_context_id) REFERENCES work_contexts(id) ON DELETE CASCADE
-            )",
-                [],
-            )
-            .context("Failed to create harness_run_metrics table")?;
-
-        self.conn
-            .execute(
-                "CREATE TABLE IF NOT EXISTS graph_checkpoints (
-                work_context_id TEXT NOT NULL,
-                graph_run_id TEXT NOT NULL,
-                checkpoint_json TEXT NOT NULL,
-                checkpoint_digest TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                PRIMARY KEY (work_context_id, graph_run_id),
-                FOREIGN KEY (work_context_id) REFERENCES work_contexts(id) ON DELETE CASCADE
-            )",
-                [],
-            )
-            .context("Failed to create graph_checkpoints table")?;
-
-        self.conn
-            .execute(
-                "CREATE TABLE IF NOT EXISTS conversation_work_contexts (
-                conversation_id TEXT NOT NULL,
-                work_context_id TEXT NOT NULL,
-                is_active INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
-                FOREIGN KEY (work_context_id) REFERENCES work_contexts(id) ON DELETE CASCADE,
-                PRIMARY KEY (conversation_id, work_context_id)
-            )",
-                [],
-            )
-            .context("Failed to create conversation_work_contexts table")?;
-
-        self.conn
-            .execute(
-                "CREATE TABLE IF NOT EXISTS work_artifacts (
-                id TEXT PRIMARY KEY,
-                work_context_id TEXT NOT NULL,
-                kind TEXT NOT NULL,
-                name TEXT NOT NULL,
-                content TEXT NOT NULL,
-                created_by TEXT NOT NULL,
-                storage_type TEXT NOT NULL,
-                file_path TEXT,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (work_context_id) REFERENCES work_contexts(id) ON DELETE CASCADE
-            )",
-                [],
-            )
-            .context("Failed to create work_artifacts table")?;
-
-        self.conn
-            .execute(
-                "CREATE TABLE IF NOT EXISTS decisions (
-                id TEXT PRIMARY KEY,
-                work_context_id TEXT,
-                description TEXT NOT NULL,
-                chosen_option TEXT NOT NULL,
-                alternatives TEXT NOT NULL,
-                approved INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (work_context_id) REFERENCES work_contexts(id) ON DELETE CASCADE
-            )",
-                [],
-            )
-            .context("Failed to create decisions table")?;
-
-        self.conn
-            .execute(
-                "CREATE TABLE IF NOT EXISTS execution_plans (
-                work_context_id TEXT PRIMARY KEY,
-                steps_json TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                FOREIGN KEY (work_context_id) REFERENCES work_contexts(id) ON DELETE CASCADE
-            )",
-                [],
-            )
-            .context("Failed to create execution_plans table")?;
-
-        self.conn
-            .execute(
-                "CREATE TABLE IF NOT EXISTS work_domain_profiles (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                parent_domain TEXT,
-                default_flows TEXT NOT NULL,
-                artifact_kinds TEXT NOT NULL,
-                approval_defaults TEXT NOT NULL,
-                lifecycle_template_json TEXT NOT NULL
-            )",
-                [],
-            )
-            .context("Failed to create work_domain_profiles table")?;
-
-        self.conn
-            .execute(
-                "CREATE TABLE IF NOT EXISTS work_context_playbooks (
-                id TEXT PRIMARY KEY,
-                user_id TEXT NOT NULL,
-                domain_profile_id TEXT NOT NULL,
-                name TEXT NOT NULL,
-                description TEXT NOT NULL,
-                preferred_flows TEXT NOT NULL,
-                preferred_nodes TEXT NOT NULL,
-                default_approval_policy TEXT NOT NULL,
-                default_research_depth TEXT NOT NULL,
-                default_creativity_level TEXT NOT NULL,
-                evaluation_rules TEXT NOT NULL,
-                success_patterns TEXT NOT NULL,
-                failure_patterns TEXT NOT NULL,
-                confidence REAL NOT NULL,
-                usage_count INTEGER NOT NULL,
-                updated_at TEXT NOT NULL
-            )",
-                [],
-            )
-            .context("Failed to create work_context_playbooks table")?;
-
-        // Migration: Add new columns if they don't exist (for existing databases)
-        self.conn
-            .execute(
-                "ALTER TABLE work_context_playbooks ADD COLUMN preferred_nodes TEXT",
-                [],
-            )
-            .ok(); // Ignore error if column already exists
-
-        self.conn
-            .execute(
-                "ALTER TABLE work_context_playbooks ADD COLUMN success_patterns TEXT",
-                [],
-            )
-            .ok(); // Ignore error if column already exists
-
-        self.conn
-            .execute(
-                "ALTER TABLE work_context_playbooks ADD COLUMN failure_patterns TEXT",
-                [],
-            )
-            .ok(); // Ignore error if column already exists
-
-        self.conn
-            .execute(
-                "CREATE TABLE IF NOT EXISTS playbook_usage_log (
-                id TEXT PRIMARY KEY,
-                playbook_id TEXT NOT NULL,
-                work_context_id TEXT NOT NULL,
-                user_id TEXT NOT NULL,
-                domain TEXT NOT NULL,
-                outcome TEXT NOT NULL,
-                used_at TEXT NOT NULL,
-                FOREIGN KEY (playbook_id) REFERENCES work_context_playbooks(id) ON DELETE CASCADE,
-                FOREIGN KEY (work_context_id) REFERENCES work_contexts(id) ON DELETE CASCADE
-            )",
-                [],
-            )
-            .context("Failed to create playbook_usage_log table")?;
-
-        // V1.5.2: Flow performance records table
-        self.conn
-            .execute(
-                "CREATE TABLE IF NOT EXISTS flow_performance_records (
-                id TEXT PRIMARY KEY,
-                flow_id TEXT NOT NULL,
-                work_context_id TEXT NOT NULL,
-                success_score REAL NOT NULL,
-                duration_ms INTEGER NOT NULL,
-                token_cost REAL NOT NULL,
-                revision_count INTEGER NOT NULL,
-                executed_at TEXT NOT NULL,
-                FOREIGN KEY (work_context_id) REFERENCES work_contexts(id) ON DELETE CASCADE
-            )",
-                [],
-            )
-            .context("Failed to create flow_performance_records table")?;
-
-        // Create index for efficient queries by work_context_id
-        self.conn
-            .execute(
-                "CREATE INDEX IF NOT EXISTS idx_flow_perf_work_context 
-                 ON flow_performance_records(work_context_id)",
-                [],
-            )
-            .ok(); // Ignore if already exists
-
-        // Create index for efficient queries by flow_id
-        self.conn
-            .execute(
-                "CREATE INDEX IF NOT EXISTS idx_flow_perf_flow_id 
-                 ON flow_performance_records(flow_id)",
-                [],
-            )
-            .ok(); // Ignore if already exists
-
-        // V1.5.2: Skills table for control panel metrics
-        self.conn
-            .execute(
-                "CREATE TABLE IF NOT EXISTS skills (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                description TEXT NOT NULL,
-                capability_signature TEXT NOT NULL,
-                success_rate REAL NOT NULL,
-                avg_duration_ms INTEGER NOT NULL,
-                usage_count INTEGER NOT NULL DEFAULT 0,
-                tags TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )",
-                [],
-            )
-            .context("Failed to create skills table")?;
-
-        // V1.5.2: Playbook evolutions table for control panel metrics
-        self.conn
-            .execute(
-                "CREATE TABLE IF NOT EXISTS playbook_evolutions (
-                id TEXT PRIMARY KEY,
-                playbook_id TEXT NOT NULL,
-                version INTEGER NOT NULL,
-                parent_version INTEGER,
-                mutation_strategy TEXT NOT NULL,
-                performance TEXT NOT NULL DEFAULT '{}',
-                performance_score REAL NOT NULL DEFAULT 0.0,
-                execution_count INTEGER NOT NULL DEFAULT 0,
-                success_rate REAL NOT NULL DEFAULT 0.0,
-                avg_duration_ms INTEGER NOT NULL DEFAULT 0,
-                success_count INTEGER NOT NULL DEFAULT 0,
-                failure_count INTEGER NOT NULL DEFAULT 0,
-                status TEXT NOT NULL DEFAULT 'testing',
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL DEFAULT '',
-                FOREIGN KEY (playbook_id) REFERENCES work_context_playbooks(id) ON DELETE CASCADE
-            )",
-                [],
-            )
-            .context("Failed to create playbook_evolutions table")?;
-
-        // Backward-compatible schema migration for existing databases.
-        let _ = self.conn.execute(
-            "ALTER TABLE playbook_evolutions ADD COLUMN performance TEXT NOT NULL DEFAULT '{}'",
-            [],
-        );
-        let _ = self.conn.execute(
-            "ALTER TABLE playbook_evolutions ADD COLUMN execution_count INTEGER NOT NULL DEFAULT 0",
-            [],
-        );
-        let _ = self.conn.execute(
-            "ALTER TABLE playbook_evolutions ADD COLUMN success_rate REAL NOT NULL DEFAULT 0.0",
-            [],
-        );
-        let _ = self.conn.execute(
-            "ALTER TABLE playbook_evolutions ADD COLUMN avg_duration_ms INTEGER NOT NULL DEFAULT 0",
-            [],
-        );
-        let _ = self.conn.execute(
-            "ALTER TABLE playbook_evolutions ADD COLUMN status TEXT NOT NULL DEFAULT 'testing'",
-            [],
-        );
-        let _ = self.conn.execute(
-            "ALTER TABLE playbook_evolutions ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''",
-            [],
-        );
-
-        // Create index for efficient queries by playbook_id
-        self.conn
-            .execute(
-                "CREATE INDEX IF NOT EXISTS idx_evolutions_playbook_id 
-                 ON playbook_evolutions(playbook_id)",
-                [],
-            )
-            .ok(); // Ignore if already exists
-
+        super::migrations::migrate(&self.conn)?;
         Ok(())
     }
 
@@ -869,3 +142,690 @@ impl Repository for Db {
 
 // Outbox and interrupt operations are available via trait implementations
 // on Db (which implements AsDb)
+
+/// Migration step moved verbatim from the historical `Db::init_schema`
+/// inline sequence; see `db/repository/migrations.rs` for the lifecycle.
+pub(crate) fn migrate_baseline_schema(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS projects (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )",
+        [],
+    )
+    .context("Failed to create projects table")?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS conversations (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )",
+        [],
+    )
+    .context("Failed to create conversations table")?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS messages (
+                id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+            )",
+        [],
+    )
+    .context("Failed to create messages table")?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS flow_runs (
+                id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                completed_at TEXT,
+                FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+            )",
+        [],
+    )
+    .context("Failed to create flow_runs table")?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS artifacts (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (run_id) REFERENCES flow_runs(id) ON DELETE CASCADE
+            )",
+        [],
+    )
+    .context("Failed to create artifacts table")?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS interrupts (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                trace_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                expected_schema TEXT NOT NULL,
+                status TEXT NOT NULL,
+                decision TEXT,
+                expires_at TEXT,
+                work_context_id TEXT,
+                created_at TEXT NOT NULL
+            )",
+        [],
+    )
+    .context("Failed to create interrupts table")?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS flow_snapshots (
+                id TEXT PRIMARY KEY,
+                flow_name TEXT NOT NULL,
+                flow_version TEXT NOT NULL,
+                source_hash TEXT NOT NULL,
+                source_text TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )",
+        [],
+    )
+    .context("Failed to create flow_snapshots table")?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS tool_outbox (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                trace_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
+                tool_name TEXT NOT NULL,
+                input_hash TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                completed_at TEXT,
+                result_json TEXT
+            )",
+        [],
+    )
+    .context("Failed to create tool_outbox table")?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS trust_policies (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL UNIQUE,
+                trust_level TEXT NOT NULL,
+                require_approval INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )",
+        [],
+    )
+    .context("Failed to create trust_policies table")?;
+
+    // V1.2 WorkContext tables
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS work_contexts (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                domain TEXT NOT NULL,
+                domain_profile_id TEXT,
+                context_type TEXT NOT NULL,
+                project_id TEXT,
+                conversation_id TEXT,
+                parent_context_id TEXT,
+                priority TEXT NOT NULL,
+                due_at TEXT,
+                goal TEXT NOT NULL,
+                requirements TEXT,
+                constraints TEXT,
+                status TEXT NOT NULL,
+                current_phase TEXT NOT NULL,
+                blocked_reason TEXT,
+                plan TEXT,
+                approved_plan TEXT,
+                artifacts TEXT,
+                memory_refs TEXT,
+                decisions TEXT,
+                flow_runs TEXT,
+                tool_trace TEXT,
+                open_questions TEXT,
+                autonomy_level TEXT NOT NULL,
+                approval_policy TEXT NOT NULL,
+                summary TEXT,
+                completion_criteria TEXT,
+                last_activity_at TEXT NOT NULL,
+                metadata TEXT,
+                execution_metadata TEXT,
+                playbook_id TEXT,
+                evaluation_result TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )",
+        [],
+    )
+    .context("Failed to create work_contexts table")?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS work_context_events (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                id TEXT UNIQUE NOT NULL,
+                work_context_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                data TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                provenance_json TEXT,
+                source_digest TEXT,
+                run_id TEXT,
+                principal_id TEXT,
+                correlation_id TEXT,
+                FOREIGN KEY (work_context_id) REFERENCES work_contexts(id) ON DELETE CASCADE
+            )",
+        [],
+    )
+    .context("Failed to create work_context_events table")?;
+
+    Ok(())
+}
+
+/// Migration step moved verbatim from the historical `Db::init_schema`
+/// inline sequence; see `db/repository/migrations.rs` for the lifecycle.
+pub(crate) fn migrate_work_context_events_seq(conn: &Connection) -> anyhow::Result<()> {
+    // Migration (E6/I03 Slice B P1): databases created before the
+    // durable-cursor fix have `id TEXT PRIMARY KEY` with no `seq`
+    // column and an implicit rowid cursor. Rebuild the table so the
+    // cursor is an explicit `INTEGER PRIMARY KEY AUTOINCREMENT`
+    // sequence: AUTOINCREMENT advances `sqlite_sequence`, never reuses
+    // deleted maxima, and is stable across VACUUM — unlike implicit
+    // rowids on a TEXT-PK table, which VACUUM may renumber.
+    // `ALTER TABLE ... ADD COLUMN` cannot add a PRIMARY KEY, so this
+    // is a copy-and-rename migration preserving insertion order.
+    let has_seq: bool = conn
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('work_context_events') WHERE name = 'seq'")
+        .context("Failed to inspect work_context_events schema")?
+        .query_row([], |row| row.get::<_, i64>(0))
+        .map(|count| count > 0)
+        .context("Failed to inspect work_context_events schema")?;
+    if !has_seq {
+        // Backfill must preserve every legacy row, including any event
+        // whose parent context row is absent. The runner suspends the
+        // foreign_keys pragma around this step's transaction and drops a
+        // straggler `_new` before opening it (SQLite ignores the pragma
+        // inside a transaction), so orphaned events copy cleanly and the
+        // retried copy always starts from a clean slate. The runner's
+        // transaction also wraps the schema_migrations record, so the
+        // rebuild and its ledger entry commit atomically; on error the
+        // original table is left intact.
+        conn.execute_batch(
+            "CREATE TABLE work_context_events_new (
+                 seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                 id TEXT UNIQUE NOT NULL,
+                 work_context_id TEXT NOT NULL,
+                 event_type TEXT NOT NULL,
+                 data TEXT NOT NULL,
+                 created_at TEXT NOT NULL,
+                 FOREIGN KEY (work_context_id) REFERENCES work_contexts(id) ON DELETE CASCADE
+             );
+             INSERT INTO work_context_events_new
+                 (id, work_context_id, event_type, data, created_at)
+                 SELECT id, work_context_id, event_type, data, created_at
+                 FROM work_context_events ORDER BY rowid ASC;
+             DROP TABLE work_context_events;
+             ALTER TABLE work_context_events_new RENAME TO work_context_events;",
+        )
+        .context("work_context_events migration failed")?;
+    }
+    Ok(())
+}
+
+/// Migration step moved verbatim from the historical `Db::init_schema`
+/// inline sequence; see `db/repository/migrations.rs` for the lifecycle.
+pub(crate) fn migrate_provenance_columns(conn: &Connection) -> anyhow::Result<()> {
+    // Slice 1A (#132): durable provenance columns. Additive and
+    // nullable: legacy rows keep their honest NULLs (the read model
+    // surfaces them as `LegacyUnverified`); the database triggers
+    // below enforce complete provenance for NEW writes. Idempotent:
+    // each column is checked and added only when missing, so a
+    // partially migrated database converges on re-run.
+    for (column, ddl_type) in [
+        ("provenance_json", "TEXT"),
+        ("source_digest", "TEXT"),
+        ("run_id", "TEXT"),
+        ("principal_id", "TEXT"),
+        ("correlation_id", "TEXT"),
+    ] {
+        let has_column: bool = conn
+            .prepare(
+                "SELECT COUNT(*) FROM pragma_table_info('work_context_events') WHERE name = ?1",
+            )
+            .context("Failed to inspect work_context_events schema")?
+            .query_row([column], |row| row.get::<_, i64>(0))
+            .map(|count| count > 0)
+            .context("Failed to inspect work_context_events schema")?;
+        if !has_column {
+            conn.execute(
+                &format!("ALTER TABLE work_context_events ADD COLUMN {column} {ddl_type}"),
+                [],
+            )
+            .with_context(|| {
+                format!("Failed to add work_context_events({column}) provenance column")
+            })?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Migration step moved verbatim from the historical `Db::init_schema`
+/// inline sequence; see `db/repository/migrations.rs` for the lifecycle.
+pub(crate) fn migrate_events_indexes(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_work_context_events_context_seq
+                 ON work_context_events(work_context_id, seq)",
+        [],
+    )
+    .context("Failed to create work_context_events(seq) index")?;
+
+    // Query keys over the flat identity columns (the columns are
+    // derived from the envelope at write time and must match it —
+    // enforced by the single writer path plus tests).
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_work_context_events_run_id
+                 ON work_context_events(run_id)",
+        [],
+    )
+    .context("Failed to create work_context_events(run_id) index")?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_work_context_events_principal_id
+                 ON work_context_events(principal_id)",
+        [],
+    )
+    .context("Failed to create work_context_events(principal_id) index")?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_work_context_events_correlation_id
+                 ON work_context_events(correlation_id)",
+        [],
+    )
+    .context("Failed to create work_context_events(correlation_id) index")?;
+
+    Ok(())
+}
+
+/// Migration step moved verbatim from the historical `Db::init_schema`
+/// inline sequence; see `db/repository/migrations.rs` for the lifecycle.
+pub(crate) fn migrate_events_triggers(conn: &Connection) -> anyhow::Result<()> {
+    // Database-boundary enforcement (Slice 1A): new inserts MUST
+    // carry complete provenance — a NULL envelope, source digest, run
+    // identity, or correlation aborts at the database, not only in
+    // Rust. `principal_id` is deliberately not enforced: an honestly
+    // absent principal is a NULL column that matches the envelope.
+    // Legacy rows are unaffected: triggers bind new writes, never
+    // history.
+    // #232 finding 4: upgrade the provenance trigger to the
+    // strengthened version — but ONLY when the current trigger lacks
+    // the json_extract checks (detected by inspecting its SQL). On
+    // already-upgraded databases this is a no-op that needs no
+    // write lock, so concurrent connections are unaffected.
+    let trigger_sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master
+                 WHERE type = 'trigger' AND name = 'work_context_events_provenance_required'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()
+        .context("Failed to inspect provenance trigger")?;
+    // #232 P1: exact version-marker detection — the trigger SQL
+    // embeds a `provenance-trigger-v<N>` marker. The upgrade fires
+    // ONLY when the marker is absent or a different version. This is
+    // immune to partial-marker false positives (three separate
+    // string checks could all be present in an incomplete trigger).
+    let provenance_trigger_version = "provenance-trigger-v3";
+    let needs_upgrade = match trigger_sql {
+        Some(sql) => !sql.contains(provenance_trigger_version),
+        None => true, // trigger doesn't exist — create it
+    };
+    if needs_upgrade {
+        conn.execute(
+            "DROP TRIGGER IF EXISTS work_context_events_provenance_required",
+            [],
+        )
+        .context("Failed to drop prior provenance trigger for upgrade")?;
+
+        conn
+                .execute(
+                    "CREATE TRIGGER work_context_events_provenance_required
+                     -- provenance-trigger-v3
+                     BEFORE INSERT ON work_context_events
+                     WHEN NEW.provenance_json IS NULL
+                       OR NEW.source_digest IS NULL
+                       OR NEW.run_id IS NULL
+                       OR NEW.correlation_id IS NULL
+                       OR json_valid(NEW.provenance_json) = 0
+                       OR json_extract(NEW.provenance_json, '$.schemaVersion') != '1.0.0'
+                       OR json_extract(NEW.provenance_json, '$.run.requestId') IS NULL
+                       OR json_extract(NEW.provenance_json, '$.run.requestId') = ''
+                       OR json_extract(NEW.provenance_json, '$.causation.correlationId') IS NULL
+                       OR json_extract(NEW.provenance_json, '$.causation.correlationId') = ''
+                       OR json_extract(NEW.provenance_json, '$.producer.identity') IS NULL
+                       OR json_extract(NEW.provenance_json, '$.producer.identity') = ''
+                       OR length(NEW.source_digest) != 64
+                       OR NEW.source_digest GLOB '*[^0-9a-f]*'
+                       OR length(NEW.run_id) = 0
+                       OR length(NEW.correlation_id) = 0
+                       OR NEW.run_id != COALESCE(
+                           json_extract(NEW.provenance_json, '$.run.workRunId'),
+                           json_extract(NEW.provenance_json, '$.run.graphRunId'),
+                           json_extract(NEW.provenance_json, '$.run.requestId'))
+                       OR NEW.correlation_id != COALESCE(
+                           json_extract(NEW.provenance_json, '$.run.workRunId'),
+                           json_extract(NEW.provenance_json, '$.run.requestId'))
+                       OR (NEW.principal_id IS NOT NULL
+                           AND json_extract(NEW.provenance_json, '$.principal.human.identity') != NEW.principal_id)
+                       OR (NEW.principal_id IS NULL
+                           AND json_extract(NEW.provenance_json, '$.principal.human.identity') IS NOT NULL)
+                     BEGIN
+                         SELECT RAISE(ABORT, 'journal insert requires complete, well-formed provenance');
+                     END",
+                    [],
+                )
+                .context("Failed to create work_context_events provenance trigger")?;
+    }
+
+    // Entire journal rows are append-only: no UPDATE may modify any
+    // journal row, provenance included — a tampered or rewritten
+    // record is refused at the database boundary.
+    conn.execute(
+        "CREATE TRIGGER IF NOT EXISTS work_context_events_append_only
+                 BEFORE UPDATE ON work_context_events
+                 BEGIN
+                     SELECT RAISE(ABORT, 'journal rows are append-only');
+                 END",
+        [],
+    )
+    .context("Failed to create work_context_events append-only trigger")?;
+
+    Ok(())
+}
+
+/// Migration step moved verbatim from the historical `Db::init_schema`
+/// inline sequence; see `db/repository/migrations.rs` for the lifecycle.
+pub(crate) fn migrate_compatibility_schema(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS harness_run_metrics (
+                work_context_id TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                trace_summary TEXT NOT NULL,
+                token_usage TEXT NOT NULL,
+                quality_metrics TEXT NOT NULL,
+                trajectory TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (work_context_id, run_id),
+                FOREIGN KEY (work_context_id) REFERENCES work_contexts(id) ON DELETE CASCADE
+            )",
+        [],
+    )
+    .context("Failed to create harness_run_metrics table")?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS graph_checkpoints (
+                work_context_id TEXT NOT NULL,
+                graph_run_id TEXT NOT NULL,
+                checkpoint_json TEXT NOT NULL,
+                checkpoint_digest TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (work_context_id, graph_run_id),
+                FOREIGN KEY (work_context_id) REFERENCES work_contexts(id) ON DELETE CASCADE
+            )",
+        [],
+    )
+    .context("Failed to create graph_checkpoints table")?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS conversation_work_contexts (
+                conversation_id TEXT NOT NULL,
+                work_context_id TEXT NOT NULL,
+                is_active INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+                FOREIGN KEY (work_context_id) REFERENCES work_contexts(id) ON DELETE CASCADE,
+                PRIMARY KEY (conversation_id, work_context_id)
+            )",
+        [],
+    )
+    .context("Failed to create conversation_work_contexts table")?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS work_artifacts (
+                id TEXT PRIMARY KEY,
+                work_context_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                name TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_by TEXT NOT NULL,
+                storage_type TEXT NOT NULL,
+                file_path TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (work_context_id) REFERENCES work_contexts(id) ON DELETE CASCADE
+            )",
+        [],
+    )
+    .context("Failed to create work_artifacts table")?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS decisions (
+                id TEXT PRIMARY KEY,
+                work_context_id TEXT,
+                description TEXT NOT NULL,
+                chosen_option TEXT NOT NULL,
+                alternatives TEXT NOT NULL,
+                approved INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (work_context_id) REFERENCES work_contexts(id) ON DELETE CASCADE
+            )",
+        [],
+    )
+    .context("Failed to create decisions table")?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS execution_plans (
+                work_context_id TEXT PRIMARY KEY,
+                steps_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (work_context_id) REFERENCES work_contexts(id) ON DELETE CASCADE
+            )",
+        [],
+    )
+    .context("Failed to create execution_plans table")?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS work_domain_profiles (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                parent_domain TEXT,
+                default_flows TEXT NOT NULL,
+                artifact_kinds TEXT NOT NULL,
+                approval_defaults TEXT NOT NULL,
+                lifecycle_template_json TEXT NOT NULL
+            )",
+        [],
+    )
+    .context("Failed to create work_domain_profiles table")?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS work_context_playbooks (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                domain_profile_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL,
+                preferred_flows TEXT NOT NULL,
+                preferred_nodes TEXT NOT NULL,
+                default_approval_policy TEXT NOT NULL,
+                default_research_depth TEXT NOT NULL,
+                default_creativity_level TEXT NOT NULL,
+                evaluation_rules TEXT NOT NULL,
+                success_patterns TEXT NOT NULL,
+                failure_patterns TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                usage_count INTEGER NOT NULL,
+                updated_at TEXT NOT NULL
+            )",
+        [],
+    )
+    .context("Failed to create work_context_playbooks table")?;
+
+    // Migration: Add new columns if they don't exist (for existing databases)
+    ensure_column(conn, "work_context_playbooks", "preferred_nodes", "TEXT")?;
+
+    ensure_column(conn, "work_context_playbooks", "success_patterns", "TEXT")?;
+
+    ensure_column(conn, "work_context_playbooks", "failure_patterns", "TEXT")?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS playbook_usage_log (
+                id TEXT PRIMARY KEY,
+                playbook_id TEXT NOT NULL,
+                work_context_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                domain TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                used_at TEXT NOT NULL,
+                FOREIGN KEY (playbook_id) REFERENCES work_context_playbooks(id) ON DELETE CASCADE,
+                FOREIGN KEY (work_context_id) REFERENCES work_contexts(id) ON DELETE CASCADE
+            )",
+        [],
+    )
+    .context("Failed to create playbook_usage_log table")?;
+
+    // V1.5.2: Flow performance records table
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS flow_performance_records (
+                id TEXT PRIMARY KEY,
+                flow_id TEXT NOT NULL,
+                work_context_id TEXT NOT NULL,
+                success_score REAL NOT NULL,
+                duration_ms INTEGER NOT NULL,
+                token_cost REAL NOT NULL,
+                revision_count INTEGER NOT NULL,
+                executed_at TEXT NOT NULL,
+                FOREIGN KEY (work_context_id) REFERENCES work_contexts(id) ON DELETE CASCADE
+            )",
+        [],
+    )
+    .context("Failed to create flow_performance_records table")?;
+
+    // Create index for efficient queries by work_context_id
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_flow_perf_work_context 
+                 ON flow_performance_records(work_context_id)",
+        [],
+    )
+    .context("Failed to create index idx_flow_perf_work_context")?;
+
+    // Create index for efficient queries by flow_id
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_flow_perf_flow_id 
+                 ON flow_performance_records(flow_id)",
+        [],
+    )
+    .context("Failed to create index idx_flow_perf_flow_id")?;
+
+    // V1.5.2: Skills table for control panel metrics
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS skills (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL,
+                capability_signature TEXT NOT NULL,
+                success_rate REAL NOT NULL,
+                avg_duration_ms INTEGER NOT NULL,
+                usage_count INTEGER NOT NULL DEFAULT 0,
+                tags TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )",
+        [],
+    )
+    .context("Failed to create skills table")?;
+
+    // V1.5.2: Playbook evolutions table for control panel metrics
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS playbook_evolutions (
+                id TEXT PRIMARY KEY,
+                playbook_id TEXT NOT NULL,
+                version INTEGER NOT NULL,
+                parent_version INTEGER,
+                mutation_strategy TEXT NOT NULL,
+                performance TEXT NOT NULL DEFAULT '{}',
+                performance_score REAL NOT NULL DEFAULT 0.0,
+                execution_count INTEGER NOT NULL DEFAULT 0,
+                success_rate REAL NOT NULL DEFAULT 0.0,
+                avg_duration_ms INTEGER NOT NULL DEFAULT 0,
+                success_count INTEGER NOT NULL DEFAULT 0,
+                failure_count INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'testing',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT '',
+                FOREIGN KEY (playbook_id) REFERENCES work_context_playbooks(id) ON DELETE CASCADE
+            )",
+        [],
+    )
+    .context("Failed to create playbook_evolutions table")?;
+
+    // Backward-compatible schema migration for existing databases.
+    ensure_column(
+        conn,
+        "playbook_evolutions",
+        "performance",
+        "TEXT NOT NULL DEFAULT '{}'",
+    )?;
+    ensure_column(
+        conn,
+        "playbook_evolutions",
+        "execution_count",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(
+        conn,
+        "playbook_evolutions",
+        "success_rate",
+        "REAL NOT NULL DEFAULT 0.0",
+    )?;
+    ensure_column(
+        conn,
+        "playbook_evolutions",
+        "avg_duration_ms",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(
+        conn,
+        "playbook_evolutions",
+        "status",
+        "TEXT NOT NULL DEFAULT 'testing'",
+    )?;
+    ensure_column(
+        conn,
+        "playbook_evolutions",
+        "updated_at",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+
+    // Create index for efficient queries by playbook_id
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_evolutions_playbook_id 
+                 ON playbook_evolutions(playbook_id)",
+        [],
+    )
+    .context("Failed to create index idx_evolutions_playbook_id")?;
+
+    Ok(())
+}
