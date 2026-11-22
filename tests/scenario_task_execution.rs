@@ -1080,7 +1080,7 @@ fn task_run_evidence_claims_no_benchmark_success_and_no_foundry_contract() {
         envelope
             .external_evaluation_format
             .contract
-            .starts_with("foundry.workflow-evaluation")
+            .starts_with("foundry.coding-verdict")
     );
     assert_eq!(
         envelope.repair.origin,

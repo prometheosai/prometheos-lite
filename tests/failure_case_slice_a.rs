@@ -1254,7 +1254,7 @@ fn the_exported_case_claims_no_foundry_and_no_benchmark() {
     assert_eq!(case.external_evaluation_format.status, "unsupported");
     assert_eq!(
         case.external_evaluation_format.contract,
-        "foundry.workflow-evaluation (unpublished)"
+        "foundry.coding-verdict/1.0.0"
     );
     // Provenance is pinned fixture-only with an injected clock.
     assert!(case.provenance.fixture_only && case.provenance.injected_clock);
