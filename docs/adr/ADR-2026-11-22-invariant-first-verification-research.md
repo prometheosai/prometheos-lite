@@ -7,7 +7,7 @@ Date: 2026-11-22
 Model one logical consequential operation across timeout, cancellation, retry, crash, replay, and provider/tool uncertainty. A missing reply does not imply failure. Enforce idempotency at the authoritative side-effect boundary; do not rely on a prompt.
 
 ## Proposed acceptance checks
-Propose local deterministic model checking and fault injection for duplicate tool effects, orphan approvals, stale credentials, and journal replay. Preserve P0 security hold #297; no tainted-ref operations, merges, external calls, or runtime code in this PR.
+Propose local deterministic model checking and fault injection for duplicate tool effects, orphan approvals, stale credentials, and journal replay. #297 is archived (closed as not planned); it is not a blanket prohibition on independently reviewed merges, but historical suspect refs and executable content remain untrusted and must not be executed, adopted or merged. This PR adds no tainted-ref operations, merges, external calls, or runtime code, and respects current independent security gates including #340 identity verification where applicable.
 
 ## Video-derived basis (not independently verified claims)
 Source: user-provided video `export_1795372632721.mp4` (11m54s), visually inspected frames. It presents a payment retry/double-charge example; idempotency as an invariant; exploration of execution orders and minimized counterexamples; TLA+-style model checking, Rust/Kani bounded verification, property tests, mutation/regression testing; and a reusable verification Skill. The video cites scale figures and examples that were not independently verified. The cross-project architecture below is a proposed application, not a claim that the video proves these systems correct.
@@ -35,4 +35,4 @@ Foundry owns reusable verification harness/Skill; SOMA owns portable identity an
 - Prove no new privileged side effects from verification.
 - Run local offline fixtures with measured resource ceilings.
 - Independently review any implementation PR; no self-merge.
-- Respect security holds, especially Lite P0 #297.
+- Respect archived #297 trust restrictions (historical suspect refs and executable content remain untrusted) and current independent security gates, including #340 identity verification where applicable; #297 is not a blanket hold on independently reviewed merges.
