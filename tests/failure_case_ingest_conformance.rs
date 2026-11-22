@@ -220,6 +220,35 @@ fn unsupported_document_version_is_refused_at_reverify() {
     );
 }
 
+/// Contract-mapping regression (#156/#136): the external format marker must
+/// name the canonical PUBLISHED Foundry verdict contract, not a fictitious
+/// "unpublished" format. Lite still refuses to emit or consume it — only the
+/// contract identification is corrected from the connected Foundry source
+/// (`docs/coding-evaluation.md`, blob
+/// 56517351f90e388a208688a6df962493eea275f1).
+#[test]
+fn external_evaluation_format_names_the_published_foundry_contract() {
+    let fmt = prometheos_lite::workflow::scenario::ExternalEvaluationFormat::unsupported();
+    assert_eq!(fmt.status, "unsupported");
+    assert_eq!(fmt.contract, "foundry.coding-verdict/1.0.0");
+    assert!(
+        !fmt.detail.contains("unpublished"),
+        "the Foundry verdict contract is published; do not claim otherwise: {}",
+        fmt.detail
+    );
+    assert!(
+        fmt.detail.contains("does not emit a Foundry verdict"),
+        "the export must still state Lite's non-emission boundary: {}",
+        fmt.detail
+    );
+    assert!(
+        fmt.detail
+            .contains("No Foundry consumption, metrics or comparisons"),
+        "the export must preserve the Foundry ownership boundary: {}",
+        fmt.detail
+    );
+}
+
 #[test]
 fn external_evaluation_format_is_never_silently_present() {
     let case = minimal_case();
