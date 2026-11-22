@@ -1,0 +1,39 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "autonomous-task/2",
+  "type": "object",
+  "required": ["schema", "task_id", "issue", "base_sha", "tree_sha", "worktree", "branch", "owner", "builder_context", "allowed_scope", "acceptance", "commands"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "autonomous-task/2" },
+    "task_id": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
+    "issue": { "type": "integer", "minimum": 0 },
+    "base_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "tree_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "worktree": { "type": "string", "minLength": 1 },
+    "branch": { "type": "string", "minLength": 1 },
+    "owner": { "type": "string", "minLength": 1 },
+    "builder_context": { "type": "string", "minLength": 1 },
+    "allowed_scope": { "type": "array", "items": { "type": "string" } },
+    "acceptance": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+    "invariants": { "type": "array", "items": { "type": "string" } },
+    "dependencies": { "type": "array", "items": { "type": "object" } },
+    "resource_budget": { "type": "object" },
+    "repair_limit": { "type": "integer", "minimum": 0, "maximum": 2 },
+    "commands": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "argv"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
+          "argv": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+          "timeout_seconds": { "type": "integer", "minimum": 1 },
+          "optional": { "type": "boolean" }
+        }
+      }
+    }
+  }
+}

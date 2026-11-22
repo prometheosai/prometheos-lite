@@ -1,0 +1,13 @@
+{
+  "schema": "autonomous-verification-policy/1",
+  "approved_executables": [
+    "python", "python3", "py", "cargo", "npm", "node", "pytest", "true", "echo", "git"
+  ],
+  "approved_git_subcommands": [
+    "status", "diff", "show", "log", "rev-parse", "cat-file", "version"
+  ],
+  "max_commands": 24,
+  "default_timeout_seconds": 600,
+  "max_timeout_seconds": 1800,
+  "max_output_bytes": 8388608
+}

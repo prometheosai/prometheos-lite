@@ -1,0 +1,29 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "autonomous-evidence/2",
+  "type": "object",
+  "required": ["schema", "task_id", "candidate_sha", "tree_sha", "pre_head", "post_head", "pre_tree", "post_tree", "policy_sha256", "resource_limits", "results", "summary"],
+  "properties": {
+    "schema": { "const": "autonomous-evidence/2" },
+    "task_id": { "type": "string" },
+    "candidate_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "tree_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "pre_head": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "post_head": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "pre_tree": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "post_tree": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "policy_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "resource_limits": { "type": "object" },
+    "results": { "type": "array" },
+    "summary": {
+      "type": "object",
+      "properties": {
+        "passed": { "type": "integer" },
+        "failed": { "type": "integer" },
+        "skipped": { "type": "integer" },
+        "untested": { "type": "integer" },
+        "invalidated": { "type": "integer" }
+      }
+    }
+  }
+}
