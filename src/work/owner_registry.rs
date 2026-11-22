@@ -5,15 +5,22 @@
 // owner binding registry. No transport, client enrollment, credential issuer
 // or execution authority is added here.
 //
-// Security invariants (repair dispatch 055):
-//  - all Windows checks are bound to ONE explicitly opened process token;
-//  - ACL evaluation maps generic and specific rights, including directory
-//    replacement rights; unknown ACE forms fail closed;
-//  - reads and writes use verified OS handles, not re-resolved paths;
-//  - updates are monotonic and conflict-aware (no rollback, no revocation
-//    reversal, no owner change, no concurrent overwrite);
-//  - the ProgramData root comes from the Known Folder API, never the process
-//    environment alone.
+// Security invariants (dispatch 056 repair):
+//  - every Windows check is bound to ONE explicitly opened process token;
+//  - ACL evaluation expands generic and specific rights, rejects unknown
+//    ACE forms, and never trusts an inherited personal-account ACL;
+//  - writes use a SINGLE stable OS-backed mutex shared by all processes,
+//    held across read/compare/replace; the update rule compares against the
+//    full previous registry, so revoked bindings cannot be dropped;
+//  - a genuinely absent registry under a verified, explicitly secured parent
+//    tree is the only path into first-install provisioning; every other
+//    failure (access denied, invalid metadata, sharing violation, corrupt
+//    document, unsafe path, I/O error) fails closed and is distinguishable;
+//  - registry/temp/lock creation installs an explicit owner + DACL and the
+//    created object is verified before it becomes authoritative;
+//  - reads are bounded before allocation;
+//  - the ProgramData root comes from the Known Folder API and a poisoned
+//    process environment is refused.
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -22,6 +29,10 @@ use std::path::{Component, Path, PathBuf};
 
 pub const OWNER_REGISTRY_SCHEMA: &str = "prometheos-owner-registry-v1";
 pub const PROGRAMDATA_RELATIVE_PATH: &str = "PrometheOS/Lite/owner-registry/registry.json";
+
+/// Hard ceiling applied before any registry allocation. A registry is a small
+/// machine-local binding table; anything larger is rejected as corrupt.
+pub const MAX_REGISTRY_BYTES: usize = 1_048_576;
 
 pub const SID_SYSTEM: &str = "S-1-5-18";
 pub const SID_ADMINISTRATORS: &str = "S-1-5-32-544";
@@ -95,7 +106,22 @@ pub fn validate_registry(registry: &OwnerRegistry) -> Result<()> {
     Ok(())
 }
 
-/// Atomic, monotonic update rule. Any violation is a hard refusal.
+/// Bounded parse. Oversized input is refused *before* deserialization or any
+/// unbounded allocation; malformed JSON is a distinct `CorruptRegistry`.
+pub fn parse_registry_bytes(bytes: &[u8]) -> RegistryResult<OwnerRegistry> {
+    if bytes.len() > MAX_REGISTRY_BYTES {
+        return Err(Refusal::CorruptRegistry);
+    }
+    let registry: OwnerRegistry =
+        serde_json::from_slice(bytes).map_err(|_| Refusal::CorruptRegistry)?;
+    validate_registry(&registry).map_err(|_| Refusal::InvalidRegistry)?;
+    Ok(registry)
+}
+
+/// Atomic, monotonic compare/update rule. Every existing binding must survive:
+/// omission (including of a revoked tombstone), reappearance as active,
+/// owner change, generation/revision rollback and stale concurrent updates
+/// are all hard refusals. There is no tombstone-pruning path.
 pub fn enforce_monotonic_update(
     previous: Option<&OwnerRegistry>,
     proposed: &OwnerRegistry,
@@ -106,27 +132,33 @@ pub fn enforce_monotonic_update(
     };
     validate_registry(previous)?;
     if proposed.generation <= previous.generation {
-        bail!("registry generation must strictly increase");
+        bail!("registry generation must strictly increase (stale update refused)");
     }
     let old: BTreeMap<&str, &OwnerBinding> = previous
         .bindings
         .iter()
         .map(|b| (b.sid.as_str(), b))
         .collect();
-    for binding in &proposed.bindings {
-        if let Some(before) = old.get(binding.sid.as_str()) {
-            if before.revoked && !binding.revoked {
-                bail!("a revoked binding cannot be reactivated");
-            }
-            if before.owner != binding.owner {
-                bail!("an existing SID's owner cannot change");
-            }
-            if binding.revision < before.revision {
-                bail!("binding revision cannot decrease");
-            }
-            if binding.revoked != before.revoked && binding.revision == before.revision {
-                bail!("a revocation change requires a strictly greater revision");
-            }
+    let new: BTreeMap<&str, &OwnerBinding> = proposed
+        .bindings
+        .iter()
+        .map(|b| (b.sid.as_str(), b))
+        .collect();
+    for (sid, before) in &old {
+        let after = new
+            .get(sid)
+            .ok_or_else(|| anyhow::anyhow!("removal of binding {sid} is refused"))?;
+        if before.revoked && !after.revoked {
+            bail!("a revoked binding cannot be reactivated");
+        }
+        if before.owner != after.owner {
+            bail!("an existing SID's owner cannot change");
+        }
+        if after.revision < before.revision {
+            bail!("binding revision cannot decrease");
+        }
+        if before.revoked != after.revoked && after.revision == before.revision {
+            bail!("a revocation change requires a strictly greater revision");
         }
     }
     Ok(())
@@ -205,8 +237,13 @@ pub enum Refusal {
     ElevatedAuthorityRequired,
     UntrustedLocation,
     UnverifiableAcl,
+    InvalidSecurityMetadata,
     UnsafePath,
+    CorruptRegistry,
     InvalidRegistry,
+    RegistryAbsent,
+    AccessDenied,
+    SharingViolation,
     IoFailure,
     NonMonotonicUpdate,
     ConcurrentUpdate,
@@ -221,8 +258,13 @@ impl Refusal {
             }
             Self::UntrustedLocation => "registry location is not the protected machine-local path",
             Self::UnverifiableAcl => "owner or DACL could not be verified",
+            Self::InvalidSecurityMetadata => "invalid or unsupported security metadata",
             Self::UnsafePath => "unsafe reparse/junction/replacement path",
+            Self::CorruptRegistry => "corrupt or oversized owner registry document",
             Self::InvalidRegistry => "invalid owner registry document",
+            Self::RegistryAbsent => "registry is genuinely absent beneath a verified parent tree",
+            Self::AccessDenied => "access denied while opening the registry",
+            Self::SharingViolation => "registry is held by another process",
             Self::IoFailure => "registry I/O failure",
             Self::NonMonotonicUpdate => "non-monotonic or revocation-reversing update",
             Self::ConcurrentUpdate => "concurrent provisioning conflict",
@@ -236,41 +278,72 @@ pub type RegistryResult<T> = std::result::Result<T, Refusal>;
 #[cfg(windows)]
 pub mod windows {
     use super::*;
+    use sha2::{Digest, Sha256};
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
     use std::ptr;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
     use winapi::ctypes::c_void;
     use winapi::shared::minwindef::{BOOL, DWORD, FALSE, LPVOID, TRUE};
-    use winapi::shared::sddl::{ConvertSidToStringSidW, ConvertStringSidToSidW};
-    use winapi::shared::winerror::ERROR_SUCCESS;
-    use winapi::um::accctrl::SE_FILE_OBJECT;
+    use winapi::shared::sddl::{
+        ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+        ConvertStringSidToSidW, SDDL_REVISION_1,
+    };
+    use winapi::shared::winerror::{
+        ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS, ERROR_FILE_NOT_FOUND,
+        ERROR_PATH_NOT_FOUND, ERROR_PRIVILEGE_NOT_HELD, ERROR_SHARING_VIOLATION, ERROR_SUCCESS,
+        WAIT_TIMEOUT,
+    };
+    use winapi::um::accctrl::{SE_FILE_OBJECT, SE_KERNEL_OBJECT};
     use winapi::um::aclapi::GetSecurityInfo;
+    use winapi::um::errhandlingapi::GetLastError;
     use winapi::um::fileapi::{
-        BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateFileW, GetFileInformationByHandle,
-        GetFileType, OPEN_EXISTING, ReadFile, WriteFile,
+        BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateDirectoryW, CreateFileW, DeleteFileW,
+        FILE_RENAME_INFO, FlushFileBuffers, GetFileInformationByHandle, GetFileType,
+        GetFinalPathNameByHandleW, OPEN_EXISTING, ReadFile, SetFileInformationByHandle, WriteFile,
     };
     use winapi::um::handleapi::CloseHandle;
+    use winapi::um::minwinbase::{FILE_INFO_BY_HANDLE_CLASS, FileRenameInfo, SECURITY_ATTRIBUTES};
     use winapi::um::processthreadsapi::{
         GetCurrentProcess, GetCurrentThread, OpenProcessToken, OpenThreadToken,
     };
     use winapi::um::securitybaseapi::{
         CheckTokenMembership, DuplicateToken, GetAce, GetAclInformation, GetLengthSid,
-        GetSidSubAuthorityCount, GetTokenInformation, IsValidAcl, IsValidSid,
+        GetSidSubAuthorityCount, GetTokenInformation, IsValidAcl, IsValidSecurityDescriptor,
+        IsValidSid,
     };
+    use winapi::um::synchapi::{CreateMutexW, ReleaseMutex, WaitForSingleObject};
     use winapi::um::winbase::{
         FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_TYPE_DISK, LocalFree,
+        VOLUME_NAME_DOS, WAIT_ABANDONED, WAIT_OBJECT_0,
     };
     use winapi::um::winnt::{
-        ACCESS_ALLOWED_ACE, ACCESS_ALLOWED_ACE_TYPE, ACE_HEADER, ACL_SIZE_INFORMATION,
-        AclSizeInformation, DACL_SECURITY_INFORMATION, DELETE, FILE_ALL_ACCESS, FILE_APPEND_DATA,
-        FILE_ATTRIBUTE_REPARSE_POINT, FILE_DELETE_CHILD, FILE_SHARE_READ, FILE_WRITE_ATTRIBUTES,
-        FILE_WRITE_DATA, FILE_WRITE_EA, GENERIC_ALL, GENERIC_READ, GENERIC_WRITE, HANDLE,
-        OWNER_SECURITY_INFORMATION, PACL, READ_CONTROL, SID, SecurityImpersonation,
+        ACCESS_ALLOWED_ACE, ACCESS_ALLOWED_ACE_TYPE, ACCESS_SYSTEM_SECURITY, ACE_HEADER,
+        ACL_SIZE_INFORMATION, AclSizeInformation, DACL_SECURITY_INFORMATION, DELETE,
+        FILE_ALL_ACCESS, FILE_APPEND_DATA, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DELETE_CHILD,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA,
+        GENERIC_ALL, GENERIC_READ, GENERIC_WRITE, HANDLE, MAXIMUM_ALLOWED,
+        OWNER_SECURITY_INFORMATION, PACL, PSID, READ_CONTROL, SID, SecurityImpersonation,
         TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER, TokenElevation, TokenUser, WRITE_DAC,
         WRITE_OWNER,
     };
 
     const INVALID_HANDLE_VALUE: HANDLE = -1isize as HANDLE;
+    /// Upper bound on a TokenUser structure before it is treated as malformed.
+    const MAX_TOKEN_BYTES: DWORD = 4096;
+    /// Not exported by winapi 0.3; documented value of FILE_NAME_NORMALIZED.
+    const FILE_NAME_NORMALIZED: DWORD = 0;
+    /// A competing writer that holds the shared mutex this long is refused as
+    /// a conflict rather than waited on indefinitely.
+    const LOCK_WAIT_MS: DWORD = 5_000;
+    const TEMP_ATTEMPTS: u8 = 8;
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    /// Owner = Administrators, DACL = full control for Administrators/SYSTEM
+    /// only, protected so no inherited personal-account ACE can slip in.
+    const TRUSTED_FILE_SDDL: &str = "O:BAD:P(A;;GA;;;SY)(A;;GA;;;BA)";
+    const TRUSTED_DIR_SDDL: &str = "O:BAD:P(OI)(CI)(A;;GA;;;SY)(A;;GA;;;BA)";
 
     struct HandleGuard(HANDLE);
     impl Drop for HandleGuard {
@@ -279,19 +352,75 @@ pub mod windows {
         }
     }
 
+    struct SidGuard(*mut c_void);
+    impl Drop for SidGuard {
+        fn drop(&mut self) {
+            unsafe { LocalFree(self.0) };
+        }
+    }
+
+    struct DescriptorGuard(*mut c_void);
+    impl Drop for DescriptorGuard {
+        fn drop(&mut self) {
+            unsafe { LocalFree(self.0) };
+        }
+    }
+
+    struct MutexGuard {
+        handle: HANDLE,
+    }
+    impl Drop for MutexGuard {
+        fn drop(&mut self) {
+            unsafe { ReleaseMutex(self.handle) };
+            unsafe { CloseHandle(self.handle) };
+        }
+    }
+
+    /// Test seam: the same kernel mutex, without the privileged owner SDDL, so
+    /// cross-process mutual exclusion can be proven on a non-elevated host.
+    pub struct TestMutexGuard {
+        handle: HANDLE,
+    }
+    impl Drop for TestMutexGuard {
+        fn drop(&mut self) {
+            unsafe { ReleaseMutex(self.handle) };
+            unsafe { CloseHandle(self.handle) };
+        }
+    }
+
+    struct TempFile {
+        path: PathBuf,
+        handle: HANDLE,
+    }
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            unsafe { CloseHandle(self.handle) };
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum AclMode {
+        /// Fully trusted object we create or install ourselves.
+        Strict,
+        /// OS-managed ProgramData root: owner and trusted full-control ACE are
+        /// required, but inherited OS ACEs (e.g. authenticated-user create
+        /// rights) are tolerated. We never rewrite the OS-owned root.
+        OsManagedRoot,
+    }
+
     fn wide(value: &OsStr) -> Vec<u16> {
         value.encode_wide().chain(std::iter::once(0)).collect()
     }
 
     fn sid_to_string(sid: *mut SID) -> RegistryResult<String> {
         if sid.is_null() || unsafe { IsValidSid(sid as *mut c_void) } != TRUE {
-            return Err(Refusal::UnverifiableAcl);
+            return Err(Refusal::InvalidSecurityMetadata);
         }
         let mut text: *mut u16 = ptr::null_mut();
         if unsafe { ConvertSidToStringSidW(sid as *mut c_void, &mut text) } != TRUE
             || text.is_null()
         {
-            return Err(Refusal::UnverifiableAcl);
+            return Err(Refusal::InvalidSecurityMetadata);
         }
         let result = unsafe {
             let len = (0..).take_while(|&i| *text.offset(i) != 0).count();
@@ -301,16 +430,16 @@ pub mod windows {
         Ok(result)
     }
 
-    fn well_known_sid(text: &str) -> RegistryResult<*mut c_void> {
+    fn well_known_sid(text: &str) -> RegistryResult<PSID> {
         let mut wide_text: Vec<u16> = OsStr::new(text)
             .encode_wide()
             .chain(std::iter::once(0))
             .collect();
-        let mut sid: *mut c_void = ptr::null_mut();
+        let mut sid: PSID = ptr::null_mut();
         if unsafe { ConvertStringSidToSidW(wide_text.as_mut_ptr(), &mut sid) } != TRUE
             || sid.is_null()
         {
-            return Err(Refusal::UnverifiableAcl);
+            return Err(Refusal::InvalidSecurityMetadata);
         }
         Ok(sid)
     }
@@ -318,12 +447,6 @@ pub mod windows {
     /// Structural SID validation using Windows SID APIs, not decimal grammar.
     pub fn validate_sid(text: &str) -> RegistryResult<()> {
         let sid = well_known_sid(text)?;
-        struct SidGuard(*mut c_void);
-        impl Drop for SidGuard {
-            fn drop(&mut self) {
-                unsafe { LocalFree(self.0) };
-            }
-        }
         let _guard = SidGuard(sid);
         if unsafe { IsValidSid(sid) } != TRUE {
             return Err(Refusal::InvalidRegistry);
@@ -344,9 +467,14 @@ pub mod windows {
         Ok(())
     }
 
-    /// Full Windows access-right evaluation: generic rights are expanded,
-    /// specific write/delete/take-ownership/directory-replacement rights are
-    /// rejected for untrusted SIDs. Unknown ACE forms fail closed.
+    fn trusted_sid(sid: &str) -> bool {
+        sid.eq_ignore_ascii_case(SID_ADMINISTRATORS) || sid.eq_ignore_ascii_case(SID_SYSTEM)
+    }
+
+    /// Full access-right evaluation: generic rights are expanded, specific
+    /// write/delete/take-ownership/replacement rights are rejected for
+    /// untrusted SIDs. ACCESS_SYSTEM_SECURITY and MAXIMUM_ALLOWED also fail
+    /// closed. Known read-only rights are allowed for service identities.
     fn ace_is_dangerous(mask: DWORD) -> bool {
         let generic_all = mask & GENERIC_ALL != 0 || mask & FILE_ALL_ACCESS == FILE_ALL_ACCESS;
         let generic_write = mask & GENERIC_WRITE != 0;
@@ -358,17 +486,19 @@ pub mod windows {
                 | FILE_WRITE_DATA
                 | FILE_APPEND_DATA
                 | FILE_WRITE_ATTRIBUTES
-                | FILE_WRITE_EA);
+                | FILE_WRITE_EA
+                | ACCESS_SYSTEM_SECURITY
+                | MAXIMUM_ALLOWED);
         generic_all || generic_write || specific != 0
     }
 
-    fn trusted_sid(sid: &str) -> bool {
-        sid.eq_ignore_ascii_case(SID_ADMINISTRATORS) || sid.eq_ignore_ascii_case(SID_SYSTEM)
+    fn has_full_control(mask: DWORD) -> bool {
+        mask & GENERIC_ALL != 0 || mask & FILE_ALL_ACCESS == FILE_ALL_ACCESS
     }
 
-    fn validate_acl(acl: PACL) -> RegistryResult<()> {
+    fn validate_acl_inner(acl: PACL, mode: AclMode) -> RegistryResult<()> {
         if acl.is_null() || unsafe { IsValidAcl(acl) } != TRUE {
-            return Err(Refusal::UnverifiableAcl);
+            return Err(Refusal::InvalidSecurityMetadata);
         }
         let mut info: ACL_SIZE_INFORMATION = unsafe { std::mem::zeroed() };
         if unsafe {
@@ -381,30 +511,51 @@ pub mod windows {
         } != TRUE
             || info.AceCount == 0
         {
-            return Err(Refusal::UnverifiableAcl);
+            return Err(Refusal::InvalidSecurityMetadata);
         }
+        let mut trusted_full = false;
         for index in 0..info.AceCount {
             let mut ace: LPVOID = ptr::null_mut();
             if unsafe { GetAce(acl, index, &mut ace) } != TRUE || ace.is_null() {
-                return Err(Refusal::UnverifiableAcl);
+                return Err(Refusal::InvalidSecurityMetadata);
             }
             let header = unsafe { &*(ace as *const ACE_HEADER) };
-            if header.AceType != ACCESS_ALLOWED_ACE_TYPE {
-                return Err(Refusal::UnverifiableAcl);
+            // Deny, callback, object and conditional forms are not safely
+            // evaluated here; fail closed for every mode.
+            if header.AceType != ACCESS_ALLOWED_ACE_TYPE
+                || (header.AceSize as usize) < std::mem::size_of::<ACCESS_ALLOWED_ACE>()
+            {
+                return Err(Refusal::InvalidSecurityMetadata);
             }
             let allowed = unsafe { &*(ace as *const ACCESS_ALLOWED_ACE) };
             let sid = sid_to_string((&allowed.SidStart as *const DWORD) as *mut SID)?;
-            if ace_is_dangerous(allowed.Mask) && !trusted_sid(&sid) {
-                return Err(Refusal::UnverifiableAcl);
+            if trusted_sid(&sid) {
+                if has_full_control(allowed.Mask) {
+                    trusted_full = true;
+                }
+            } else if matches!(mode, AclMode::Strict) && ace_is_dangerous(allowed.Mask) {
+                return Err(Refusal::InvalidSecurityMetadata);
             }
+        }
+        if !trusted_full {
+            return Err(Refusal::InvalidSecurityMetadata);
         }
         Ok(())
     }
 
-    fn validate_handle_security(handle: HANDLE) -> RegistryResult<()> {
+    fn validate_acl(acl: PACL) -> RegistryResult<()> {
+        validate_acl_inner(acl, AclMode::Strict)
+    }
+
+    /// Test seam for crafted ACLs (isolates DACL evaluation from file ownership).
+    pub fn validate_acl_for_test(acl: PACL) -> RegistryResult<()> {
+        validate_acl(acl)
+    }
+
+    fn validate_handle_security_inner(handle: HANDLE, mode: AclMode) -> RegistryResult<()> {
         let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
         if unsafe { GetFileInformationByHandle(handle, &mut info) } != TRUE {
-            return Err(Refusal::UnverifiableAcl);
+            return Err(Refusal::InvalidSecurityMetadata);
         }
         if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
             return Err(Refusal::UnsafePath);
@@ -412,8 +563,8 @@ pub mod windows {
         if unsafe { GetFileType(handle) } != FILE_TYPE_DISK {
             return Err(Refusal::UnsafePath);
         }
-        let mut owner: *mut c_void = ptr::null_mut();
-        let mut group: *mut c_void = ptr::null_mut();
+        let mut owner: PSID = ptr::null_mut();
+        let mut group: PSID = ptr::null_mut();
         let mut dacl: PACL = ptr::null_mut();
         let mut sacl: PACL = ptr::null_mut();
         let mut descriptor: *mut c_void = ptr::null_mut();
@@ -430,48 +581,529 @@ pub mod windows {
             )
         };
         if status != ERROR_SUCCESS || descriptor.is_null() {
-            return Err(Refusal::UnverifiableAcl);
-        }
-        struct DescriptorGuard(*mut c_void);
-        impl Drop for DescriptorGuard {
-            fn drop(&mut self) {
-                unsafe { LocalFree(self.0) };
-            }
+            return Err(Refusal::InvalidSecurityMetadata);
         }
         let _guard = DescriptorGuard(descriptor);
         if !trusted_sid(&sid_to_string(owner as *mut SID)?) {
-            return Err(Refusal::UnverifiableAcl);
+            return Err(Refusal::InvalidSecurityMetadata);
+        }
+        validate_acl_inner(dacl, mode)
+    }
+
+    fn validate_kernel_security(handle: HANDLE) -> RegistryResult<()> {
+        let mut owner: PSID = ptr::null_mut();
+        let mut group: PSID = ptr::null_mut();
+        let mut dacl: PACL = ptr::null_mut();
+        let mut sacl: PACL = ptr::null_mut();
+        let mut descriptor: *mut c_void = ptr::null_mut();
+        let status = unsafe {
+            GetSecurityInfo(
+                handle,
+                SE_KERNEL_OBJECT,
+                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                &mut owner,
+                &mut group,
+                &mut dacl,
+                &mut sacl,
+                &mut descriptor,
+            )
+        };
+        if status != ERROR_SUCCESS || descriptor.is_null() {
+            return Err(Refusal::InvalidSecurityMetadata);
+        }
+        let _guard = DescriptorGuard(descriptor);
+        if !trusted_sid(&sid_to_string(owner as *mut SID)?) {
+            return Err(Refusal::InvalidSecurityMetadata);
         }
         validate_acl(dacl)
     }
 
-    fn open_verified(path: &Path, write: bool, create_new: bool) -> RegistryResult<HANDLE> {
-        let desired = GENERIC_READ | READ_CONTROL | if write { GENERIC_WRITE } else { 0 };
-        let share = if write { 0 } else { FILE_SHARE_READ };
-        let creation = if create_new {
-            CREATE_NEW
+    /// Bind the opened handle to the exact trusted path: a junction or a
+    /// replacement in any ancestor makes the final path differ.
+    fn final_path_matches(handle: HANDLE, expected: &Path) -> RegistryResult<()> {
+        let mut buf: Vec<u16> = vec![0; 512];
+        loop {
+            let len = unsafe {
+                GetFinalPathNameByHandleW(
+                    handle,
+                    buf.as_mut_ptr(),
+                    buf.len() as DWORD,
+                    VOLUME_NAME_DOS | FILE_NAME_NORMALIZED,
+                )
+            };
+            if len == 0 {
+                return Err(Refusal::UntrustedLocation);
+            }
+            if len as usize > buf.len() {
+                buf.resize(len as usize + 1, 0);
+                continue;
+            }
+            let got = String::from_utf16_lossy(&buf[..len as usize]);
+            let got = got.strip_prefix(r"\\?\").unwrap_or(&got);
+            if !got.eq_ignore_ascii_case(&expected.to_string_lossy()) {
+                return Err(Refusal::UntrustedLocation);
+            }
+            return Ok(());
+        }
+    }
+
+    /// Win32 error classification. Absence is the ONLY code permitted to enter
+    /// bootstrap; access denied, sharing, unsafe paths and I/O fail closed.
+    pub fn classify_win32_error(code: DWORD) -> Refusal {
+        match code {
+            ERROR_FILE_NOT_FOUND => Refusal::RegistryAbsent,
+            ERROR_PATH_NOT_FOUND => Refusal::UntrustedLocation,
+            ERROR_ACCESS_DENIED | ERROR_PRIVILEGE_NOT_HELD => Refusal::AccessDenied,
+            ERROR_SHARING_VIOLATION => Refusal::SharingViolation,
+            ERROR_ALREADY_EXISTS | ERROR_FILE_EXISTS => Refusal::ConcurrentUpdate,
+            _ => Refusal::IoFailure,
+        }
+    }
+
+    fn classify_last_error() -> Refusal {
+        classify_win32_error(unsafe { GetLastError() })
+    }
+
+    fn open_raw(
+        path: &Path,
+        desired: DWORD,
+        share: DWORD,
+        creation: DWORD,
+        flags: DWORD,
+        sd: Option<*mut c_void>,
+    ) -> RegistryResult<HANDLE> {
+        let mut sa = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as DWORD,
+            lpSecurityDescriptor: ptr::null_mut(),
+            bInheritHandle: FALSE,
+        };
+        if let Some(descriptor) = sd {
+            sa.lpSecurityDescriptor = descriptor;
+        }
+        let sa_ptr = if sd.is_some() {
+            &mut sa as *mut SECURITY_ATTRIBUTES
         } else {
-            OPEN_EXISTING
+            ptr::null_mut()
         };
         let handle = unsafe {
             CreateFileW(
                 wide(path.as_os_str()).as_ptr(),
                 desired,
                 share,
-                ptr::null_mut(),
+                sa_ptr,
                 creation,
-                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                flags,
                 ptr::null_mut(),
             )
         };
         if handle == INVALID_HANDLE_VALUE || handle.is_null() {
-            return Err(Refusal::IoFailure);
+            return Err(classify_last_error());
         }
-        if let Err(refusal) = validate_handle_security(handle) {
+        Ok(handle)
+    }
+
+    fn open_verified(
+        path: &Path,
+        expected: &Path,
+        write: bool,
+        create_new: bool,
+        sd: Option<*mut c_void>,
+        mode: AclMode,
+    ) -> RegistryResult<HANDLE> {
+        let desired = GENERIC_READ | READ_CONTROL | if write { GENERIC_WRITE | DELETE } else { 0 };
+        let share = if write {
+            FILE_SHARE_READ | FILE_SHARE_DELETE
+        } else {
+            FILE_SHARE_READ
+        };
+        let creation = if create_new {
+            CREATE_NEW
+        } else {
+            OPEN_EXISTING
+        };
+        let handle = open_raw(
+            path,
+            desired,
+            share,
+            creation,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            sd,
+        )?;
+        if let Err(refusal) = validate_handle_security_inner(handle, mode) {
+            unsafe { CloseHandle(handle) };
+            return Err(refusal);
+        }
+        if let Err(refusal) = final_path_matches(handle, expected) {
             unsafe { CloseHandle(handle) };
             return Err(refusal);
         }
         Ok(handle)
+    }
+
+    fn read_all(handle: HANDLE) -> RegistryResult<Vec<u8>> {
+        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        if unsafe { GetFileInformationByHandle(handle, &mut info) } != TRUE {
+            return Err(Refusal::IoFailure);
+        }
+        let size = ((info.nFileSizeHigh as u64) << 32) | info.nFileSizeLow as u64;
+        if size > MAX_REGISTRY_BYTES as u64 {
+            return Err(Refusal::CorruptRegistry);
+        }
+        let mut bytes = Vec::with_capacity(size as usize);
+        let mut chunk = [0u8; 4096];
+        loop {
+            let mut read: DWORD = 0;
+            if unsafe {
+                ReadFile(
+                    handle,
+                    chunk.as_mut_ptr() as LPVOID,
+                    chunk.len() as DWORD,
+                    &mut read,
+                    ptr::null_mut(),
+                )
+            } != TRUE
+            {
+                return Err(Refusal::IoFailure);
+            }
+            if read == 0 {
+                break;
+            }
+            if bytes.len() + read as usize > MAX_REGISTRY_BYTES {
+                return Err(Refusal::CorruptRegistry);
+            }
+            bytes.extend_from_slice(&chunk[..read as usize]);
+        }
+        Ok(bytes)
+    }
+
+    fn load_via_handle(path: &Path) -> RegistryResult<OwnerRegistry> {
+        let handle = open_verified(path, path, false, false, None, AclMode::Strict)?;
+        let _guard = HandleGuard(handle);
+        parse_registry_bytes(&read_all(handle)?)
+    }
+
+    fn trusted_sd(is_dir: bool) -> RegistryResult<DescriptorGuard> {
+        let sddl = if is_dir {
+            TRUSTED_DIR_SDDL
+        } else {
+            TRUSTED_FILE_SDDL
+        };
+        let mut descriptor: *mut c_void = ptr::null_mut();
+        if unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                wide(OsStr::new(sddl)).as_ptr(),
+                SDDL_REVISION_1 as DWORD,
+                &mut descriptor,
+                ptr::null_mut(),
+            )
+        } != TRUE
+            || descriptor.is_null()
+            || unsafe { IsValidSecurityDescriptor(descriptor) } != TRUE
+        {
+            return Err(Refusal::InvalidSecurityMetadata);
+        }
+        Ok(DescriptorGuard(descriptor))
+    }
+
+    fn verify_root(root: &Path) -> RegistryResult<()> {
+        let handle = open_verified(root, root, false, false, None, AclMode::OsManagedRoot)?;
+        let _guard = HandleGuard(handle);
+        Ok(())
+    }
+
+    fn verify_or_create_dir(dir: &Path, create: bool) -> RegistryResult<()> {
+        match open_verified(dir, dir, false, false, None, AclMode::Strict) {
+            Ok(handle) => {
+                let _guard = HandleGuard(handle);
+                Ok(())
+            }
+            Err(Refusal::RegistryAbsent) if create => {
+                let descriptor = trusted_sd(true)?;
+                let mut sa = SECURITY_ATTRIBUTES {
+                    nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as DWORD,
+                    lpSecurityDescriptor: descriptor.0,
+                    bInheritHandle: FALSE,
+                };
+                if unsafe { CreateDirectoryW(wide(dir.as_os_str()).as_ptr(), &mut sa) } != TRUE {
+                    let code = unsafe { GetLastError() };
+                    if code != ERROR_ALREADY_EXISTS {
+                        return Err(classify_win32_error(code));
+                    }
+                }
+                let handle = open_verified(dir, dir, false, false, None, AclMode::Strict)?;
+                let _guard = HandleGuard(handle);
+                Ok(())
+            }
+            Err(other) => Err(other),
+        }
+    }
+
+    fn expected_path(path: &Path) -> RegistryResult<PathBuf> {
+        let expected = default_registry_path().map_err(|_| Refusal::UntrustedLocation)?;
+        if !path.is_absolute()
+            || !path
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&expected.to_string_lossy())
+        {
+            return Err(Refusal::UntrustedLocation);
+        }
+        for component in path.components() {
+            if !matches!(
+                component,
+                Component::Prefix(_) | Component::RootDir | Component::Normal(_)
+            ) {
+                return Err(Refusal::UntrustedLocation);
+            }
+        }
+        Ok(expected)
+    }
+
+    /// Verify the exact trusted location and every existing ancestor. When
+    /// `create` is true, missing ancestors are bootstrapped with an explicit
+    /// trusted owner/DACL instead of inheriting an administrator's personal ACL.
+    fn verify_location_structure(path: &Path, create: bool) -> RegistryResult<()> {
+        let expected = expected_path(path)?;
+        let root = programdata_root().map_err(|_| Refusal::UntrustedLocation)?;
+        verify_root(&root)?;
+        let relative = expected
+            .strip_prefix(&root)
+            .map_err(|_| Refusal::UntrustedLocation)?;
+        let mut current = root.clone();
+        for component in relative.components() {
+            current = current.join(component.as_os_str());
+            verify_or_create_dir(&current, create)?;
+        }
+        Ok(())
+    }
+
+    /// One stable OS-backed mutex identity per registry path. No PID, timestamp
+    /// or random suffix: every competing process contends on the same object.
+    fn lock_name(path: &Path, global: bool) -> String {
+        let key = path.to_string_lossy().to_lowercase();
+        let digest = Sha256::digest(key.as_bytes());
+        let suffix: String = digest[..8]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        format!(
+            "{}\\PrometheOS.OwnerRegistry.{}",
+            if global { "Global" } else { "Local" },
+            suffix
+        )
+    }
+
+    /// Test seam: the Local (session-scoped) identity of the shared mutex.
+    pub fn test_mutex_name(path: &Path) -> String {
+        lock_name(path, false)
+    }
+
+    fn wait_for_mutex(handle: HANDLE) -> RegistryResult<()> {
+        let wait = unsafe { WaitForSingleObject(handle, LOCK_WAIT_MS) };
+        if wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED {
+            // WAIT_ABANDONED means the previous owner died; the registry is
+            // re-read and compared under the lock, so no stale state is used.
+            Ok(())
+        } else if wait == WAIT_TIMEOUT {
+            Err(Refusal::ConcurrentUpdate)
+        } else {
+            Err(Refusal::IoFailure)
+        }
+    }
+
+    fn acquire_update_lock(path: &Path) -> RegistryResult<MutexGuard> {
+        let name = lock_name(path, true);
+        let descriptor = trusted_sd(false)?;
+        let mut sa = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as DWORD,
+            lpSecurityDescriptor: descriptor.0,
+            bInheritHandle: FALSE,
+        };
+        let handle = unsafe {
+            CreateMutexW(
+                &mut sa as *mut SECURITY_ATTRIBUTES,
+                FALSE,
+                wide(OsStr::new(&name)).as_ptr(),
+            )
+        };
+        if handle.is_null() {
+            return Err(classify_last_error());
+        }
+        let guard = HandleGuard(handle);
+        validate_kernel_security(handle)?;
+        wait_for_mutex(handle)?;
+        // Ownership of the handle transfers to the mutex guard.
+        std::mem::forget(guard);
+        Ok(MutexGuard { handle })
+    }
+
+    /// Test-only acquisition of the same named-mutex *mechanism* with a default
+    /// DACL, so unprivileged processes can prove cross-process exclusion.
+    pub fn acquire_test_mutex(name: &str) -> RegistryResult<TestMutexGuard> {
+        let handle =
+            unsafe { CreateMutexW(ptr::null_mut(), FALSE, wide(OsStr::new(name)).as_ptr()) };
+        if handle.is_null() {
+            return Err(Refusal::IoFailure);
+        }
+        if let Err(refusal) = wait_for_mutex(handle) {
+            unsafe { CloseHandle(handle) };
+            return Err(refusal);
+        }
+        Ok(TestMutexGuard { handle })
+    }
+
+    fn cleanup_temp(path: &Path, handle: HANDLE) {
+        unsafe { CloseHandle(handle) };
+        let _ = unsafe { DeleteFileW(wide(path.as_os_str()).as_ptr()) };
+    }
+
+    fn write_temp(parent: &Path, bytes: &[u8]) -> RegistryResult<TempFile> {
+        for attempt in 0..TEMP_ATTEMPTS {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let name = format!(
+                ".registry-{}-{}-{}-{attempt}.tmp",
+                std::process::id(),
+                nanos,
+                TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+            );
+            let path = parent.join(name);
+            let descriptor = trusted_sd(false)?;
+            let handle = match open_verified(
+                &path,
+                &path,
+                true,
+                true,
+                Some(descriptor.0),
+                AclMode::Strict,
+            ) {
+                Ok(handle) => handle,
+                Err(Refusal::ConcurrentUpdate) | Err(Refusal::RegistryAbsent) => continue,
+                Err(other) => return Err(other),
+            };
+            let mut written_total = 0usize;
+            while written_total < bytes.len() {
+                let mut written: DWORD = 0;
+                if unsafe {
+                    WriteFile(
+                        handle,
+                        bytes[written_total..].as_ptr() as *const c_void,
+                        (bytes.len() - written_total) as DWORD,
+                        &mut written,
+                        ptr::null_mut(),
+                    )
+                } != TRUE
+                    || written == 0
+                {
+                    cleanup_temp(&path, handle);
+                    return Err(Refusal::IoFailure);
+                }
+                written_total += written as usize;
+            }
+            if unsafe { FlushFileBuffers(handle) } != TRUE {
+                cleanup_temp(&path, handle);
+                return Err(Refusal::IoFailure);
+            }
+            return Ok(TempFile { path, handle });
+        }
+        Err(Refusal::ConcurrentUpdate)
+    }
+
+    /// Publish the verified temp file through its own handle. The destination
+    /// is resolved RELATIVE TO the verified parent directory handle, so the
+    /// final write effect contains no global pathname lookup that could be
+    /// redirected by replacing a path component.
+    fn publish_via_handle(dir_handle: HANDLE, temp_handle: HANDLE) -> RegistryResult<()> {
+        let name = wide(OsStr::new("registry.json"));
+        let total = std::mem::size_of::<FILE_RENAME_INFO>() + name.len() * 2;
+        let mut storage = vec![0u64; total.div_ceil(8)];
+        let info = storage.as_mut_ptr() as *mut FILE_RENAME_INFO;
+        unsafe {
+            (*info).ReplaceIfExists = TRUE;
+            (*info).RootDirectory = dir_handle;
+            (*info).FileNameLength = ((name.len() - 1) * 2) as DWORD;
+            ptr::copy_nonoverlapping(name.as_ptr(), (*info).FileName.as_mut_ptr(), name.len());
+        }
+        if unsafe {
+            SetFileInformationByHandle(
+                temp_handle,
+                FileRenameInfo as FILE_INFO_BY_HANDLE_CLASS,
+                info as LPVOID,
+                total as DWORD,
+            )
+        } != TRUE
+        {
+            return Err(classify_last_error());
+        }
+        Ok(())
+    }
+
+    /// Provision the registry under verified elevated authority.
+    ///
+    /// REPLACEMENT GUARANTEE: the new document is written and flushed to a
+    /// uniquely named temp file carrying an explicit trusted security
+    /// descriptor, then published with SetFileInformationByHandle(FileRenameInfo)
+    /// using ReplaceIfExists=TRUE. On NTFS this is an atomic namespace rename:
+    /// at every instant `registry.json` names either the whole old document or
+    /// the whole new one, so partial bytes are never visible at that name and a
+    /// failed publish leaves the previous trusted document untouched.
+    ///
+    /// DURABILITY: file data is flushed before the rename and the rename is
+    /// journaled, but the parent directory is not explicitly flushed. This is
+    /// therefore NOT a fully transactional or crash-atomic multi-file update.
+    ///
+    /// PATH TRUST: the source is identified by its verified temp handle and the
+    /// destination name is resolved relative to the verified parent directory
+    /// HANDLE (FILE_RENAME_INFO.RootDirectory), so the final write effect has no
+    /// global pathname lookup to redirect it. Every ancestor is additionally
+    /// bound to its kernel-resolved final path and the admin/SYSTEM-only DACL
+    /// and shared mutex exclude unprivileged substitution.
+    pub fn provision_registry(path: &Path, proposed: &OwnerRegistry) -> RegistryResult<()> {
+        require_provisioning_authority()?;
+        let expected = expected_path(path)?;
+        let bytes = canonical_json(proposed).map_err(|_| Refusal::InvalidRegistry)?;
+        // The single shared mutex is acquired BEFORE any read/compare/write.
+        let _lock = acquire_update_lock(&expected)?;
+        verify_location_structure(&expected, true)?;
+        let previous = match load_via_handle(&expected) {
+            Ok(registry) => Some(registry),
+            Err(Refusal::RegistryAbsent) => None,
+            // Access denied, invalid metadata, sharing violation, corrupt
+            // registry, unsafe path and I/O failures all fail closed.
+            Err(other) => return Err(other),
+        };
+        enforce_monotonic_update(previous.as_ref(), proposed)
+            .map_err(|_| Refusal::NonMonotonicUpdate)?;
+        let parent = expected.parent().ok_or(Refusal::UntrustedLocation)?;
+        // Bind the parent directory itself to an OS handle before publishing.
+        let dir_handle = open_verified(parent, parent, true, false, None, AclMode::Strict)?;
+        let _dir_guard = HandleGuard(dir_handle);
+        let temp = write_temp(parent, &bytes)?;
+        let temp_path = temp.path.clone();
+        if let Err(refusal) = publish_via_handle(dir_handle, temp.handle) {
+            drop(temp);
+            let _ = unsafe { DeleteFileW(wide(temp_path.as_os_str()).as_ptr()) };
+            return Err(refusal);
+        }
+        drop(temp);
+        // Re-open the installed file and prove it is the verified document
+        // before returning success.
+        let installed = load_via_handle(&expected)?;
+        if canonical_json(&installed).map_err(|_| Refusal::InvalidRegistry)? != bytes {
+            return Err(Refusal::IoFailure);
+        }
+        Ok(())
+    }
+
+    pub fn load_registry(path: &Path) -> RegistryResult<OwnerRegistry> {
+        verify_location_structure(path, false)?;
+        load_via_handle(path)
+    }
+
+    pub fn resolve_owner(path: &Path, sid: &str) -> RegistryResult<Option<String>> {
+        let registry = load_registry(path)?;
+        lookup_owner(&registry, sid).map_err(|_| Refusal::InvalidRegistry)
     }
 
     /// One token, one identity: a process token is opened explicitly and every
@@ -508,20 +1140,32 @@ pub mod windows {
         {
             return Err(Refusal::ElevatedAuthorityRequired);
         }
-        let mut user_buf = [0u8; std::mem::size_of::<TOKEN_USER>() + 128];
+        // Query the required size first and reject malformed or oversized token
+        // information rather than reading a fixed, possibly truncating buffer.
+        let mut required: DWORD = 0;
+        let _ = unsafe { GetTokenInformation(token, TokenUser, ptr::null_mut(), 0, &mut required) };
+        if required == 0 || required > MAX_TOKEN_BYTES {
+            return Err(Refusal::ElevatedAuthorityRequired);
+        }
+        let mut user_buf = vec![0u8; required as usize];
+        returned = 0;
         if unsafe {
             GetTokenInformation(
                 token,
                 TokenUser,
                 user_buf.as_mut_ptr() as LPVOID,
-                user_buf.len() as DWORD,
+                required,
                 &mut returned,
             )
         } != TRUE
+            || returned < std::mem::size_of::<TOKEN_USER>() as DWORD
         {
             return Err(Refusal::ElevatedAuthorityRequired);
         }
         let user = unsafe { &*(user_buf.as_ptr() as *const TOKEN_USER) };
+        if user.User.Sid.is_null() || unsafe { IsValidSid(user.User.Sid) } != TRUE {
+            return Err(Refusal::ElevatedAuthorityRequired);
+        }
         let process_sid = sid_to_string(user.User.Sid as *mut SID)?;
         // CheckTokenMembership needs an impersonation token. Duplicate the
         // SAME process token so elevation, user SID and membership all come
@@ -543,177 +1187,33 @@ pub mod windows {
         Err(Refusal::ElevatedAuthorityRequired)
     }
 
-    /// Verify the exact location and every ancestor through stable handles.
-    pub fn validate_registry_location(path: &Path) -> RegistryResult<()> {
-        let expected = default_registry_path().map_err(|_| Refusal::UntrustedLocation)?;
-        if !path.is_absolute() || path != expected.as_path() {
-            return Err(Refusal::UntrustedLocation);
-        }
-        for component in path.components() {
-            if !matches!(
-                component,
-                Component::Prefix(_) | Component::RootDir | Component::Normal(_)
-            ) {
-                return Err(Refusal::UntrustedLocation);
-            }
-        }
-        let root = programdata_root().map_err(|_| Refusal::UntrustedLocation)?;
-        let handle = open_verified(path, false, false)?;
-        let _guard = HandleGuard(handle);
-        let mut current: &Path = path;
-        loop {
-            let dir_handle = open_verified(current, false, false)?;
-            let _dir_guard = HandleGuard(dir_handle);
-            if current == root.as_path() {
-                break;
-            }
-            match current.parent() {
-                Some(parent) if !parent.as_os_str().is_empty() => current = parent,
-                _ => return Err(Refusal::UntrustedLocation),
-            }
-        }
-        Ok(())
-    }
-
-    /// Unique, exclusive lock file. Collision is an explicit conflict refusal.
-    struct LockGuard {
-        path: PathBuf,
-        handle: HANDLE,
-    }
-    impl Drop for LockGuard {
-        fn drop(&mut self) {
-            unsafe { CloseHandle(self.handle) };
-            let _ = std::fs::remove_file(&self.path);
-        }
-    }
-    fn acquire_lock(parent: &Path) -> RegistryResult<LockGuard> {
-        let path = parent.join(format!(".registry-{}-{}.lock", std::process::id(), {
-            use std::time::{SystemTime, UNIX_EPOCH};
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        }));
-        let handle = unsafe {
-            CreateFileW(
-                wide(path.as_os_str()).as_ptr(),
-                GENERIC_READ | GENERIC_WRITE,
-                0,
-                ptr::null_mut(),
-                CREATE_NEW,
-                FILE_FLAG_BACKUP_SEMANTICS,
-                ptr::null_mut(),
-            )
-        };
-        if handle == INVALID_HANDLE_VALUE || handle.is_null() {
-            return Err(Refusal::ConcurrentUpdate);
-        }
-        Ok(LockGuard { path, handle })
-    }
-
-    fn read_all(handle: HANDLE) -> RegistryResult<Vec<u8>> {
-        let mut bytes = Vec::new();
-        let mut chunk = [0u8; 4096];
-        loop {
-            let mut read: DWORD = 0;
-            if unsafe {
-                ReadFile(
-                    handle,
-                    chunk.as_mut_ptr() as LPVOID,
-                    chunk.len() as DWORD,
-                    &mut read,
-                    ptr::null_mut(),
-                )
-            } != TRUE
-            {
-                return Err(Refusal::IoFailure);
-            }
-            if read == 0 {
-                break;
-            }
-            bytes.extend_from_slice(&chunk[..read as usize]);
-        }
-        Ok(bytes)
-    }
-
-    fn load_via_handle(path: &Path) -> RegistryResult<OwnerRegistry> {
-        let handle = open_verified(path, false, false)?;
-        let _guard = HandleGuard(handle);
-        let bytes = read_all(handle)?;
-        let registry: OwnerRegistry =
-            serde_json::from_slice(&bytes).map_err(|_| Refusal::InvalidRegistry)?;
-        validate_registry(&registry).map_err(|_| Refusal::InvalidRegistry)?;
-        Ok(registry)
-    }
-
-    pub fn provision_registry(path: &Path, proposed: &OwnerRegistry) -> RegistryResult<()> {
-        require_provisioning_authority()?;
-        validate_registry_location(path)?;
-        let bytes = canonical_json(proposed).map_err(|_| Refusal::InvalidRegistry)?;
-        let parent = path.parent().ok_or(Refusal::UntrustedLocation)?;
-        let _lock = acquire_lock(parent)?;
-        let previous = match load_via_handle(path) {
-            Ok(registry) => Some(registry),
-            Err(Refusal::IoFailure) => None,
-            Err(other) => return Err(other),
-        };
-        enforce_monotonic_update(previous.as_ref(), proposed)
-            .map_err(|_| Refusal::NonMonotonicUpdate)?;
-
-        let temp = parent.join(format!(".registry-{}-{}.tmp", std::process::id(), {
-            use std::time::{SystemTime, UNIX_EPOCH};
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        }));
-        let temp_handle = open_verified(&temp, true, true)?;
-        {
-            let _guard = HandleGuard(temp_handle);
-            let mut written: DWORD = 0;
-            if unsafe {
-                WriteFile(
-                    temp_handle,
-                    bytes.as_ptr() as *const c_void,
-                    bytes.len() as DWORD,
-                    &mut written,
-                    ptr::null_mut(),
-                )
-            } != TRUE
-                || written as usize != bytes.len()
-            {
-                let _ = std::fs::remove_file(&temp);
-                return Err(Refusal::IoFailure);
-            }
-        }
-        if std::fs::rename(&temp, path).is_err() {
-            let _ = std::fs::remove_file(&temp);
-            return Err(Refusal::IoFailure);
-        }
-        validate_registry_location(path)
-    }
-
-    pub fn load_registry(path: &Path) -> RegistryResult<OwnerRegistry> {
-        validate_registry_location(path)?;
-        load_via_handle(path)
-    }
-
-    pub fn resolve_owner(path: &Path, sid: &str) -> RegistryResult<Option<String>> {
-        let registry = load_registry(path)?;
-        lookup_owner(&registry, sid).map_err(|_| Refusal::InvalidRegistry)
-    }
-
     /// Test seam for the pure ACL-rights evaluation (no OS state required).
     pub fn ace_is_dangerous_for_test(mask: DWORD) -> bool {
         ace_is_dangerous(mask)
     }
 
-    /// Reject reparse points on a path and its ancestors (test seam).
+    /// Reject reparse points on a path and its ancestors (test seam). This
+    /// check deliberately does not require trusted ownership, so it isolates
+    /// reparse detection from ACL policy.
     pub fn reject_reparse(path: &Path) -> RegistryResult<()> {
         let mut current = path;
         loop {
-            let handle = open_verified(current, false, false)?;
+            let handle = open_raw(
+                current,
+                GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_DELETE,
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                None,
+            )?;
             let _guard = HandleGuard(handle);
+            let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+            if unsafe { GetFileInformationByHandle(handle, &mut info) } != TRUE {
+                return Err(Refusal::InvalidSecurityMetadata);
+            }
+            if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                return Err(Refusal::UnsafePath);
+            }
             match current.parent() {
                 Some(parent) if !parent.as_os_str().is_empty() => current = parent,
                 _ => break,
@@ -723,9 +1223,16 @@ pub mod windows {
     }
 
     pub fn validate_file_security(path: &Path) -> RegistryResult<()> {
-        let handle = open_verified(path, false, false)?;
+        let handle = open_verified(path, path, false, false, None, AclMode::Strict)?;
         let _guard = HandleGuard(handle);
         Ok(())
+    }
+
+    /// Verify the exact protected location and the full security of the file
+    /// installed there. No directory is created on this read-only path.
+    pub fn validate_registry_location(path: &Path) -> RegistryResult<()> {
+        verify_location_structure(path, false)?;
+        validate_file_security(path)
     }
 }
 
@@ -747,6 +1254,14 @@ mod tests {
         }
     }
 
+    fn registry(generation: u64, bindings: Vec<OwnerBinding>) -> OwnerRegistry {
+        OwnerRegistry {
+            schema_version: OWNER_REGISTRY_SCHEMA.to_owned(),
+            generation,
+            bindings,
+        }
+    }
+
     #[test]
     fn well_formed_sid_format_only() {
         assert!(is_well_formed_sid(SID_SYSTEM));
@@ -758,105 +1273,163 @@ mod tests {
 
     #[test]
     fn valid_registry_and_owner_lookup() {
-        let registry = OwnerRegistry {
-            schema_version: OWNER_REGISTRY_SCHEMA.to_owned(),
-            generation: 1,
-            bindings: vec![binding(SID_ADMINISTRATORS, "owner-a", false, 1)],
-        };
-        assert!(validate_registry(&registry).is_ok());
+        let reg = registry(1, vec![binding(SID_ADMINISTRATORS, "owner-a", false, 1)]);
+        assert!(validate_registry(&reg).is_ok());
         assert_eq!(
-            lookup_owner(&registry, SID_ADMINISTRATORS)
-                .unwrap()
-                .as_deref(),
+            lookup_owner(&reg, SID_ADMINISTRATORS).unwrap().as_deref(),
             Some("owner-a")
         );
-        assert_eq!(lookup_owner(&registry, SID_SYSTEM).unwrap(), None);
+        assert_eq!(lookup_owner(&reg, SID_SYSTEM).unwrap(), None);
     }
 
     #[test]
     fn revoked_binding_is_a_permanent_miss() {
-        let registry = OwnerRegistry {
-            schema_version: OWNER_REGISTRY_SCHEMA.to_owned(),
-            generation: 2,
-            bindings: vec![binding(SID_ADMINISTRATORS, "owner-a", true, 2)],
-        };
-        assert_eq!(lookup_owner(&registry, SID_ADMINISTRATORS).unwrap(), None);
+        let reg = registry(2, vec![binding(SID_ADMINISTRATORS, "owner-a", true, 2)]);
+        assert_eq!(lookup_owner(&reg, SID_ADMINISTRATORS).unwrap(), None);
     }
 
     #[test]
     fn bad_schema_duplicate_sid_and_empty_owner_are_refused() {
-        let mut registry = OwnerRegistry::empty(1);
-        registry.schema_version = "other-v1".to_owned();
-        assert!(validate_registry(&registry).is_err());
-        let mut registry = OwnerRegistry::empty(1);
-        registry.bindings = vec![
-            binding(SID_SYSTEM, "a", false, 1),
-            binding(SID_SYSTEM, "b", false, 1),
-        ];
-        assert!(validate_registry(&registry).is_err());
-        let mut registry = OwnerRegistry::empty(1);
-        registry.bindings = vec![binding(SID_SYSTEM, "   ", false, 1)];
-        assert!(validate_registry(&registry).is_err());
+        let mut reg = OwnerRegistry::empty(1);
+        reg.schema_version = "other-v1".to_owned();
+        assert!(validate_registry(&reg).is_err());
+        let reg = registry(
+            1,
+            vec![
+                binding(SID_SYSTEM, "a", false, 1),
+                binding(SID_SYSTEM, "b", false, 1),
+            ],
+        );
+        assert!(validate_registry(&reg).is_err());
+        let reg = registry(1, vec![binding(SID_SYSTEM, "   ", false, 1)]);
+        assert!(validate_registry(&reg).is_err());
         assert!(validate_registry(&OwnerRegistry::empty(0)).is_err());
     }
 
     #[test]
     fn malformed_sid_is_never_resolved() {
-        let registry = OwnerRegistry::empty(1);
-        assert!(lookup_owner(&registry, "not-a-sid").is_err());
+        assert!(lookup_owner(&OwnerRegistry::empty(1), "not-a-sid").is_err());
     }
 
     #[test]
     fn canonical_json_is_deterministic() {
-        let registry = OwnerRegistry {
-            schema_version: OWNER_REGISTRY_SCHEMA.to_owned(),
-            generation: 7,
-            bindings: vec![binding(SID_SYSTEM, "a", false, 1)],
-        };
-        assert_eq!(
-            canonical_json(&registry).unwrap(),
-            canonical_json(&registry).unwrap()
-        );
+        let reg = registry(7, vec![binding(SID_SYSTEM, "a", false, 1)]);
+        assert_eq!(canonical_json(&reg).unwrap(), canonical_json(&reg).unwrap());
     }
 
     #[test]
     fn monotonic_update_refuses_rollback_revocation_reversal_and_owner_change() {
-        let old = OwnerRegistry {
-            schema_version: OWNER_REGISTRY_SCHEMA.to_owned(),
-            generation: 7,
-            bindings: vec![binding(SID_ADMINISTRATORS, "owner-a", true, 4)],
-        };
-        let rollback = OwnerRegistry {
-            generation: 1,
-            ..old.clone()
-        };
-        assert!(enforce_monotonic_update(Some(&old), &rollback).is_err());
-        let mut revive = old.clone();
-        revive.generation = 8;
-        revive.bindings[0].revoked = false;
-        revive.bindings[0].revision = 5;
-        assert!(enforce_monotonic_update(Some(&old), &revive).is_err());
-        let mut change_owner = old.clone();
-        change_owner.generation = 8;
-        change_owner.bindings[0].owner = "owner-b".to_owned();
-        change_owner.bindings[0].revision = 5;
-        assert!(enforce_monotonic_update(Some(&old), &change_owner).is_err());
-        let mut lower_revision = old.clone();
-        lower_revision.generation = 8;
-        lower_revision.bindings[0].revision = 3;
-        assert!(enforce_monotonic_update(Some(&old), &lower_revision).is_err());
-        let mut valid = old.clone();
-        valid.generation = 8;
-        valid
-            .bindings
-            .push(binding(SID_SYSTEM, "owner-b", false, 1));
-        assert!(enforce_monotonic_update(Some(&old), &valid).is_ok());
+        let old = registry(7, vec![binding(SID_ADMINISTRATORS, "owner-a", true, 4)]);
+        assert!(enforce_monotonic_update(Some(&old), &registry(1, old.bindings.clone())).is_err());
+        assert!(
+            enforce_monotonic_update(
+                Some(&old),
+                &registry(8, vec![binding(SID_ADMINISTRATORS, "owner-a", false, 5)])
+            )
+            .is_err()
+        );
+        assert!(
+            enforce_monotonic_update(
+                Some(&old),
+                &registry(8, vec![binding(SID_ADMINISTRATORS, "owner-b", true, 5)])
+            )
+            .is_err()
+        );
+        assert!(
+            enforce_monotonic_update(
+                Some(&old),
+                &registry(8, vec![binding(SID_ADMINISTRATORS, "owner-a", true, 3)])
+            )
+            .is_err()
+        );
+        // Keeping the tombstone and adding a fresh binding is a valid update.
+        assert!(
+            enforce_monotonic_update(
+                Some(&old),
+                &registry(
+                    8,
+                    vec![
+                        binding(SID_ADMINISTRATORS, "owner-a", true, 4),
+                        binding(SID_SYSTEM, "owner-b", false, 1),
+                    ]
+                )
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn revocation_tombstone_cannot_be_dropped_by_omission_then_readded() {
+        let old = registry(
+            3,
+            vec![
+                binding(SID_ADMINISTRATORS, "owner-a", true, 2),
+                binding(SID_SYSTEM, "owner-b", false, 1),
+            ],
+        );
+        // Omit the revoked SID entirely in a higher generation.
+        let omitted = registry(4, vec![binding(SID_SYSTEM, "owner-b", false, 1)]);
+        assert!(enforce_monotonic_update(Some(&old), &omitted).is_err());
+        // Then try to re-add it as "new" and active. This is refused against
+        // the real trusted previous state: the tombstone is immutable, so the
+        // omission above can never become the committed prior state.
+        let readded = registry(
+            5,
+            vec![
+                binding(SID_SYSTEM, "owner-b", false, 1),
+                binding(SID_ADMINISTRATORS, "owner-a", false, 1),
+            ],
+        );
+        assert!(enforce_monotonic_update(Some(&old), &readded).is_err());
+        // An omitted identity cannot be locally "forgotten" into a state that
+        // would permit reintroduction; the only accepted history is one where
+        // every binding identity persists.
+        assert!(enforce_monotonic_update(Some(&omitted), &old).is_err());
+    }
+
+    #[test]
+    fn removal_of_any_existing_binding_is_refused() {
+        let old = registry(
+            2,
+            vec![
+                binding(SID_SYSTEM, "owner-a", false, 1),
+                binding(SID_ADMINISTRATORS, "owner-b", false, 1),
+            ],
+        );
+        let proposed = registry(3, vec![binding(SID_SYSTEM, "owner-a", false, 1)]);
+        assert!(enforce_monotonic_update(Some(&old), &proposed).is_err());
+    }
+
+    #[test]
+    fn stale_concurrent_update_is_refused() {
+        let committed = registry(9, vec![binding(SID_SYSTEM, "owner-a", false, 1)]);
+        // A writer that read generation 7 and proposes generation 7 or lower
+        // must not overwrite the state committed by another writer.
+        let stale = registry(7, vec![binding(SID_SYSTEM, "attacker", false, 1)]);
+        assert!(enforce_monotonic_update(Some(&committed), &stale).is_err());
+        let equal = registry(9, vec![binding(SID_SYSTEM, "attacker", false, 1)]);
+        assert!(enforce_monotonic_update(Some(&committed), &equal).is_err());
     }
 
     #[test]
     fn initial_generation_must_be_positive() {
         assert!(enforce_monotonic_update(None, &OwnerRegistry::empty(0)).is_err());
         assert!(enforce_monotonic_update(None, &OwnerRegistry::empty(1)).is_ok());
+    }
+
+    #[test]
+    fn oversized_and_malformed_registry_bytes_are_refused() {
+        let oversized = vec![b'x'; MAX_REGISTRY_BYTES + 1];
+        assert_eq!(
+            parse_registry_bytes(&oversized),
+            Err(Refusal::CorruptRegistry)
+        );
+        assert_eq!(
+            parse_registry_bytes(b"{not json"),
+            Err(Refusal::CorruptRegistry)
+        );
+        let valid = canonical_json(&registry(1, vec![binding(SID_SYSTEM, "a", false, 1)])).unwrap();
+        assert!(parse_registry_bytes(&valid).is_ok());
     }
 
     #[cfg(not(windows))]
@@ -877,19 +1450,93 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn win32_error_classification_distinguishes_first_install_from_failures() {
+        use windows::classify_win32_error as classify;
+        assert_eq!(classify(2), Refusal::RegistryAbsent);
+        assert_eq!(classify(5), Refusal::AccessDenied);
+        assert_eq!(classify(32), Refusal::SharingViolation);
+        assert_eq!(classify(3), Refusal::UntrustedLocation);
+        assert_eq!(classify(80), Refusal::ConcurrentUpdate);
+        assert_eq!(classify(183), Refusal::ConcurrentUpdate);
+        assert_eq!(classify(1314), Refusal::AccessDenied);
+        assert_eq!(classify(122), Refusal::IoFailure);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn shared_lock_identity_is_stable_across_calls_and_processes() {
+        let path = Path::new("C:\\ProgramData\\PrometheOS\\Lite\\owner-registry\\registry.json");
+        let first = windows::test_mutex_name(path);
+        let second = windows::test_mutex_name(path);
+        assert_eq!(first, second);
+        assert!(!first.contains(&std::process::id().to_string()));
+        assert_ne!(
+            first,
+            windows::test_mutex_name(Path::new("C:\\ProgramData\\other\\registry.json"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn concurrent_writers_share_one_mutex() {
+        // Worker mode: acquire the SAME named mutex the provisioner uses,
+        // perform a read/modify/write of a shared counter, and exit.
+        if let Ok(spec) = std::env::var("PROMETHEOS_LOCK_WORKER") {
+            let (name, counter) = spec.split_once('|').expect("worker spec");
+            let _guard = windows::acquire_test_mutex(name).expect("acquire shared mutex");
+            let value: usize = std::fs::read_to_string(counter)
+                .unwrap_or_else(|_| "0".to_owned())
+                .trim()
+                .parse()
+                .unwrap_or(0);
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            std::fs::write(counter, (value + 1).to_string()).expect("write counter");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("prometheos-lock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let counter = dir.join("counter.txt");
+        std::fs::write(&counter, "0").expect("seed counter");
+        let name = windows::test_mutex_name(&dir.join("registry.json"));
+        let spec = format!("{}|{}", name, counter.to_string_lossy());
+        let exe = std::env::current_exe().expect("test executable");
+        let mut children = Vec::new();
+        for _ in 0..2 {
+            children.push(
+                std::process::Command::new(&exe)
+                    .arg("concurrent_writers_share_one_mutex")
+                    .env("PROMETHEOS_LOCK_WORKER", &spec)
+                    .spawn()
+                    .expect("spawn writer"),
+            );
+        }
+        for mut child in children {
+            assert!(child.wait().expect("wait for writer").success());
+        }
+        let value: usize = std::fs::read_to_string(&counter)
+            .expect("read counter")
+            .trim()
+            .parse()
+            .expect("parse counter");
+        let _ = std::fs::remove_dir_all(&dir);
+        // Exactly two serialized read/modify/write cycles: a per-process
+        // unique lock would allow a lost update and yield 1.
+        assert_eq!(value, 2, "concurrent writers were not mutually exclusive");
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn old_acl_predicate_would_accept_unsafe_mask() {
-        // The repaired implementation refuses these masks. The OLD predicate
-        // (mask & (GENERIC_WRITE | WRITE_DAC | WRITE_OWNER)) saw zero and
-        // accepted them, so this test fails against the reviewed head.
         let old_considered_safe = |mask: u32| {
             mask & (winapi::um::winnt::GENERIC_WRITE
                 | winapi::um::winnt::WRITE_DAC
                 | winapi::um::winnt::WRITE_OWNER)
                 == 0
         };
-        assert!(old_considered_safe(0x1000_0000)); // GENERIC_ALL (not GENERIC_WRITE)
-        assert!(old_considered_safe(0x0000_0046)); // write data / append / delete child
-        assert!(old_considered_safe(0x0000_0100)); // FILE_WRITE_ATTRIBUTES
+        assert!(old_considered_safe(0x1000_0000));
+        assert!(old_considered_safe(0x0000_0046));
+        assert!(old_considered_safe(0x0000_0100));
         assert!(windows::ace_is_dangerous_for_test(0x1000_0000));
         assert!(windows::ace_is_dangerous_for_test(0x0000_0046));
         assert!(windows::ace_is_dangerous_for_test(0x0000_0100));
@@ -898,16 +1545,119 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn granular_and_generic_write_rights_are_dangerous() {
-        // These masks were accepted by the old GENERIC_WRITE|WRITE_DAC|WRITE_OWNER
-        // check. They must now be refused for untrusted SIDs.
-        assert!(windows::ace_is_dangerous_for_test(0x001F_01FF)); // FILE_ALL_ACCESS
-        assert!(windows::ace_is_dangerous_for_test(0x1000_0000)); // GENERIC_ALL
-        assert!(windows::ace_is_dangerous_for_test(0x4000_0000)); // GENERIC_WRITE
-        assert!(windows::ace_is_dangerous_for_test(0x0000_0002)); // FILE_WRITE_DATA
-        assert!(windows::ace_is_dangerous_for_test(0x0000_0004)); // FILE_APPEND_DATA / ADD_SUBDIR
-        assert!(windows::ace_is_dangerous_for_test(0x0000_0040)); // FILE_DELETE_CHILD
-        assert!(windows::ace_is_dangerous_for_test(0x0001_0000)); // DELETE
+        assert!(windows::ace_is_dangerous_for_test(0x001F_01FF));
+        assert!(windows::ace_is_dangerous_for_test(0x1000_0000));
+        assert!(windows::ace_is_dangerous_for_test(0x4000_0000));
+        assert!(windows::ace_is_dangerous_for_test(0x0000_0002));
+        assert!(windows::ace_is_dangerous_for_test(0x0000_0004));
+        assert!(windows::ace_is_dangerous_for_test(0x0000_0040));
+        assert!(windows::ace_is_dangerous_for_test(0x0001_0000));
+        assert!(windows::ace_is_dangerous_for_test(0x0100_0000)); // ACCESS_SYSTEM_SECURITY
+        assert!(windows::ace_is_dangerous_for_test(0x0200_0000)); // MAXIMUM_ALLOWED
         assert!(!windows::ace_is_dangerous_for_test(0x0012_0089)); // FILE_GENERIC_READ
+    }
+
+    #[cfg(windows)]
+    #[repr(align(8))]
+    struct AclBuf([u8; 256]);
+
+    #[cfg(windows)]
+    #[test]
+    fn everyone_full_control_dacl_is_refused_with_trusted_owner() {
+        // Isolates DACL evaluation from ownership: the ACL has a trusted
+        // full-control ACE plus an untrusted full-control ACE.
+        use std::os::windows::ffi::OsStrExt;
+        use winapi::um::securitybaseapi::{AddAccessAllowedAce, InitializeAcl};
+        use winapi::um::winnt::{ACL_REVISION, GENERIC_ALL, PACL};
+        let revision = ACL_REVISION as u32;
+        let mut buf = AclBuf([0u8; 256]);
+        let acl: PACL = buf.0.as_mut_ptr() as *mut _;
+        assert_eq!(
+            unsafe { InitializeAcl(acl, buf.0.len() as u32, revision) },
+            winapi::shared::minwindef::TRUE
+        );
+        for (sid, mask) in [
+            (SID_ADMINISTRATORS, GENERIC_ALL),
+            (SID_EVERYONE, GENERIC_ALL),
+        ] {
+            let mut text: Vec<u16> = std::ffi::OsStr::new(sid)
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+            let mut psid: winapi::um::winnt::PSID = std::ptr::null_mut();
+            assert_eq!(
+                unsafe {
+                    winapi::shared::sddl::ConvertStringSidToSidW(text.as_mut_ptr(), &mut psid)
+                },
+                winapi::shared::minwindef::TRUE
+            );
+            assert_eq!(
+                unsafe { AddAccessAllowedAce(acl, revision, mask, psid) },
+                winapi::shared::minwindef::TRUE
+            );
+            unsafe { winapi::um::winbase::LocalFree(psid) };
+        }
+        assert_eq!(
+            windows::validate_acl_for_test(acl),
+            Err(Refusal::InvalidSecurityMetadata)
+        );
+
+        // A read-only service identity alongside the trusted ACE is allowed.
+        let mut buf2 = AclBuf([0u8; 256]);
+        let acl2: PACL = buf2.0.as_mut_ptr() as *mut _;
+        assert_eq!(
+            unsafe { InitializeAcl(acl2, buf2.0.len() as u32, revision) },
+            winapi::shared::minwindef::TRUE
+        );
+        for (sid, mask) in [
+            (SID_ADMINISTRATORS, GENERIC_ALL),
+            (SID_EVERYONE, 0x0012_0089), // FILE_GENERIC_READ
+        ] {
+            let mut text: Vec<u16> = std::ffi::OsStr::new(sid)
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+            let mut psid: winapi::um::winnt::PSID = std::ptr::null_mut();
+            assert_eq!(
+                unsafe {
+                    winapi::shared::sddl::ConvertStringSidToSidW(text.as_mut_ptr(), &mut psid)
+                },
+                winapi::shared::minwindef::TRUE
+            );
+            assert_eq!(
+                unsafe { AddAccessAllowedAce(acl2, revision, mask, psid) },
+                winapi::shared::minwindef::TRUE
+            );
+            unsafe { winapi::um::winbase::LocalFree(psid) };
+        }
+        assert!(windows::validate_acl_for_test(acl2).is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn unknown_and_deny_ace_forms_fail_closed() {
+        use std::os::windows::ffi::OsStrExt;
+        use winapi::um::securitybaseapi::{AddAccessDeniedAce, InitializeAcl};
+        use winapi::um::winnt::{ACL_REVISION, GENERIC_ALL, PACL};
+        let revision = ACL_REVISION as u32;
+        let mut buf = AclBuf([0u8; 256]);
+        let acl: PACL = buf.0.as_mut_ptr() as *mut _;
+        unsafe { InitializeAcl(acl, buf.0.len() as u32, revision) };
+        let mut text: Vec<u16> = std::ffi::OsStr::new(SID_EVERYONE)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut psid: winapi::um::winnt::PSID = std::ptr::null_mut();
+        unsafe { winapi::shared::sddl::ConvertStringSidToSidW(text.as_mut_ptr(), &mut psid) };
+        assert_eq!(
+            unsafe { AddAccessDeniedAce(acl, revision, GENERIC_ALL, psid) },
+            winapi::shared::minwindef::TRUE
+        );
+        unsafe { winapi::um::winbase::LocalFree(psid) };
+        assert_eq!(
+            windows::validate_acl_for_test(acl),
+            Err(Refusal::InvalidSecurityMetadata)
+        );
     }
 
     #[cfg(windows)]
@@ -920,14 +1670,16 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn unprivileged_provisioning_is_denied() {
+    fn unprivileged_provisioning_is_denied_before_any_write() {
         if windows::require_provisioning_authority().is_ok() {
             eprintln!("SKIP: elevated host; privileged provisioning acceptance NOT RUN");
             return;
         }
-        let registry = OwnerRegistry::empty(1);
+        // A valid protected path, not a nonexistent placeholder.
+        let path = default_registry_path().expect("Known Folder path");
+        let proposed = registry(1, Vec::new());
         assert_eq!(
-            windows::provision_registry(Path::new("C:\\nonexistent\\registry.json"), &registry),
+            windows::provision_registry(&path, &proposed),
             Err(Refusal::ElevatedAuthorityRequired)
         );
     }
@@ -939,9 +1691,10 @@ mod tests {
             "prometheos-registry-missing-{}",
             std::process::id()
         ));
+        let _ = std::fs::remove_file(&path);
         assert_eq!(
             windows::validate_file_security(&path),
-            Err(Refusal::IoFailure)
+            Err(Refusal::RegistryAbsent)
         );
     }
 
