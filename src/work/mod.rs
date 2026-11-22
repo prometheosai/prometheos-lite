@@ -14,6 +14,7 @@ pub mod execution_service;
 pub mod human_principal;
 pub mod journal_contract;
 pub mod orchestrator;
+pub mod owner_registry;
 pub mod persistence;
 pub mod phase_controller;
 pub mod plan;
