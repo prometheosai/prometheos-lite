@@ -4,7 +4,7 @@ Date: 2026-11-21
 Status: Proposed (research-only)
 
 ## Problem and scope
-Investigate read-only, versioned agent activity events and attention projection from Lite's authoritative execution. Distinguish running-process survival, resumable conversation, and persisted task record. Use event cursor/snapshot contracts and source provenance. OSC 7501 and harness hooks are inputs only, never authority. No direct adoption of TUIOS control socket or permissive shell execution. Existing P0 issue #297 security containment remains a hard block for unsafe refs and merges.
+Investigate read-only, versioned agent activity events and attention projection from Lite's authoritative execution. Distinguish running-process survival, resumable conversation, and persisted task record. Use event cursor/snapshot contracts and source provenance. OSC 7501 and harness hooks are inputs only, never authority. No direct adoption of TUIOS control socket or permissive shell execution. Historical suspect objects from archived P0 #297 remain untrusted: tainted refs and suspect executable content must not be executed, adopted or merged. #297 is archived (closed as not planned) and is not a blanket prohibition on merging independently reviewed PRs; every merge still requires its own verification, authority and acceptance gates.
 
 ## Project-specific acceptance criteria
 Draft a contract and test plan for idempotent replay, sequence gaps, stale event rejection, daemon/reboot recovery, untrusted status strings, source rank, per-principal visibility and no side effects from read-only queries. Do not publish runtime code or touch tainted refs.
@@ -40,6 +40,7 @@ Observed upstream: long-lived daemon owns PTYs and session state; clients attach
 - Its 64KB PTY output ring can lose history after long disconnections; replay gaps must be detectable and visible.
 - Command-pattern risk detection does not replace policy enforcement or a sandbox.
 - No blanket Git write/merge authority; avoid tainted refs and paid CI.
+- A local socket or filesystem permission is not authenticated client identity; any privileged observation/activity transport remains bound to #340's trusted administrator-controlled SID→owner provisioning prerequisite, which is currently unmet, and must not be built on a self-writable mapping.
 - Keep source-derived facts separate from proposed project architecture.
 
 ## Acceptance gates
