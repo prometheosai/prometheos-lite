@@ -929,8 +929,12 @@ impl ExternalEvaluationFormat {
     pub fn unsupported() -> Self {
         Self {
             status: "unsupported".to_string(),
-            contract: "foundry.workflow-evaluation (unpublished)".to_string(),
-            detail: "Lite exports raw evidence records only; the Foundry external evaluation format is unpublished. No Foundry consumption, metrics or comparisons are claimed.".to_string(),
+            // Canonical published contract: Foundry `docs/coding-evaluation.md`
+            // blob 56517351f90e388a208688a6df962493eea275f1 defines the
+            // `foundry.coding-verdict` v1.0.0 artifact. It is NOT unpublished;
+            // Lite simply does not emit it.
+            contract: "foundry.coding-verdict/1.0.0".to_string(),
+            detail: "Lite exports raw evidence records only and does not emit a Foundry verdict. The published foundry.coding-verdict v1.0.0 artifact is owned and produced by Foundry; an `accepted` outcome additionally requires an independently trusted oracle executor that does not exist. No Foundry consumption, metrics or comparisons are claimed by Lite.".to_string(),
         }
     }
 }

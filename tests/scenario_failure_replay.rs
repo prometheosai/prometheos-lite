@@ -845,7 +845,7 @@ fn failure_replay_evidence_claims_no_benchmark_success_and_no_foundry_contract()
         chain
             .external_evaluation_format
             .contract
-            .starts_with("foundry.workflow-evaluation")
+            .starts_with("foundry.coding-verdict")
     );
     assert_eq!(
         chain.replay.repair.origin,
