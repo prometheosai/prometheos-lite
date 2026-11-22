@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Bounded supervisor state machine and safety guards for the loop.
+"""Bounded supervisor with protected transitions and authority checks.
 
-Enforces exact commit+tree binding, builder/reviewer separation, single-owner
-claims, repair budget, dependency readiness and validated recovery.
+Generic `advance` cannot cross review/completion gates: those require real
+verifier evidence and an independent APPROVE verdict bound to the exact
+candidate commit and tree.
 """
 from __future__ import annotations
 
@@ -14,19 +15,21 @@ from pathlib import Path
 
 import checkpoint as ck
 import common as cm
+import verify as vf
 
 VERDICTS = {"APPROVE", "REPAIR_REQUIRED", "BLOCKED"}
+# Generic advance never authorizes a protected gate.
 TRANSITIONS = {
     "DISCOVER": {"SELECT"},
     "SELECT": {"CONTRACT", "BLOCKED"},
     "CONTRACT": {"WORKTREE", "BLOCKED"},
     "WORKTREE": {"IMPLEMENT", "BLOCKED"},
     "IMPLEMENT": {"VERIFY", "BLOCKED"},
-    "VERIFY": {"REVIEW", "IMPLEMENT", "BLOCKED"},
-    "REVIEW": {"READY", "REPAIR", "BLOCKED"},
+    "VERIFY": {"IMPLEMENT", "BLOCKED"},
+    "REVIEW": {"REPAIR", "BLOCKED"},
     "REPAIR": {"VERIFY", "BLOCKED"},
-    "READY": {"SAVE_EVIDENCE", "BLOCKED"},
-    "SAVE_EVIDENCE": {"DONE", "BLOCKED"},
+    "READY": {"BLOCKED"},
+    "SAVE_EVIDENCE": {"BLOCKED"},
     "DONE": set(),
     "BLOCKED": set(),
 }
@@ -50,6 +53,18 @@ def check_dependencies(contract: dict[str, Any]) -> None:
             raise cm.LoopError(f"dependency {dep.get('issue')} not merged")
 
 
+def check_live_revision(cp: dict[str, Any]) -> None:
+    wt = str(cp["worktree"])
+    if not cm.git_ok(wt, "rev-parse", "--is-inside-work-tree"):
+        raise cm.LoopError("worktree missing")
+    if cm.git(wt, "rev-parse", "HEAD") != cp["candidate_sha"]:
+        raise cm.LoopError("worktree HEAD differs from checkpoint candidate")
+    if cm.git(wt, "rev-parse", "HEAD^{tree}") != cp["tree_sha"]:
+        raise cm.LoopError("worktree tree differs from checkpoint tree")
+    if not cm.worktree_clean(wt):
+        raise cm.LoopError("worktree is dirty")
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -65,12 +80,17 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--repo", required=True)
     q.add_argument("--task-id", required=True)
     q.add_argument("--to", required=True)
+    q = sub.add_parser("register-candidate")
+    q.add_argument("--repo", required=True)
+    q.add_argument("--task-id", required=True)
+    q.add_argument("--candidate", required=True)
+    q.add_argument("--tree", required=True)
     q = sub.add_parser("submit-review")
     q.add_argument("--repo", required=True)
     q.add_argument("--task-id", required=True)
     q.add_argument("--candidate", required=True)
     q.add_argument("--tree", required=True)
-    q.add_argument("--evidence")
+    q.add_argument("--evidence", required=True)
     q = sub.add_parser("record-review")
     q.add_argument("--repo", required=True)
     q.add_argument("--task-id", required=True)
@@ -85,6 +105,10 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--task-id", required=True)
     q.add_argument("--candidate", required=True)
     q.add_argument("--tree", required=True)
+    q = sub.add_parser("complete")
+    q.add_argument("--repo", required=True)
+    q.add_argument("--task-id", required=True)
+    q.add_argument("--evidence", required=True)
     q = sub.add_parser("recover")
     q.add_argument("--repo", required=True)
     q.add_argument("--task-id", required=True)
@@ -124,8 +148,8 @@ def main(argv: list[str] | None = None) -> int:
                     ck.write(args.repo, ck.blank(
                         contract["task_id"], contract["issue"], args.repo,
                         contract["base_sha"], contract["tree_sha"],
-                        contract["worktree"], contract["branch"],
-                        contract["owner"], contract["builder_context"],
+                        contract["worktree"], contract["branch"], contract["owner"],
+                        contract["builder_context"], cm.sha256_file(args.contract),
                     ))
                     print("CLAIMED")
                 return 0
@@ -136,18 +160,10 @@ def main(argv: list[str] | None = None) -> int:
             if data["state"] == "DONE":
                 print("NO_OP_ALREADY_DONE")
                 return 0
-            root = str(cm.repo_root(args.repo))
             wt = Path(data["worktree"])
             if not wt.is_dir() or not cm.git_ok(str(wt), "rev-parse", "--is-inside-work-tree"):
                 raise cm.LoopError("worktree missing or not a git worktree")
-            head = cm.git(str(wt), "rev-parse", "HEAD")
-            tree = cm.git(str(wt), "rev-parse", "HEAD^{tree}")
-            if data["candidate_sha"] and head != data["candidate_sha"]:
-                raise cm.LoopError("HEAD differs from checkpoint candidate; refusing to resume")
-            if data["tree_sha"] and tree != data["tree_sha"]:
-                raise cm.LoopError("tree differs from checkpoint tree; refusing to resume")
-            if cm.git(str(wt), "rev-parse", "--abbrev-ref", "HEAD") != data["branch"]:
-                raise cm.LoopError("branch mismatch")
+            check_live_revision(data)
             print("RESUME:" + str(data["next_safe_action"]))
             return 0
 
@@ -164,32 +180,42 @@ def main(argv: list[str] | None = None) -> int:
                     raise cm.LoopError(f"illegal transition {data['state']} -> {args.to}")
                 data["state"] = args.to
                 data["last_successful_step"] = f"advance:{args.to}"
-                data["next_safe_action"] = {
-                    "READY": "prepare-evidence-and-pr",
-                    "DONE": "select-next-eligible-issue",
-                }.get(args.to, f"continue-from-{args.to.lower()}")
+                data["next_safe_action"] = f"continue-from-{args.to.lower()}"
                 ck.write(args.repo, data)
                 print(f"STATE:{args.to}")
+                return 0
+
+            if args.cmd == "register-candidate":
+                cm.validate_sha(args.candidate, "candidate")
+                cm.validate_sha(args.tree, "tree")
+                if data["state"] not in {"IMPLEMENT", "VERIFY", "REPAIR"}:
+                    raise cm.LoopError("candidate registration not allowed in this state")
+                root = str(cm.repo_root(args.repo))
+                cm.git(root, "cat-file", "-e", f"{args.candidate}^{{commit}}")
+                cm.git(root, "cat-file", "-e", f"{args.tree}^{{tree}}")
+                data["candidate_sha"] = args.candidate
+                data["tree_sha"] = args.tree
+                data["next_safe_action"] = "run-verification"
+                ck.write(args.repo, data)
+                print("CANDIDATE_REGISTERED")
                 return 0
 
             if args.cmd == "submit-review":
                 cm.validate_sha(args.candidate, "candidate")
                 cm.validate_sha(args.tree, "tree")
+                if data["state"] != "VERIFY":
+                    raise cm.LoopError("review requires state VERIFY")
                 if args.candidate != data["candidate_sha"] or args.tree != data["tree_sha"]:
                     raise cm.LoopError("candidate or tree differs from checkpoint")
-                if args.evidence:
-                    ev = cm.read_json(args.evidence)
-                    if ev.get("schema") != "autonomous-evidence/2":
-                        raise cm.LoopError("wrong evidence schema")
-                    if ev.get("candidate_sha") != args.candidate or ev.get("tree_sha") != args.tree:
-                        raise cm.LoopError("evidence bound to a different candidate")
-                    if ev.get("pre_head") != args.candidate or ev.get("post_head") != args.candidate:
-                        raise cm.LoopError("evidence HEAD drift")
-                    if ev.get("pre_tree") != args.tree or ev.get("post_tree") != args.tree:
-                        raise cm.LoopError("evidence tree drift")
-                    if ev["summary"]["failed"] or ev["summary"]["untested"] or ev["summary"]["invalidated"]:
-                        raise cm.LoopError("verification not green; cannot submit for review")
+                policy_sha = vf.load_policy()[1]
+                evidence = vf.validate_evidence(cm.read_json(args.evidence), policy_sha,
+                                                candidate=args.candidate, tree=args.tree,
+                                                task_id=args.task_id)
+                if evidence["contract_sha256"] != data["contract_sha256"]:
+                    raise cm.LoopError("evidence is bound to a different contract")
+                check_live_revision(data)
                 data["state"] = "REVIEW"
+                data["evidence_sha256"] = cm.sha256_file(args.evidence)
                 data["review_result"] = {"verdict": "NOT_REVIEWED", "candidate_sha": None,
                                          "reviewer": None, "review_context": None}
                 data["next_safe_action"] = "dispatch-independent-reviewer"
@@ -204,23 +230,21 @@ def main(argv: list[str] | None = None) -> int:
                     raise cm.LoopError("no review is open")
                 if args.candidate != data["candidate_sha"] or args.tree != data["tree_sha"]:
                     raise cm.LoopError("stale verdict: candidate or tree differs")
-                live_wt = str(data["worktree"])
-                if cm.git(live_wt, "rev-parse", "HEAD") != args.candidate:
-                    raise cm.LoopError("worktree HEAD moved since verification")
-                if cm.git(live_wt, "rev-parse", "HEAD^{tree}") != args.tree:
-                    raise cm.LoopError("worktree tree moved since verification")
+                check_live_revision(data)
+                if not data["evidence_sha256"]:
+                    raise cm.LoopError("no verified evidence bound to this task")
                 if args.reviewer == data["owner"]:
                     raise cm.LoopError("builder cannot review its own work")
                 if args.review_context == data["builder_context"]:
                     raise cm.LoopError("review must run in a separate context")
                 data["review_result"] = {
                     "verdict": args.verdict, "candidate_sha": args.candidate,
-                    "reviewer": args.reviewer, "review_context": args.review_context,
-                    "findings": args.findings,
+                    "tree_sha": args.tree, "reviewer": args.reviewer,
+                    "review_context": args.review_context, "findings": args.findings,
                 }
                 if args.verdict == "APPROVE":
                     data["state"] = "READY"
-                    data["next_safe_action"] = "prepare-evidence-and-pr"
+                    data["next_safe_action"] = "complete-with-bound-evidence"
                 elif args.verdict == "BLOCKED":
                     data["state"] = "BLOCKED"
                     data["blockers"]["authority"] = args.findings or "unavailable authority"
@@ -249,11 +273,34 @@ def main(argv: list[str] | None = None) -> int:
                 data["tree_sha"] = args.tree
                 data["state"] = "VERIFY"
                 data["test_results"] = {}
+                data["evidence_sha256"] = None
                 data["review_result"] = {"verdict": "NOT_REVIEWED", "candidate_sha": None,
                                          "reviewer": None, "review_context": None}
                 data["next_safe_action"] = "rerun-verification"
                 ck.write(args.repo, data)
                 print("REPAIR_REGISTERED")
+                return 0
+
+            if args.cmd == "complete":
+                if data["state"] != "READY":
+                    raise cm.LoopError("completion requires READY after independent APPROVE")
+                verdict = data["review_result"]
+                if verdict.get("verdict") != "APPROVE":
+                    raise cm.LoopError("no valid APPROVE verdict")
+                if verdict.get("candidate_sha") != data["candidate_sha"] or verdict.get("tree_sha") != data["tree_sha"]:
+                    raise cm.LoopError("approval bound to a different candidate")
+                if not data["evidence_sha256"] or cm.sha256_file(args.evidence) != data["evidence_sha256"]:
+                    raise cm.LoopError("evidence package differs from the approved one")
+                policy_sha = vf.load_policy()[1]
+                vf.validate_evidence(cm.read_json(args.evidence), policy_sha,
+                                     candidate=data["candidate_sha"], tree=data["tree_sha"],
+                                     task_id=args.task_id)
+                check_live_revision(data)
+                data["state"] = "DONE"
+                data["last_successful_step"] = "complete:bound-evidence"
+                data["next_safe_action"] = "select-next-eligible-issue"
+                ck.write(args.repo, data)
+                print("STATE:DONE")
                 return 0
 
         raise cm.LoopError("unhandled command")

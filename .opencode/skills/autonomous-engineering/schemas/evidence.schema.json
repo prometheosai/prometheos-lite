@@ -1,10 +1,10 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "autonomous-evidence/2",
+  "title": "autonomous-evidence/3",
   "type": "object",
-  "required": ["schema", "task_id", "candidate_sha", "tree_sha", "pre_head", "post_head", "pre_tree", "post_tree", "policy_sha256", "resource_limits", "results", "summary"],
+  "required": ["schema", "task_id", "candidate_sha", "tree_sha", "pre_head", "post_head", "pre_tree", "post_tree", "pre_clean", "post_clean", "policy_sha256", "contract_sha256", "resource_limits", "mandatory_ids", "results", "summary", "green", "started_at", "finished_at", "verification_seconds", "process_tree_termination_guaranteed"],
   "properties": {
-    "schema": { "const": "autonomous-evidence/2" },
+    "schema": { "const": "autonomous-evidence/3" },
     "task_id": { "type": "string" },
     "candidate_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
     "tree_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
@@ -12,18 +12,15 @@
     "post_head": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
     "pre_tree": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
     "post_tree": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "pre_clean": { "const": true },
+    "post_clean": { "const": true },
     "policy_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "contract_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "resource_limits": { "type": "object" },
-    "results": { "type": "array" },
-    "summary": {
-      "type": "object",
-      "properties": {
-        "passed": { "type": "integer" },
-        "failed": { "type": "integer" },
-        "skipped": { "type": "integer" },
-        "untested": { "type": "integer" },
-        "invalidated": { "type": "integer" }
-      }
-    }
+    "mandatory_ids": { "type": "array", "minItems": 1 },
+    "results": { "type": "array", "minItems": 1 },
+    "summary": { "type": "object" },
+    "green": { "const": true },
+    "process_tree_termination_guaranteed": { "type": "boolean" }
   }
 }

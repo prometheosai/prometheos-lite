@@ -6,7 +6,7 @@ description: |
   a separate OpenCode context, repair at most twice, and prepare a PR. No hosted
   CI, paid service, deployment, merge, or product-specific path is required.
   Use when a repository needs independently verified, evidence-bound changes.
-version: 2.0.0
+version: 3.0.0
 user-invocable: true
 argument-hint: "[discover|claim|status|advance|verify|review|recover|selftest]"
 allowed-tools:
@@ -23,6 +23,12 @@ A repository-local control loop that turns one bounded task into one
 independently reviewed candidate. It does not merge, deploy, publish, or spend
 money. Every claim is bound to an exact commit **and tree** and a reproducible
 command.
+
+Authorization is deliberately narrow: generic `advance` cannot cross a review
+or completion gate; those require bound evidence and an independent APPROVE.
+Commands are authorized only when their argv matches a reviewed argument
+template and their executable resolves outside the worktree. This is NOT an
+OS sandbox — no filesystem, network or privilege isolation is claimed.
 
 ## Roles
 
@@ -55,6 +61,8 @@ S=.opencode/skills/autonomous-engineering/scripts
 python $S/supervisor.py discover --repo .
 python $S/supervisor.py claim --repo . --contract task.json
 python $S/checkpoint.py get --repo . --task-id TASK-001
+python $S/supervisor.py register-candidate --repo . --task-id TASK-001 \
+    --candidate <sha> --tree <tree>
 python $S/verify.py run --repo . --contract task.json --output evidence.json
 python $S/verify.py validate-evidence --repo . --output evidence.json
 python $S/supervisor.py submit-review --repo . --task-id TASK-001 \
@@ -62,6 +70,7 @@ python $S/supervisor.py submit-review --repo . --task-id TASK-001 \
 python $S/supervisor.py record-review --repo . --task-id TASK-001 \
     --candidate <sha> --tree <tree> --verdict APPROVE \
     --reviewer <id> --review-context <different-context>
+python $S/supervisor.py complete --repo . --task-id TASK-001 --evidence evidence.json
 python $S/supervisor.py recover --repo . --task-id TASK-001
 python $S/supervisor.py selftest
 ```
@@ -79,6 +88,9 @@ none requires network, credentials, hosted CI or a hosted model service.
 5. Repair budget is two. There is no endless repair cycle.
 6. No destructive command, deployment, privileged operation or external spend.
 7. Respect AGENTS.md, security holds, protected branches and repository gates.
+8. A clean worktree is required for verification and review; dirty state invalidates evidence.
+9. Evidence is locally generated, not cryptographically signed; integrity comes
+   from recomputed counts, exact bindings and current policy digest, not trust in a summary.
 
 ## Portability
 

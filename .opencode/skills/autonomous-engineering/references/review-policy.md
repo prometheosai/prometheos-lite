@@ -14,4 +14,9 @@ context equals the builder context. These checks are procedural guards, not a
 security boundary: a genuinely independent context must actually be used.
 
 Any new commit invalidates the verdict because both SHA and tree are rebound.
-Repair is capped at two attempts; exhaustive repair budget becomes BLOCKED.
+Repair is capped at two attempts; exhausted repair budget becomes BLOCKED.
+Generic `advance` cannot move a task into REVIEW, READY or DONE: only
+`submit-review` (bound evidence), `record-review` (independent APPROVE) and
+`complete` (same approved evidence package) can cross those gates. The public
+checkpoint `patch` command cannot write state, candidate, tree, owner or review
+fields.

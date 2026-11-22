@@ -1,86 +1,71 @@
-# Autonomous engineering skill v2 — qualification evidence
+# Autonomous engineering Skill v3 — qualification evidence
 
-Date: 2026-11-22. Harness: OpenCode v2.3.2. Runtime: Python 3.14, Git 2.56.1 (Windows).
+Date: 2026-11-22. Harness: OpenCode v2.3.2. Python 3.14, Git 2.56.1 (Windows).
 Host: 16 logical CPUs, 32 GB RAM. No new dependencies; stdlib only.
 
-## Classification
+## Classification and scope
 
-Repository classification: **NEW** (no prior autonomous-engineering skill; existing
-Loop Engineering Protocol and `scripts/local_ci.py` retained untouched).
+Repository classification: NEW. This is a tooling-only addition under
+`.opencode/skills/`. It does not modify product code, promote the product's
+autonomous execution loop, or change any graduation hold. It exceeds the
+repository's default 5-file / 200-line PR budget; the universal dispatch is the
+explicit scope for that exception. No merge or deployment is performed.
 
-This is a **tooling-only** addition under `.opencode/skills/`. It does not modify
-product code, does not promote the product's autonomous execution loop, and does
-not change the repository's graduation holds. Note: 13 files / ~800 lines exceed
-the repository's default 5-file / 200-line PR budget; the universal dispatch is
-the explicit scope for this exception. No merge is performed by this work.
-
-## Reused capabilities
-
-- Repository-owned `scripts/local_ci.py` and Rust/frontend baselines stay authoritative.
-- Existing git worktree support, issue/PR policy and AGENTS.md rules are respected.
-- The DishMise PR #359 reference supplied the role/state-machine shape only; its
-  `fcntl`-only lock, denylist-style command guard, optional HEAD enforcement and
-  identifier-only reviewer check were replaced.
-
-## Repairs over the reference
-
-1. Cross-platform atomic claim lock (`msvcrt` / `fcntl`), not POSIX-only.
-2. Command **allowlist** from `policies/approved-commands.json`; no denylist, no
-   shell. Only contract-declared commands that are also policy-approved run.
-3. Exact commit **and tree** binding before and after verification; drift
-   invalidates evidence. The reference had optional HEAD enforcement and no
-   post-run check.
-4. Review requires SHA, tree, reviewer id **and a different review context**;
-   reviewer also re-checks the live worktree HEAD/tree. This is a procedural
-   guard, not a security boundary.
-5. Recovery checks worktree existence, branch, HEAD and tree before resuming.
-6. Resource limits (count, timeout, output bytes) are read from the policy file
-   and recorded in evidence; zero external spend is never claimed as free model
-   inference.
+The DishMise PR #359 reference supplied the role/state-machine shape only. Its
+`fcntl`-only lock, denylist-style guard, optional HEAD enforcement and
+identifier-only reviewer check were replaced.
 
 ## Qualification results
 
-`python -m unittest discover -s tests -v`: **19 tests, 0 failures** (exit 0), also
-via `supervisor.py selftest` (exit 0). `compileall` and JSON parse checks: exit 0.
+`python -m unittest discover -s tests -v`: **43 tests, 0 failures** (exit 0),
+also via `supervisor.py selftest`. `compileall` and JSON parse checks pass.
 
-Negative controls include: unknown checkpoint field, malformed SHA, duplicate
-claim with a different owner, illegal state transition, already-DONE no-op,
-builder as reviewer, identical review context, stale review after a new commit,
-repair-budget exhaustion, wrong-SHA recovery, missing worktree recovery, partial
-checkpoint JSON, unapproved command rejection, missing worktree in contract,
-and untested check not being green.
+Gates:
+- GATE 1 command authorization: negative controls for arbitrary Python, unsafe
+  git options, unknown pattern, executable spoofing, shell metacharacters, and
+  path traversal — PASS.
+- GATE 2 exact-SHA integrity: wrong SHA, stale tree, dirty worktree, evidence
+  from another worktree/repository — PASS.
+- GATE 3 completeness: forged summary, all-skipped, zero-pass, duplicate id,
+  unrecognized status, missing negative control, bad policy digest — PASS.
+- GATE 4 reviewer isolation: builder self-approval, identical context, stale
+  approval, reviewer-modified candidate, no evidence — PASS.
+- GATE 5 recovery/idempotency: partial checkpoint, partial evidence, wrong SHA,
+  missing worktree, repair-budget exhaustion, already-DONE no-op — PASS.
+- GATE 6 risk-based evidence: state-machine model check, seeded property
+  sequences, fault injection, one mutation control — PASS.
+- GATE 7 benchmarking: local recorder emits machine-readable results; overall
+  status INCONCLUSIVE (no comparable baseline, no model cost data).
+- GATE 8 repository regression: no product or test file in the repository was
+  modified by this change.
 
-## Real pilot (disposable repository, not production)
+## Real pilot (disposable repository)
 
-Task: fix `add(a, b)` returning `a - b` in a purpose-built two-file git repo with
-a failing unittest. Base `1889867f447899ee3c302b7a5ba0d00a44363622` /
-tree `3377d8a2e59bb71d3b2dfdca01568f399e06124c`.
+Base `566528c8bafe369d2fcae07c5772cb1a3e43b24d` /
+tree `eb8c606caa0030c88180585a73e4ff6cd0c2e99f`; buggy `add()` with a failing
+unittest (exit 1 baseline).
 
-- Builder: separate `general` subagent context, scoped to `calc.py` only.
-- Candidate: `f4bbb2d60ac6756aebd6e8e8abfd8f052d0224f3` /
-  tree `29f2c7ea4cbb61d53aa272799f933c3d53c086bf`.
+- Builder: separate `general` subagent, scoped to `calc.py`.
+- Candidate `ec6a5279fb07ca07815f69c21dbcf4fbed559afa` /
+  tree `4526aaad564ba7e851312eb2b67e8e4324566a21`.
 - Verifier: 2 passed / 0 failed / 0 skipped / 0 untested; pre=post=candidate for
-  both HEAD and tree; policy digest `1f169bc9…53fa3f0`.
-- Reviewer: separate read-only `explore` subagent context. Verdict `APPROVE`,
-  with independent HEAD/tree confirmation, scope check and test re-run.
-- Supervisor: DONE; `recover` afterwards returned `NO_OP_ALREADY_DONE`.
-- No repair was needed (0 / 2 attempts).
-
-The pilot repository and all checkpoints/evidence live outside the production
-repository. Nothing was merged or deployed.
-
-## Parallelism and benchmark
-
-- Parallelism: **NOT TESTED** — one safe disposable task existed. No concurrency
-  result is claimed.
-- Throughput: **INCONCLUSIVE** — no measured baseline for the existing workflow
-  under comparable tasks exists. No percentage improvement is claimed.
-- External cost: no paid service was used; model inference cost was not measured
-  and is not claimed to be zero.
+  HEAD and tree; clean worktree; contract and policy digests bound.
+- Reviewer: separate read-only `explore` subagent, verdict `APPROVE`, independent
+  HEAD/tree/scope/invariant/test/evidence checks at the exact candidate.
+- Supervisor: READY → DONE via `complete` with the bound evidence package;
+  `recover` returned `NO_OP_ALREADY_DONE`.
+- Measured verification time: 0.87 s (`scripts/benchmark.py`), overall
+  throughput INCONCLUSIVE. 0 repairs used.
 
 ## Known limitations
 
-No OS-level sandbox, no network fault injection, no true SIGKILL-mid-write test,
-no measured throughput advantage, and identifier/context checks are procedural.
-The reviewer's independence is a harness property, not a cryptographic boundary.
-Production readiness must not be inferred from these self-tests.
+No OS-level sandbox; the command guard is an authorization policy, not
+isolation. Reviewer independence is a procedural harness property, not a
+security boundary. Evidence is locally generated and not cryptographically
+signed. Full process-tree termination is POSIX-only; Windows records this in
+evidence (`process_tree_termination_guaranteed=false`). No formal/symbolic proof
+tool was available; bounded model checking is limited to explicit state
+enumeration. Parallelism and comparative speedup remain unmeasured.
+
+See `VERIFICATION.md` for requirement-to-evidence traceability, counterexamples,
+assumptions and residual risks.

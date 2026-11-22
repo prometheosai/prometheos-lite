@@ -10,13 +10,17 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import signal
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any
 
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
@@ -60,6 +64,13 @@ def validate_sha(value: Any, field: str, *, allow_none: bool = False) -> None:
         raise LoopError(f"{field} must be 40 lowercase hex" + (" or null" if allow_none else ""))
 
 
+def validate_sha256(value: Any, field: str, *, allow_none: bool = False) -> None:
+    if value is None and allow_none:
+        return
+    if not isinstance(value, str) or not SHA256_RE.fullmatch(value):
+        raise LoopError(f"{field} must be 64 lowercase hex" + (" or null" if allow_none else ""))
+
+
 def atomic_json_write(path: str | Path, data: dict[str, Any]) -> Path:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -82,14 +93,110 @@ def read_json(path: str | Path) -> dict[str, Any]:
     return data
 
 
+def worktree_clean(worktree: str) -> bool:
+    """Clean means no staged, unstaged or untracked changes in the worktree."""
+    return git(worktree, "status", "--porcelain") == ""
+
+
+def trusted_executable(name: str, forbidden_roots: list[str]) -> str:
+    """Resolve an executable and reject worktree/PATH-shadowed locations."""
+    resolved = shutil.which(name)
+    if not resolved:
+        raise LoopError(f"executable not found: {name}")
+    path = Path(resolved).resolve()
+    if not path.is_absolute():
+        raise LoopError(f"executable did not resolve to an absolute path: {name}")
+    for root in forbidden_roots:
+        try:
+            if path.is_relative_to(Path(root).resolve()):
+                raise LoopError(f"executable resolves inside a controlled directory: {path}")
+        except (OSError, ValueError):
+            continue
+    return str(path)
+
+
+def _drain(stream: Any, sink: bytearray, cap: int, exceeded: threading.Event) -> None:
+    while True:
+        chunk = stream.read(4096)
+        if not chunk:
+            return
+        if len(sink) + len(chunk) > cap:
+            exceeded.set()
+            return
+        sink.extend(chunk)
+
+
+def _terminate(proc: subprocess.Popen) -> str:
+    """Terminate a timed-out or over-cap process. Full tree kill is POSIX-only."""
+    if os.name == "posix":
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+            proc.wait(timeout=5)
+            return "process_tree_terminated"
+        except (ProcessLookupError, subprocess.TimeoutExpired, OSError):
+            proc.kill()
+            return "process_killed"
+    try:
+        proc.terminate()
+        proc.wait(timeout=5)
+        return "process_only_terminated"
+    except (subprocess.TimeoutExpired, OSError):
+        proc.kill()
+        return "process_killed"
+
+
+def run_bounded(argv: list[str], cwd: str, timeout: int, max_output: int,
+                env: dict[str, str] | None = None) -> dict[str, Any]:
+    """Run a command with output bounded WHILE it runs, not after exit."""
+    started = time.monotonic()
+    options: dict[str, Any] = {"stdout": subprocess.PIPE, "stderr": subprocess.PIPE,
+                               "cwd": cwd, "env": env, "bufsize": 0}
+    if os.name == "posix":
+        options["start_new_session"] = True
+    else:
+        options["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    proc = subprocess.Popen(argv, **options)
+    out = bytearray()
+    err = bytearray()
+    cap = threading.Event()
+    threads = [
+        threading.Thread(target=_drain, args=(proc.stdout, out, max_output, cap), daemon=True),
+        threading.Thread(target=_drain, args=(proc.stderr, err, max_output, cap), daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+    reason = "none"
+    deadline = time.monotonic() + timeout
+    while proc.poll() is None:
+        if cap.is_set():
+            reason = "output_cap"
+            _terminate(proc)
+            break
+        if time.monotonic() >= deadline:
+            reason = "timeout"
+            _terminate(proc)
+            break
+        time.sleep(0.02)
+    if reason == "none" and cap.is_set():
+        reason = "output_cap"
+        _terminate(proc)
+    for thread in threads:
+        thread.join(timeout=5)
+    duration = round(time.monotonic() - started, 3)
+    code = proc.returncode
+    return {
+        "exit_code": code,
+        "stdout": bytes(out).decode("utf-8", "replace"),
+        "stderr": bytes(err).decode("utf-8", "replace"),
+        "duration_seconds": duration,
+        "termination": reason,
+        "capped": cap.is_set(),
+    }
+
+
 @contextlib.contextmanager
 def exclusive_lock(path: str | Path, *, timeout: float = 5.0):
-    """Atomic, cross-process, cross-platform advisory lock.
-
-    Uses OS byte-range locking when available (msvcrt on Windows, fcntl on
-    POSIX) and releases automatically when the process dies. This is an
-    advisory lock for cooperative tasks, not a security sandbox.
-    """
+    """Atomic, cross-process, cross-platform advisory lock (not a sandbox)."""
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(target), os.O_CREAT | os.O_RDWR, 0o600)
