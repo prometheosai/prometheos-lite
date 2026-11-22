@@ -29,6 +29,7 @@ use std::path::{Component, Path, PathBuf};
 
 pub const OWNER_REGISTRY_SCHEMA: &str = "prometheos-owner-registry-v1";
 pub const PROGRAMDATA_RELATIVE_PATH: &str = "PrometheOS/Lite/owner-registry/registry.json";
+pub const REGISTRY_FILE_NAME: &str = "registry.json";
 
 /// Hard ceiling applied before any registry allocation. A registry is a small
 /// machine-local binding table; anything larger is rejected as corrupt.
@@ -116,6 +117,24 @@ pub fn parse_registry_bytes(bytes: &[u8]) -> RegistryResult<OwnerRegistry> {
         serde_json::from_slice(bytes).map_err(|_| Refusal::CorruptRegistry)?;
     validate_registry(&registry).map_err(|_| Refusal::InvalidRegistry)?;
     Ok(registry)
+}
+
+/// Pure split of a ProgramData-relative registry path into parent directory
+/// components and the registry file leaf. The leaf is never returned as a
+/// directory component, so it can never be passed to directory bootstrap.
+pub fn registry_path_parts(relative: &Path) -> RegistryResult<(Vec<String>, String)> {
+    let mut parts: Vec<String> = relative
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+    let leaf = parts.pop().ok_or(Refusal::UntrustedLocation)?;
+    if !leaf.eq_ignore_ascii_case(REGISTRY_FILE_NAME) || parts.is_empty() {
+        return Err(Refusal::UntrustedLocation);
+    }
+    Ok((parts, leaf))
 }
 
 /// Atomic, monotonic compare/update rule. Every existing binding must survive:
@@ -321,12 +340,12 @@ pub mod windows {
     use winapi::um::winnt::{
         ACCESS_ALLOWED_ACE, ACCESS_ALLOWED_ACE_TYPE, ACCESS_SYSTEM_SECURITY, ACE_HEADER,
         ACL_SIZE_INFORMATION, AclSizeInformation, DACL_SECURITY_INFORMATION, DELETE,
-        FILE_ALL_ACCESS, FILE_APPEND_DATA, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DELETE_CHILD,
-        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA,
-        GENERIC_ALL, GENERIC_READ, GENERIC_WRITE, HANDLE, MAXIMUM_ALLOWED,
-        OWNER_SECURITY_INFORMATION, PACL, PSID, READ_CONTROL, SID, SecurityImpersonation,
-        TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER, TokenElevation, TokenUser, WRITE_DAC,
-        WRITE_OWNER,
+        FILE_ALL_ACCESS, FILE_APPEND_DATA, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_DELETE_CHILD, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_WRITE_ATTRIBUTES,
+        FILE_WRITE_DATA, FILE_WRITE_EA, GENERIC_ALL, GENERIC_READ, GENERIC_WRITE, HANDLE,
+        MAXIMUM_ALLOWED, OWNER_SECURITY_INFORMATION, PACL, PSID, READ_CONTROL, SID,
+        SecurityImpersonation, TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER, TokenElevation, TokenUser,
+        WRITE_DAC, WRITE_OWNER,
     };
 
     const INVALID_HANDLE_VALUE: HANDLE = -1isize as HANDLE;
@@ -406,6 +425,15 @@ pub mod windows {
         /// required, but inherited OS ACEs (e.g. authenticated-user create
         /// rights) are tolerated. We never rewrite the OS-owned root.
         OsManagedRoot,
+    }
+
+    /// Object type asserted from kernel handle metadata. Directory components
+    /// and the registry file leaf are NEVER interchangeable.
+    #[derive(Clone, Copy)]
+    enum ObjectKind {
+        Directory,
+        File,
+        Any,
     }
 
     fn wide(value: &OsStr) -> Vec<u16> {
@@ -552,13 +580,26 @@ pub mod windows {
         validate_acl(acl)
     }
 
-    fn validate_handle_security_inner(handle: HANDLE, mode: AclMode) -> RegistryResult<()> {
+    fn validate_handle_security_inner(
+        handle: HANDLE,
+        mode: AclMode,
+        kind: ObjectKind,
+    ) -> RegistryResult<()> {
         let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
         if unsafe { GetFileInformationByHandle(handle, &mut info) } != TRUE {
             return Err(Refusal::InvalidSecurityMetadata);
         }
         if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
             return Err(Refusal::UnsafePath);
+        }
+        // Assert the object type from the handle before any trust decision. A
+        // directory masquerading as the registry leaf (or a file masquerading
+        // as a parent) is always refused.
+        let is_directory = info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0;
+        match kind {
+            ObjectKind::Directory if !is_directory => return Err(Refusal::UnsafePath),
+            ObjectKind::File if is_directory => return Err(Refusal::UnsafePath),
+            ObjectKind::Any | ObjectKind::Directory | ObjectKind::File => {}
         }
         if unsafe { GetFileType(handle) } != FILE_TYPE_DISK {
             return Err(Refusal::UnsafePath);
@@ -709,6 +750,7 @@ pub mod windows {
         create_new: bool,
         sd: Option<*mut c_void>,
         mode: AclMode,
+        kind: ObjectKind,
     ) -> RegistryResult<HANDLE> {
         let desired = GENERIC_READ | READ_CONTROL | if write { GENERIC_WRITE | DELETE } else { 0 };
         let share = if write {
@@ -729,7 +771,7 @@ pub mod windows {
             FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
             sd,
         )?;
-        if let Err(refusal) = validate_handle_security_inner(handle, mode) {
+        if let Err(refusal) = validate_handle_security_inner(handle, mode, kind) {
             unsafe { CloseHandle(handle) };
             return Err(refusal);
         }
@@ -777,7 +819,15 @@ pub mod windows {
     }
 
     fn load_via_handle(path: &Path) -> RegistryResult<OwnerRegistry> {
-        let handle = open_verified(path, path, false, false, None, AclMode::Strict)?;
+        let handle = open_verified(
+            path,
+            path,
+            false,
+            false,
+            None,
+            AclMode::Strict,
+            ObjectKind::File,
+        )?;
         let _guard = HandleGuard(handle);
         parse_registry_bytes(&read_all(handle)?)
     }
@@ -806,13 +856,29 @@ pub mod windows {
     }
 
     fn verify_root(root: &Path) -> RegistryResult<()> {
-        let handle = open_verified(root, root, false, false, None, AclMode::OsManagedRoot)?;
+        let handle = open_verified(
+            root,
+            root,
+            false,
+            false,
+            None,
+            AclMode::OsManagedRoot,
+            ObjectKind::Directory,
+        )?;
         let _guard = HandleGuard(handle);
         Ok(())
     }
 
     fn verify_or_create_dir(dir: &Path, create: bool) -> RegistryResult<()> {
-        match open_verified(dir, dir, false, false, None, AclMode::Strict) {
+        match open_verified(
+            dir,
+            dir,
+            false,
+            false,
+            None,
+            AclMode::Strict,
+            ObjectKind::Directory,
+        ) {
             Ok(handle) => {
                 let _guard = HandleGuard(handle);
                 Ok(())
@@ -830,7 +896,15 @@ pub mod windows {
                         return Err(classify_win32_error(code));
                     }
                 }
-                let handle = open_verified(dir, dir, false, false, None, AclMode::Strict)?;
+                let handle = open_verified(
+                    dir,
+                    dir,
+                    false,
+                    false,
+                    None,
+                    AclMode::Strict,
+                    ObjectKind::Directory,
+                )?;
                 let _guard = HandleGuard(handle);
                 Ok(())
             }
@@ -858,9 +932,16 @@ pub mod windows {
         Ok(expected)
     }
 
-    /// Verify the exact trusted location and every existing ancestor. When
+    /// Verify the exact trusted location and every PARENT directory. When
     /// `create` is true, missing ancestors are bootstrapped with an explicit
     /// trusted owner/DACL instead of inheriting an administrator's personal ACL.
+    ///
+    /// The registry leaf is deliberately excluded: it is a regular file, never
+    /// a directory component. An existing leaf is verified separately by
+    /// `validate_registry_leaf` / `load_via_handle` as a non-reparse file with a
+    /// trusted owner and DACL. Leaf absence is only accepted by the trusted
+    /// first-install path, and an incorrectly created directory leaf is refused
+    /// (never deleted or silently replaced).
     fn verify_location_structure(path: &Path, create: bool) -> RegistryResult<()> {
         let expected = expected_path(path)?;
         let root = programdata_root().map_err(|_| Refusal::UntrustedLocation)?;
@@ -868,9 +949,10 @@ pub mod windows {
         let relative = expected
             .strip_prefix(&root)
             .map_err(|_| Refusal::UntrustedLocation)?;
+        let (parent_parts, _leaf) = registry_path_parts(relative)?;
         let mut current = root.clone();
-        for component in relative.components() {
-            current = current.join(component.as_os_str());
+        for part in parent_parts {
+            current = current.join(part);
             verify_or_create_dir(&current, create)?;
         }
         Ok(())
@@ -977,6 +1059,7 @@ pub mod windows {
                 true,
                 Some(descriptor.0),
                 AclMode::Strict,
+                ObjectKind::File,
             ) {
                 Ok(handle) => handle,
                 Err(Refusal::ConcurrentUpdate) | Err(Refusal::RegistryAbsent) => continue,
@@ -1015,7 +1098,7 @@ pub mod windows {
     /// final write effect contains no global pathname lookup that could be
     /// redirected by replacing a path component.
     fn publish_via_handle(dir_handle: HANDLE, temp_handle: HANDLE) -> RegistryResult<()> {
-        let name = wide(OsStr::new("registry.json"));
+        let name = wide(OsStr::new(REGISTRY_FILE_NAME));
         let total = std::mem::size_of::<FILE_RENAME_INFO>() + name.len() * 2;
         let mut storage = vec![0u64; total.div_ceil(8)];
         let info = storage.as_mut_ptr() as *mut FILE_RENAME_INFO;
@@ -1077,7 +1160,15 @@ pub mod windows {
             .map_err(|_| Refusal::NonMonotonicUpdate)?;
         let parent = expected.parent().ok_or(Refusal::UntrustedLocation)?;
         // Bind the parent directory itself to an OS handle before publishing.
-        let dir_handle = open_verified(parent, parent, true, false, None, AclMode::Strict)?;
+        let dir_handle = open_verified(
+            parent,
+            parent,
+            true,
+            false,
+            None,
+            AclMode::Strict,
+            ObjectKind::Directory,
+        )?;
         let _dir_guard = HandleGuard(dir_handle);
         let temp = write_temp(parent, &bytes)?;
         let temp_path = temp.path.clone();
@@ -1223,7 +1314,32 @@ pub mod windows {
     }
 
     pub fn validate_file_security(path: &Path) -> RegistryResult<()> {
-        let handle = open_verified(path, path, false, false, None, AclMode::Strict)?;
+        let handle = open_verified(
+            path,
+            path,
+            false,
+            false,
+            None,
+            AclMode::Strict,
+            ObjectKind::Any,
+        )?;
+        let _guard = HandleGuard(handle);
+        Ok(())
+    }
+
+    /// Verify the registry leaf strictly as a regular, non-reparse file with a
+    /// trusted owner/DACL. A directory named `registry.json` is refused here;
+    /// it is never deleted or silently replaced.
+    pub fn validate_registry_leaf(path: &Path) -> RegistryResult<()> {
+        let handle = open_verified(
+            path,
+            path,
+            false,
+            false,
+            None,
+            AclMode::Strict,
+            ObjectKind::File,
+        )?;
         let _guard = HandleGuard(handle);
         Ok(())
     }
@@ -1232,7 +1348,7 @@ pub mod windows {
     /// installed there. No directory is created on this read-only path.
     pub fn validate_registry_location(path: &Path) -> RegistryResult<()> {
         verify_location_structure(path, false)?;
-        validate_file_security(path)
+        validate_registry_leaf(path)
     }
 }
 
@@ -1260,6 +1376,62 @@ mod tests {
             generation,
             bindings,
         }
+    }
+
+    #[test]
+    fn registry_leaf_is_never_a_parent_directory_component() {
+        // Deterministic structural regression for the Dispatch 337 defect:
+        // the old code iterated every component, including registry.json, and
+        // passed it to verify_or_create_dir(). The pure split must exclude it.
+        let relative_text = PROGRAMDATA_RELATIVE_PATH.replace('/', "\\");
+        let (parents, leaf) =
+            registry_path_parts(Path::new(&relative_text)).expect("split registry path");
+        assert_eq!(parents, vec!["PrometheOS", "Lite", "owner-registry"]);
+        assert_eq!(leaf, "registry.json");
+        assert!(!parents.iter().any(|p| p == &leaf));
+        assert!(registry_path_parts(Path::new("PrometheOS\\Lite")).is_err());
+        assert!(registry_path_parts(Path::new("registry.json")).is_err());
+    }
+
+    #[test]
+    fn rejected_update_does_not_mutate_previous_state() {
+        let previous = registry(5, vec![binding(SID_SYSTEM, "owner-a", false, 1)]);
+        let snapshot = previous.clone();
+        let stale = registry(4, vec![binding(SID_SYSTEM, "attacker", false, 1)]);
+        assert!(enforce_monotonic_update(Some(&previous), &stale).is_err());
+        assert_eq!(previous, snapshot);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn existing_directory_named_registry_json_is_refused() {
+        // Isolated, unprivileged proof that the leaf is treated only as a
+        // regular file. Nothing is deleted or replaced here.
+        let dir = std::env::temp_dir().join(format!("prometheos-leaf-dir-{}", std::process::id()));
+        let leaf = dir.join(REGISTRY_FILE_NAME);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&leaf).expect("create a directory named registry.json");
+        let result = windows::validate_registry_leaf(&leaf);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(result, Err(Refusal::UnsafePath));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn first_install_distinguishes_absent_leaf_from_absent_parent_and_errors() {
+        use windows::classify_win32_error as classify;
+        assert_eq!(classify(2), Refusal::RegistryAbsent); // ERROR_FILE_NOT_FOUND
+        assert_eq!(classify(3), Refusal::UntrustedLocation); // ERROR_PATH_NOT_FOUND
+        assert_eq!(classify(5), Refusal::AccessDenied);
+        assert_eq!(classify(32), Refusal::SharingViolation);
+        // A valid existing document still parses; a corrupt one is refused.
+        let valid = canonical_json(&registry(1, vec![binding(SID_SYSTEM, "a", false, 1)]))
+            .expect("serialize registry");
+        assert!(parse_registry_bytes(&valid).is_ok());
+        assert_eq!(
+            parse_registry_bytes(b"{not json"),
+            Err(Refusal::CorruptRegistry)
+        );
     }
 
     #[test]
