@@ -26,7 +26,10 @@ TRANSITIONS = {
     "WORKTREE": {"IMPLEMENT", "BLOCKED"},
     "IMPLEMENT": {"VERIFY", "BLOCKED"},
     "VERIFY": {"IMPLEMENT", "BLOCKED"},
-    "REVIEW": {"REPAIR", "BLOCKED"},
+    # REPAIR is reachable ONLY through record-review REPAIR_REQUIRED, which
+    # increments attempt_count and enforces MAX_REPAIRS. Generic advance must
+    # never enter REPAIR or the repair budget can be bypassed indefinitely.
+    "REVIEW": {"BLOCKED"},
     "REPAIR": {"VERIFY", "BLOCKED"},
     "READY": {"BLOCKED"},
     "SAVE_EVIDENCE": {"BLOCKED"},

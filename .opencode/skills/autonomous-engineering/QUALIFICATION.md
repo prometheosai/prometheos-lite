@@ -17,7 +17,7 @@ identifier-only reviewer check were replaced.
 
 ## Qualification results
 
-`python -m unittest discover -s tests -v`: **43 tests, 0 failures** (exit 0),
+`python -m unittest discover -s tests -v`: **45 tests, 0 failures** (exit 0),
 also via `supervisor.py selftest`. `compileall` and JSON parse checks pass.
 
 Gates:

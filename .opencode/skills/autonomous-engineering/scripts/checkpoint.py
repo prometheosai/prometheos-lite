@@ -167,6 +167,8 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
     try:
         if args.cmd == "init":
+            if checkpoint_path(args.repo, args.task_id).exists():
+                raise cm.LoopError("checkpoint already exists; use claim to resume, not init")
             data = blank(args.task_id, args.issue, args.repo, args.base_sha,
                          args.tree_sha, args.worktree, args.branch, args.owner,
                          args.builder_context, args.contract_sha256)

@@ -130,8 +130,12 @@ def validate_evidence(data: Any, policy_sha: str, *, candidate: str | None = Non
         cm.validate_sha(data[key], key)
     cm.validate_sha256(data["policy_sha256"], "policy_sha256")
     cm.validate_sha256(data["contract_sha256"], "contract_sha256")
-    if data["policy_sha256"] != policy_sha:
+    current_policy, current_sha = load_policy()
+    if policy_sha != current_sha or data["policy_sha256"] != current_sha:
         raise VerifyError("policy digest does not match current reviewed policy")
+    expected_nc = list(current_policy["required_negative_control_ids"])
+    if sorted(data["required_negative_control_ids"]) != sorted(expected_nc):
+        raise VerifyError("required negative controls do not match the authoritative policy")
     live_wt = Path(str(data["worktree"])).resolve()
     try:
         live_repo = cm.repo_root(str(data["repository"]))

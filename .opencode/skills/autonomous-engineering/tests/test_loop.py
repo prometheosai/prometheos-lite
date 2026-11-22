@@ -302,6 +302,25 @@ class StateAndRepairTests(Base):
                          "--reviewer", "reviewer-b", "--review-context", "ctx-builder"])
         self.assertEqual(code, 2)
 
+    def test_generic_advance_cannot_enter_repair(self):
+        head, tree, _ = self.to_review()
+        code = sup.main(["advance", "--repo", str(self.repo), "--task-id", "TASK-001",
+                         "--to", "REPAIR"])
+        self.assertEqual(code, 2)
+        self.assertEqual(self.cp()["state"], "REVIEW")
+        self.assertEqual(self.cp()["attempt_count"], 0)
+
+    def test_checkpoint_init_does_not_overwrite(self):
+        _, path, code = self.claim()
+        self.assertEqual(code, 0)
+        # init on an existing task id is refused by the checkpoint store
+        args = ["init", "--repo", str(self.repo), "--task-id", "TASK-001",
+                     "--issue", "0", "--base-sha", self.head, "--tree-sha", self.tree,
+                     "--worktree", self.worktree, "--branch", "master",
+                     "--owner", "builder-a", "--builder-context", "ctx-builder",
+                     "--contract-sha256", "0" * 64]
+        self.assertEqual(ck.main(args), 2)
+
     def test_repair_budget_enforcement(self):
         head, tree, out = self.to_review()
         for _ in range(3):

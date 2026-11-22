@@ -77,6 +77,12 @@ infrastructure. Tests are tests: no mathematical proof is claimed.
 5. Executable authorization checked only the name, permitting argv and PATH spoofing.
 6. Worktree identity used a path-prefix check that rejected legitimate sibling worktrees.
 7. Output-cap termination waited for process exit and could deadlock on a full pipe.
+8. Generic `advance REVIEW→REPAIR` bypassed `attempt_count` and `MAX_REPAIRS`,
+   allowing unlimited repair cycles (independent review finding R-1).
+9. Required negative-control ids were read from the evidence file itself rather
+   than the authoritative policy (N-1).
+10. `checkpoint init` could overwrite an existing checkpoint and drop an APPROVE
+    binding (N-2).
 
 Each counterexample has a corresponding regression test in `tests/test_loop.py`.
 
@@ -95,7 +101,7 @@ Each counterexample has a corresponding regression test in `tests/test_loop.py`.
 
 ## Overhead and defects caught
 
-- Qualification suite: 43 tests, ~201 s wall clock on this Windows host.
+- Qualification suite: 45 tests, ~213 s wall clock on this Windows host.
 - Defects caught by qualification before publication: 7 (listed above), all fixed.
 - Measured verification overhead for the final pilot: 0.87 s for two bounded
   commands (unit test and diff check), recorded by `scripts/benchmark.py` as
