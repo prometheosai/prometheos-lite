@@ -6,7 +6,7 @@ what it found, so a failure is actionable without reading this file.
 
 1. Fallback confinement / API LLM boundary — every API root that exists
    is scanned, so neither can be added to silently escape the check.
-2. Hosted-CI and LFS independence — the repository owns its verification.
+2. Hosted-CI and LFS independence — the repository owns its verification; one reviewed hash-locked manual Windows acceptance workflow is allowed.
 3. Executable-configuration review pins — a pinned execution surface may
    only change when a human re-pins it deliberately. This is a CHANGE
    REVIEW requirement, not a payload signature: it does not look for any
@@ -107,8 +107,8 @@ for api_root in (ROOT / "api", ROOT / "src" / "api"):
         )
 
 # Hosted-CI independence: the repository owns its verification
-# (scripts/local_ci.py); no hosted workflow, external CI service, or
-# LFS dependence may appear. Fail closed on the first marker found.
+# (scripts/local_ci.py); except for the hash-locked manual Windows probe, no
+# hosted workflow, external CI service or LFS dependence may appear.
 hosted_ci_markers: dict[str, Path] = {
     "GitLab CI (.gitlab-ci.yml)": ROOT / ".gitlab-ci.yml",
     "Travis CI (.travis.yml)": ROOT / ".travis.yml",
@@ -127,7 +127,7 @@ APPROVED_WORKFLOW_SHA256 = "c98328e3eacb24b074af056101f5fec529fe8fa6567d75d501c7
 workflow_dir = ROOT / ".github" / "workflows"
 workflow_file = ROOT / APPROVED_WORKFLOW
 hosted = [name for name, path in hosted_ci_markers.items() if path.exists()]
-if workflow_dir.is_symlink() or not workflow_dir.is_dir():
+if (ROOT / ".github").is_symlink() or workflow_dir.is_symlink() or not workflow_dir.is_dir():
     hosted.append("approved Windows workflow directory is absent or unsafe")
 else:
     workflow_entries = sorted(p.relative_to(ROOT).as_posix() for p in workflow_dir.rglob("*"))
@@ -137,7 +137,7 @@ else:
         hosted.append("approved Windows workflow is missing or unsafe")
     else:
         workflow_digest = hashlib.sha256(
-            workflow_file.read_bytes().replace(b"\\r\\n", b"\\n")
+            workflow_file.read_bytes().replace(b"\r\n", b"\n")
         ).hexdigest()
         if workflow_digest != APPROVED_WORKFLOW_SHA256:
             hosted.append("approved Windows acceptance workflow changed without Principal review")
