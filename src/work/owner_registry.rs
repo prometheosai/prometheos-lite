@@ -580,6 +580,76 @@ pub mod windows {
         validate_acl(acl)
     }
 
+    /// Read-only observation of an OS object's DACL: does it grant full control
+    /// to the given SID? Lets an isolated negative-control test prove the
+    /// intended ACL was actually installed before its refusal assertion counts.
+    /// Nothing is changed; the caller owns cleanup of the object.
+    pub fn dacl_grants_full_control_to(path: &Path, sid: &str) -> RegistryResult<bool> {
+        let handle = open_raw(
+            path,
+            GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_DELETE,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )?;
+        let _guard = HandleGuard(handle);
+        let mut owner: PSID = ptr::null_mut();
+        let mut group: PSID = ptr::null_mut();
+        let mut dacl: PACL = ptr::null_mut();
+        let mut sacl: PACL = ptr::null_mut();
+        let mut descriptor: *mut c_void = ptr::null_mut();
+        let status = unsafe {
+            GetSecurityInfo(
+                handle,
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                &mut owner,
+                &mut group,
+                &mut dacl,
+                &mut sacl,
+                &mut descriptor,
+            )
+        };
+        if status != ERROR_SUCCESS || descriptor.is_null() {
+            return Err(Refusal::InvalidSecurityMetadata);
+        }
+        let _desc_guard = DescriptorGuard(descriptor);
+        if dacl.is_null() || unsafe { IsValidAcl(dacl) } != TRUE {
+            return Err(Refusal::InvalidSecurityMetadata);
+        }
+        let mut info: ACL_SIZE_INFORMATION = unsafe { std::mem::zeroed() };
+        if unsafe {
+            GetAclInformation(
+                dacl,
+                &mut info as *mut _ as LPVOID,
+                std::mem::size_of::<ACL_SIZE_INFORMATION>() as DWORD,
+                AclSizeInformation,
+            )
+        } != TRUE
+        {
+            return Err(Refusal::InvalidSecurityMetadata);
+        }
+        for index in 0..info.AceCount {
+            let mut ace: LPVOID = ptr::null_mut();
+            if unsafe { GetAce(dacl, index, &mut ace) } != TRUE || ace.is_null() {
+                return Err(Refusal::InvalidSecurityMetadata);
+            }
+            let header = unsafe { &*(ace as *const ACE_HEADER) };
+            if header.AceType != ACCESS_ALLOWED_ACE_TYPE
+                || (header.AceSize as usize) < std::mem::size_of::<ACCESS_ALLOWED_ACE>()
+            {
+                continue;
+            }
+            let allowed = unsafe { &*(ace as *const ACCESS_ALLOWED_ACE) };
+            let ace_sid = sid_to_string((&allowed.SidStart as *const DWORD) as *mut SID)?;
+            if ace_sid.eq_ignore_ascii_case(sid) && has_full_control(allowed.Mask) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     fn validate_handle_security_inner(
         handle: HANDLE,
         mode: AclMode,
@@ -1907,27 +1977,46 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn world_writable_directory_is_refused() {
-        let dir =
-            std::env::temp_dir().join(format!("prometheos-registry-world-{}", std::process::id()));
+        // "Everyone" is a localized account name on non-English Windows
+        // (pt-BR resolves it to "Todos"); icacls then fails with 1332 and the
+        // negative assertion is never exercised. The SID is locale-invariant.
+        const EVERYONE_SID: &str = "S-1-1-0";
+        let dir = std::env::temp_dir().join(format!(
+            "prometheos-registry-world-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create temp dir");
-        let Ok(output) = std::process::Command::new("icacls")
+        let output = std::process::Command::new("icacls")
             .arg(&dir)
             .arg("/grant")
-            .arg("Everyone:(OI)(CI)F")
+            .arg(format!("*{EVERYONE_SID}:(OI)(CI)F"))
             .output()
-        else {
-            eprintln!("SKIP: icacls unavailable; ACL negative test NOT RUN");
-            let _ = std::fs::remove_dir_all(&dir);
-            return;
-        };
+            .expect("run icacls");
         if !output.status.success() {
-            eprintln!("SKIP: icacls could not modify ACL; ACL negative test NOT RUN");
+            eprintln!(
+                "SKIP: icacls could not modify temp ACL: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
             let _ = std::fs::remove_dir_all(&dir);
             return;
         }
-        assert!(windows::validate_file_security(&dir).is_err());
+        // Prove the intended negative condition exists on the OS object before
+        // treating the refusal assertion as exercised. A grant that reports
+        // success but does not install the ACE fails loudly here.
+        let granted =
+            windows::dacl_grants_full_control_to(&dir, EVERYONE_SID).expect("read temp dir DACL");
+        assert!(
+            granted,
+            "icacls reported success but no full-control Everyone ACE was installed"
+        );
+        let result = windows::validate_file_security(&dir);
         let _ = std::fs::remove_dir_all(&dir);
+        assert!(result.is_err(), "a fully writable DACL must be refused");
     }
 
     #[test]
