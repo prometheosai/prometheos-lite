@@ -375,6 +375,33 @@ def main() -> int:
         )
 
     with sandbox() as root:
+        expect_pass("owner-approved immutable manual Windows workflow", root)
+
+    with sandbox() as root:
+        workflow = root / ".github" / "workflows" / "pr341-windows-acceptance.yml"
+        workflow.write_text("name: hijack\non: push\n", encoding="utf-8")
+        expect_fail("workflow content tampering is rejected", root, "workflow changed")
+
+    with sandbox() as root:
+        workflow = root / ".github" / "workflows" / "pr341-windows-acceptance.yml"
+        workflow.write_text("name: hijack\non: push\n", encoding="utf-8")
+        pins = json.loads((root / PIN_REL).read_text(encoding="utf-8"))
+        import hashlib
+        pins["files"][".github/workflows/pr341-windows-acceptance.yml"] = hashlib.sha256(workflow.read_bytes()).hexdigest()
+        (root / PIN_REL).write_text(json.dumps(pins, indent=2) + "\n", encoding="utf-8")
+        expect_fail("re-pinning hostile workflow cannot bypass locked exception", root, "workflow changed")
+
+    with sandbox() as root:
+        workflow = root / ".github" / "workflows" / "pr341-windows-acceptance.yml"
+        workflow.unlink()
+        expect_fail("missing approved workflow is rejected", root, "missing or unsafe")
+
+    with sandbox() as root:
+        extra = root / ".github" / "workflows" / "other.yml"
+        extra.write_text("on: push\n", encoding="utf-8")
+        expect_fail("additional hosted workflow is rejected", root, "unexpected hosted workflow")
+
+    with sandbox() as root:
         (root / ".lfsconfig").write_text("[lfs]\n", encoding="utf-8")
         expect_fail(
             "LFS configuration appears",
@@ -620,7 +647,7 @@ def main() -> int:
         code, output = run_gate(base)
         expected = (
             "PASS: fallback confinement and API LLM boundary",
-            "PASS: hosted-CI independence (no actions, no external CI configs, no LFS)",
+            "PASS: hosted-CI independence (only hash-locked manual Windows acceptance; no other hosted CI or LFS)",
             "PASS: executable configuration review pins (build surfaces are reviewed changes)",
             "PASS: no duplicate JSON keys in repository documents",
             "PASS: vendored byte fidelity (LF-only upstream-locked bytes)",
