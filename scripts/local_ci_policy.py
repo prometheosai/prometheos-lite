@@ -110,7 +110,6 @@ for api_root in (ROOT / "api", ROOT / "src" / "api"):
 # (scripts/local_ci.py); no hosted workflow, external CI service, or
 # LFS dependence may appear. Fail closed on the first marker found.
 hosted_ci_markers: dict[str, Path] = {
-    "GitHub Actions (.github/workflows/)": ROOT / ".github" / "workflows",
     "GitLab CI (.gitlab-ci.yml)": ROOT / ".gitlab-ci.yml",
     "Travis CI (.travis.yml)": ROOT / ".travis.yml",
     "CircleCI (.circleci/)": ROOT / ".circleci",
@@ -120,7 +119,28 @@ hosted_ci_markers: dict[str, Path] = {
     "AppVeyor (appveyor.yml)": ROOT / "appveyor.yml",
     "AWS CodeBuild (buildspec.yml)": ROOT / "buildspec.yml",
 }
+# Narrow owner-approved exception: ONE immutable manual Windows security probe.
+# Never accept an extra workflow, a replaced file, a symlink, or silent re-pinning.
+# local_ci.py remains the authoritative verification system.
+APPROVED_WORKFLOW = ".github/workflows/pr341-windows-acceptance.yml"
+APPROVED_WORKFLOW_SHA256 = "c98328e3eacb24b074af056101f5fec529fe8fa6567d75d501c78441c7720111"
+workflow_dir = ROOT / ".github" / "workflows"
+workflow_file = ROOT / APPROVED_WORKFLOW
 hosted = [name for name, path in hosted_ci_markers.items() if path.exists()]
+if workflow_dir.is_symlink() or not workflow_dir.is_dir():
+    hosted.append("approved Windows workflow directory is absent or unsafe")
+else:
+    workflow_entries = sorted(p.relative_to(ROOT).as_posix() for p in workflow_dir.rglob("*"))
+    if workflow_entries != [APPROVED_WORKFLOW]:
+        hosted.append("unexpected hosted workflow or workflow directory entry")
+    if workflow_file.is_symlink() or not workflow_file.is_file():
+        hosted.append("approved Windows workflow is missing or unsafe")
+    else:
+        workflow_digest = hashlib.sha256(
+            workflow_file.read_bytes().replace(b"\\r\\n", b"\\n")
+        ).hexdigest()
+        if workflow_digest != APPROVED_WORKFLOW_SHA256:
+            hosted.append("approved Windows acceptance workflow changed without Principal review")
 lfs: list[str] = []
 if (ROOT / ".lfsconfig").exists():
     lfs.append(".lfsconfig")
@@ -347,7 +367,7 @@ if guard_violations:
         + "\n".join(f"  {item}" for item in guard_violations)
     )
 print("PASS: fallback confinement and API LLM boundary")
-print("PASS: hosted-CI independence (no actions, no external CI configs, no LFS)")
+print("PASS: hosted-CI independence (only hash-locked manual Windows acceptance; no other hosted CI or LFS)")
 print("PASS: executable configuration review pins (build surfaces are reviewed changes)")
 print("PASS: no duplicate JSON keys in repository documents")
 print("PASS: vendored byte fidelity (LF-only upstream-locked bytes)")
