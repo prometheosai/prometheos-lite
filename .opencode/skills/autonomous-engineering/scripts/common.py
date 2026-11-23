@@ -98,8 +98,14 @@ def worktree_clean(worktree: str) -> bool:
     return git(worktree, "status", "--porcelain") == ""
 
 
-def trusted_executable(name: str, forbidden_roots: list[str]) -> str:
-    """Resolve an executable and reject worktree/PATH-shadowed locations."""
+def trusted_executable(name: str, forbidden_roots: list[str],
+                       expected_sha256: str | None = None) -> str:
+    """Resolve an executable, reject untrusted roots, and pin its identity.
+
+    Returns the VERIFIED ABSOLUTE PATH that the caller must launch. When a
+    reviewed digest is supplied, the file bytes must match it; a pathname alone
+    is never treated as proof of binary identity.
+    """
     resolved = shutil.which(name)
     if not resolved:
         raise LoopError(f"executable not found: {name}")
@@ -112,6 +118,10 @@ def trusted_executable(name: str, forbidden_roots: list[str]) -> str:
                 raise LoopError(f"executable resolves inside a controlled directory: {path}")
         except (OSError, ValueError):
             continue
+    if expected_sha256 is not None:
+        cm_digest = sha256_file(path)
+        if cm_digest != expected_sha256:
+            raise LoopError(f"executable identity mismatch for {name}: {cm_digest}")
     return str(path)
 
 

@@ -83,6 +83,11 @@ infrastructure. Tests are tests: no mathematical proof is claimed.
    than the authoritative policy (N-1).
 10. `checkpoint init` could overwrite an existing checkpoint and drop an APPROVE
     binding (N-2).
+11. The verifier validated an absolute executable path but launched the original
+    bare name, permitting a second PATH lookup to select a different binary.
+    The verified absolute path is now substituted into Popen and the binary
+    digest is pinned in reviewed policy. A pathname alone is not claimed to
+    prove immutability.
 
 Each counterexample has a corresponding regression test in `tests/test_loop.py`.
 
@@ -101,7 +106,7 @@ Each counterexample has a corresponding regression test in `tests/test_loop.py`.
 
 ## Overhead and defects caught
 
-- Qualification suite: 45 tests, ~213 s wall clock on this Windows host.
+- Qualification suite: 49 tests, ~220 s wall clock on this Windows host.
 - Defects caught by qualification before publication: 7 (listed above), all fixed.
 - Measured verification overhead for the final pilot: 0.87 s for two bounded
   commands (unit test and diff check), recorded by `scripts/benchmark.py` as

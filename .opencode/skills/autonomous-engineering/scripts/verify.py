@@ -42,6 +42,7 @@ def load_policy() -> tuple[dict[str, Any], str]:
     for key in ("approved_patterns", "max_commands", "default_timeout_seconds",
                 "max_timeout_seconds", "max_output_bytes", "read_chunk_bytes",
                 "process_tree_termination_guaranteed", "no_shell",
+                "reject_unpinned_executables", "executable_registry",
                 "allowed_environment_keys", "sandbox", "required_negative_control_ids"):
         if key not in data:
             raise VerifyError(f"policy missing {key}")
@@ -50,6 +51,13 @@ def load_policy() -> tuple[dict[str, Any], str]:
         raise VerifyError("mandatory sandbox requested but isolation is unavailable")
     if data["no_shell"] is not True:
         raise VerifyError("policy must forbid shell execution")
+    registry = data["executable_registry"]
+    if not isinstance(registry, dict) or not registry:
+        raise VerifyError("executable registry must be a non-empty object")
+    for name, entry in registry.items():
+        if not isinstance(entry, dict):
+            raise VerifyError(f"malformed executable pin for {name}")
+        cm.validate_sha256(entry.get("sha256"), f"executable_registry.{name}.sha256")
     return data, cm.sha256_file(POLICY)
 
 
@@ -66,8 +74,8 @@ def load_contract(path: str) -> tuple[dict[str, Any], str]:
 
 
 def authorize(command: dict[str, Any], policy: dict[str, Any],
-              forbidden_roots: list[str]) -> dict[str, Any]:
-    """Return the reviewed pattern authorizing this command, or fail closed."""
+              forbidden_roots: list[str]) -> tuple[dict[str, Any], str, str]:
+    """Return (pattern, verified absolute executable path, digest) or fail closed."""
     if not isinstance(command, dict):
         raise VerifyError("command entry must be an object")
     pid = command.get("pattern_id")
@@ -86,11 +94,16 @@ def authorize(command: dict[str, Any], policy: dict[str, Any],
         raise VerifyError(f"command has no reviewed pattern: {pid}")
     if pattern.get("match") != "exact" or list(pattern.get("argv", [])) != list(argv):
         raise VerifyError(f"argv does not match reviewed template {pid}")
-    resolved = cm.trusted_executable(argv[0], forbidden_roots)
+    pin = policy["executable_registry"].get(argv[0])
+    if pin is None:
+        if policy["reject_unpinned_executables"]:
+            raise VerifyError(f"executable has no reviewed pin: {argv[0]}")
+        raise VerifyError(f"executable pin required: {argv[0]}")
+    resolved = cm.trusted_executable(argv[0], forbidden_roots, pin["sha256"])
     expected = pattern.get("resolved_path")
     if expected and Path(expected).resolve() != Path(resolved).resolve():
         raise VerifyError(f"executable path does not match reviewed template {pid}")
-    return pattern
+    return pattern, resolved, pin["sha256"]
 
 
 def revision(repo: str, sha: str) -> tuple[str, str]:
@@ -175,8 +188,14 @@ def validate_evidence(data: Any, policy_sha: str, *, candidate: str | None = Non
     for r in results:
         if not isinstance(r, dict) or set(r) < {"id", "argv", "status", "exit_code",
                                                  "duration_seconds", "stdout_sha256",
-                                                 "stderr_sha256", "termination"}:
+                                                 "stderr_sha256", "termination",
+                                                 "executable_path", "executable_sha256"}:
             raise VerifyError("malformed result entry")
+        pin = current_policy["executable_registry"].get(r["argv"][0])
+        if pin is None or r["executable_sha256"] != pin["sha256"]:
+            raise VerifyError("result executable provenance does not match reviewed policy")
+        if Path(r["executable_path"]).stem.lower() != Path(r["argv"][0]).stem.lower():
+            raise VerifyError("result executable identity mismatch")
         if r["id"] in seen:
             raise VerifyError("duplicate check id")
         seen.add(r["id"])
@@ -206,7 +225,9 @@ def validate_evidence(data: Any, policy_sha: str, *, candidate: str | None = Non
 
 def run_one(command: dict[str, Any], cwd: str, policy: dict[str, Any],
             forbidden_roots: list[str]) -> dict[str, Any]:
-    pattern = authorize(command, policy, forbidden_roots)
+    pattern, executable, executable_sha = authorize(command, policy, forbidden_roots)
+    # Launch the EXACT verified absolute path; no second PATH lookup is performed.
+    launch_argv = [executable] + list(command["argv"][1:])
     timeout = int(command.get("timeout_seconds", policy["default_timeout_seconds"]))
     if timeout <= 0 or timeout > policy["max_timeout_seconds"]:
         raise VerifyError("timeout outside policy bounds")
@@ -214,11 +235,12 @@ def run_one(command: dict[str, Any], cwd: str, policy: dict[str, Any],
     allowed = set(policy["allowed_environment_keys"])
     env = {k: v for k, v in os.environ.items() if k in allowed}
     env["PYTHONDONTWRITEBYTECODE"] = "1"  # keep the verified worktree clean
-    run = cm.run_bounded(list(command["argv"]), cwd, timeout,
+    run = cm.run_bounded(launch_argv, cwd, timeout,
                          int(policy["max_output_bytes"]), env)
     status = "passed" if run["exit_code"] == 0 and run["termination"] == "none" else "failed"
     return {
         "id": command["id"], "argv": list(command["argv"]), "pattern_id": pattern["id"],
+        "executable_path": executable, "executable_sha256": executable_sha,
         "status": status, "exit_code": run["exit_code"],
         "duration_seconds": run["duration_seconds"],
         "termination": run["termination"],
@@ -229,14 +251,26 @@ def run_one(command: dict[str, Any], cwd: str, policy: dict[str, Any],
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("action", choices=["run", "validate-evidence"])
-    p.add_argument("--repo", required=True)
+    p.add_argument("action", choices=["run", "validate-evidence", "pin"])
+    p.add_argument("--repo")
+    p.add_argument("--names", default="python,git")
     p.add_argument("--contract")
     p.add_argument("--output")
     p.add_argument("--candidate")
     p.add_argument("--task-id")
     args = p.parse_args(argv)
     try:
+        if args.action == "pin":
+            registry = {}
+            for name in args.names.split(","):
+                name = name.strip()
+                if not name:
+                    continue
+                path = cm.trusted_executable(name, [])
+                registry[name] = {"sha256": cm.sha256_file(path),
+                                  "note": "operator-reviewed pin; confirm before publishing"}
+            print(json.dumps(registry, indent=2, sort_keys=True))
+            return 0
         policy, policy_sha = load_policy()
         if args.action == "validate-evidence":
             validate_evidence(cm.read_json(args.output), policy_sha,

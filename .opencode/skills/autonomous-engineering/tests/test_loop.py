@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -520,6 +521,47 @@ class HardeningTests(Base):
                          "--candidate", head, "--tree", tree, "--verdict", "APPROVE",
                          "--reviewer", "r", "--review-context", "ctx-r"])
         self.assertEqual(code, 2)
+
+    def test_shadow_executable_in_untrusted_path_rejected(self):
+        shadow_dir = Path(self.tmp.name) / "shadow-bin"
+        shadow_dir.mkdir()
+        (shadow_dir / ("python.exe" if os.name == "nt" else "python")).write_bytes(b"not-python")
+        old_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = str(shadow_dir) + os.pathsep + old_path
+        try:
+            policy = vf.load_policy()[0]
+            with self.assertRaises((vf.VerifyError, cm.LoopError)):
+                vf.authorize({"pattern_id": "python-unittest-quiet",
+                              "argv": ["python", "-m", "unittest", "-q"]},
+                             policy, [self.worktree])
+        finally:
+            os.environ["PATH"] = old_path
+
+    def test_trusted_executable_launched_by_verified_absolute_path(self):
+        head, tree, out = self.to_review()
+        ev = cm.read_json(out)
+        result = next(r for r in ev["results"] if r["id"] == "unit")
+        self.assertTrue(Path(result["executable_path"]).is_absolute())
+        self.assertEqual(Path(result["executable_path"]).resolve(),
+                         Path(shutil.which("python")).resolve())
+        policy = vf.load_policy()[0]
+        self.assertEqual(result["executable_sha256"],
+                         policy["executable_registry"]["python"]["sha256"])
+
+    def test_executable_identity_mismatch_in_evidence_rejected(self):
+        ev, head, tree = self._evidence()
+        ev["results"][0]["executable_sha256"] = "0" * 64
+        with self.assertRaises(vf.VerifyError):
+            vf.validate_evidence(ev, vf.load_policy()[1], candidate=head, tree=tree)
+
+    def test_unpinned_executable_fails_closed(self):
+        policy, _ = vf.load_policy()
+        policy = dict(policy)
+        policy["executable_registry"] = {}
+        with self.assertRaises(vf.VerifyError):
+            vf.authorize({"pattern_id": "python-unittest-quiet",
+                          "argv": ["python", "-m", "unittest", "-q"]},
+                         policy, [self.worktree])
 
     def test_benchmark_reports_inconclusive_without_baseline(self):
         sys.path.insert(0, str(SKILL / "scripts"))
