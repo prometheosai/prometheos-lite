@@ -16,7 +16,9 @@ Run: python scripts/test_local_ci_policy.py
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -375,6 +377,130 @@ def main() -> int:
         )
 
     with sandbox() as root:
+        expect_pass("owner-approved immutable manual Windows workflow", root)
+
+    with sandbox() as root:
+        workflow = root / ".github" / "workflows" / "pr341-windows-acceptance.yml"
+        workflow.write_text("name: hijack\non: push\n", encoding="utf-8")
+        expect_fail("workflow content tampering is rejected", root, "workflow changed")
+
+    with sandbox() as root:
+        workflow = root / ".github" / "workflows" / "pr341-windows-acceptance.yml"
+        workflow.write_text("name: hijack\non: push\n", encoding="utf-8")
+        pins = json.loads((root / PIN_REL).read_text(encoding="utf-8"))
+        import hashlib
+        pins["files"][".github/workflows/pr341-windows-acceptance.yml"] = hashlib.sha256(workflow.read_bytes()).hexdigest()
+        (root / PIN_REL).write_text(json.dumps(pins, indent=2) + "\n", encoding="utf-8")
+        expect_fail("re-pinning hostile workflow cannot bypass locked exception", root, "workflow changed")
+
+    with sandbox() as root:
+        workflow = root / ".github" / "workflows" / "pr341-windows-acceptance.yml"
+        workflow.unlink()
+        expect_fail("missing approved workflow is rejected", root, "missing or unsafe")
+
+    with sandbox() as root:
+        extra = root / ".github" / "workflows" / "other.yml"
+        extra.write_text("on: push\n", encoding="utf-8")
+        expect_fail("additional hosted workflow is rejected", root, "unexpected hosted workflow")
+
+    with sandbox() as root:
+        workflow = root / ".github" / "workflows" / "pr341-windows-acceptance.yml"
+        workflow.unlink()
+        workflow.mkdir()
+        expect_fail(
+            "approved workflow path replaced by a directory",
+            root,
+            "missing or unsafe",
+        )
+
+    with sandbox() as root:
+        workflow_dir = root / ".github" / "workflows"
+        shutil.rmtree(workflow_dir)
+        workflow_dir.write_text("replaced", encoding="utf-8")
+        expect_fail(
+            "workflow directory replaced by a regular file",
+            root,
+            "absent or unsafe",
+        )
+
+    with sandbox() as root:
+        # A deliberate re-pin of both pin artifacts must still not widen the
+        # narrow exception. This hostile document uses `on: push` and
+        # write-all permissions; both the digest and the gate constant are
+        # moved, so only the semantic floor can reject it.
+        workflow = root / ".github" / "workflows" / "pr341-windows-acceptance.yml"
+        workflow.write_text(
+            "name: hijack\non: push\npermissions: write-all\n", encoding="utf-8"
+        )
+        hostile_digest = hashlib.sha256(
+            workflow.read_bytes().replace(b"\r\n", b"\n")
+        ).hexdigest()
+        gate = root / "scripts" / "local_ci_policy.py"
+        gate_text = gate.read_text(encoding="utf-8")
+        gate_text, count = re.subn(
+            r'APPROVED_WORKFLOW_SHA256 = "[0-9a-f]{64}"',
+            f'APPROVED_WORKFLOW_SHA256 = "{hostile_digest}"',
+            gate_text,
+        )
+        if count != 1:
+            FAILURES.append("hostile re-pin fixture could not patch the gate digest constant")
+            return 1
+        gate.write_text(gate_text, encoding="utf-8")
+        pins = json.loads((root / PIN_REL).read_text(encoding="utf-8"))
+        pins["files"][".github/workflows/pr341-windows-acceptance.yml"] = hostile_digest
+        pins["files"]["scripts/local_ci_policy.py"] = hashlib.sha256(
+            gate_text.replace("\r\n", "\n").encode("utf-8")
+        ).hexdigest()
+        (root / PIN_REL).write_text(json.dumps(pins, indent=2) + "\n", encoding="utf-8")
+        expect_fail(
+            "hostile trigger change survives a deliberate re-pin",
+            root,
+            "trigger is not manual-only",
+        )
+
+    # -- PR341 restricted-account ownership and cleanup safety (static) -----
+    # Static source regressions on the approved workflow. These guard the
+    # ownership logic; they are NOT a substitute for real Windows acceptance.
+    with sandbox() as root:
+        wf = (root / ".github" / "workflows" / "pr341-windows-acceptance.yml").read_text(
+            encoding="utf-8"
+        )
+        create_at = wf.find("New-LocalUser -Name $user")
+        write_at = wf.find("[IO.File]::WriteAllText($receipt, $receiptBody)")
+        acls_at = wf.find("icacls $evidence")
+        collision_at = wf.find("ACCOUNT_NAME_COLLISION")
+        removals = [ln for ln in wf.splitlines() if "Remove-LocalUser" in ln]
+        bad_removals = [ln for ln in removals if "ErrorAction Stop" not in ln]
+        invariants = {
+            "unique bounded account name": "PR341R' + [guid]::NewGuid()" in wf,
+            "bounded allocation attempts": "$attempt -le 3" in wf,
+            "collision checked before creation": collision_at > 0 and collision_at < create_at,
+            "creation requires explicit failure": (
+                "New-LocalUser -Name $user -Password $secure -PasswordNeverExpires "
+                "-AccountNeverExpires -ErrorAction Stop" in wf
+            ),
+            "receipt written only after creation": (
+                create_at > 0 and write_at > create_at and acls_at > write_at
+            ),
+            "cleanup gated on ownership receipt": (
+                "if ($record -notmatch 'OWNED_BY_THIS_RUN=YES')" in wf
+            ),
+            "owned account name validated before delete": "^PR341R[0-9A-F]{8}$" in wf,
+            "delete failure reported": "Failed to delete owned account" in wf,
+            "no unowned deletion path": not bad_removals,
+            "no fixed account name": "PR341Restricted" not in wf,
+            "cleanup skipped without receipt": (
+                "CLEANUP_NO_RECEIPT=nothing owned by this run" in wf
+            ),
+        }
+        for label, ok in invariants.items():
+            if ok:
+                print(f"PASS accept: workflow ownership control: {label}")
+            else:
+                FAILURES.append(f"workflow ownership control: {label}")
+                print(f"FAIL accept: workflow ownership control: {label}")
+
+    with sandbox() as root:
         (root / ".lfsconfig").write_text("[lfs]\n", encoding="utf-8")
         expect_fail(
             "LFS configuration appears",
@@ -620,7 +746,8 @@ def main() -> int:
         code, output = run_gate(base)
         expected = (
             "PASS: fallback confinement and API LLM boundary",
-            "PASS: hosted-CI independence (no actions, no external CI configs, no LFS)",
+            "PASS: hosted-CI independence (only hash-locked manual Windows acceptance; no other hosted CI or LFS)",
+            "PASS: approved Windows workflow is manual-only, read-only, secret-free and exact-source bound",
             "PASS: executable configuration review pins (build surfaces are reviewed changes)",
             "PASS: no duplicate JSON keys in repository documents",
             "PASS: vendored byte fidelity (LF-only upstream-locked bytes)",

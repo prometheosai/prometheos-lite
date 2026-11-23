@@ -1,0 +1,273 @@
+name: PR341 Windows security acceptance (manual only)
+
+# Supplemental evidence only. Repository-native local_ci remains authoritative.
+# Approved as the single narrow policy exception enforced by
+# scripts/local_ci_policy.py. Any content change requires exact Principal review
+# and a deliberate re-pin of scripts/reviewed_config_digests.json.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr341-manual-windows-acceptance
+  cancel-in-progress: false
+
+jobs:
+  windows-owner-registry:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - name: Check out immutable reviewed PR 341 head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: 37a7ae33ca21fc25ad0f70f20022cd4a95634bce
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Verify exact source, trusted PostCSS blob and clean ancestry
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $expected = '37a7ae33ca21fc25ad0f70f20022cd4a95634bce'
+          $actual = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $actual -ne $expected) { throw "Unexpected source commit: $actual" }
+          $trusted = '33ad091d26d8a9dc95ebdf616e217d985ec215b8'
+          $postcss = (git rev-parse 'HEAD:frontend/postcss.config.js').Trim()
+          if ($LASTEXITCODE -ne 0 -or $postcss -ne $trusted) { throw 'Untrusted PostCSS configuration' }
+          $suspects = @(
+            '6d6fb679b1b383a1f34266ceada4d1cab381140c',
+            '14b83781405e1dccc737da74b2203bd00593ccb4',
+            '468017b4a78e5ed2aa988ed685de960d34ad24ac'
+          )
+          $ancestry = @(git rev-list HEAD)
+          if ($LASTEXITCODE -ne 0) { throw 'Ancestry enumeration failed' }
+          foreach ($suspect in $suspects) {
+            if ($ancestry -contains $suspect) { throw "Known suspect commit in ancestry: $suspect" }
+          }
+          "SOURCE_SHA=$actual" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "POSTCSS_BLOB=$postcss" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          'KNOWN_SUSPECT_ANCESTRY=NOT_PRESENT' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+      - name: Record elevated Windows identity and prove elevated authority
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+          $principal = [Security.Principal.WindowsPrincipal]::new($id)
+          $isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+          if (-not $isAdmin) { throw 'Runner is not elevated; elevated validation path cannot run' }
+          $sid = $id.User.Value
+          if ([string]::IsNullOrWhiteSpace($sid)) { throw 'Elevated token has no SID' }
+          $record = Join-Path $env:RUNNER_TEMP 'pr341-elevated-identity.txt'
+          "NAME=$($id.Name)`nSID=$sid`nIS_ADMIN=$isAdmin" | Set-Content -Path $record -Encoding ascii
+          "ELEVATED_IDENTITY=$($id.Name)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "ELEVATED_IS_ADMIN=$isAdmin" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          whoami /groups
+
+      - name: Build focused Windows owner-registry test binary
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo test --locked --lib work::owner_registry --no-run
+          if ($LASTEXITCODE -ne 0) { throw "Focused test build failed: $LASTEXITCODE" }
+          $dependencies = Join-Path (Get-Location).Path '.cargo-target\debug\deps'
+          $exe = Get-ChildItem -Path $dependencies -Filter 'prometheos_lite-*.exe' -File |
+                 Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $exe) { throw 'Focused lib test executable not found' }
+          [IO.File]::WriteAllText((Join-Path $env:RUNNER_TEMP 'pr341-test-exe.txt'), $exe.FullName)
+          "TEST_BINARY=$($exe.Name)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+      - name: Elevated path - owner-registry unit and negative controls
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = [IO.File]::ReadAllText((Join-Path $env:RUNNER_TEMP 'pr341-test-exe.txt'))
+          $log = Join-Path $env:RUNNER_TEMP 'pr341-elevated-tests.log'
+          & $exe --nocapture work::owner_registry 2>&1 | Tee-Object -FilePath $log
+          if ($LASTEXITCODE -ne 0) { throw "Elevated registry tests failed: $LASTEXITCODE" }
+          $expectedSkip = 'SKIP: elevated host; privileged provisioning acceptance NOT RUN'
+          $skips = @(Select-String -Path $log -Pattern 'SKIP:')
+          $unexpected = @($skips | Where-Object { $_.Line -notlike "*$expectedSkip*" })
+          if ($unexpected.Count -gt 0) {
+            throw "Unexpected SKIP in elevated path: $(($unexpected | ForEach-Object { $_.Line }) -join ' | ')"
+          }
+          if (-not (Select-String -Path $log -Pattern $expectedSkip -SimpleMatch)) {
+            throw 'Expected elevated-host SKIP marker is absent; skip detection may have been weakened'
+          }
+          $required = @(
+            'reparse_point_or_junction_is_detected',
+            'world_writable_directory_is_refused',
+            'missing_file_security_cannot_be_verified',
+            'acl_setup_failure_is_detected_instead_of_skipped',
+            'concurrent_writers_share_one_mutex',
+            'monotonic_update_refuses_rollback_revocation_reversal_and_owner_change',
+            'revocation_tombstone_cannot_be_dropped_by_omission_then_readded'
+          )
+          foreach ($name in $required) {
+            if (-not (Select-String -Path $log -Pattern "$name \.\.\. ok")) {
+              throw "Required elevated test did not run and pass: $name"
+            }
+          }
+          'ELEVATED_PATH=UNIT_CONTROLS_EXECUTED' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+      - name: Restricted-user path - real token proves unprivileged refusal
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = [IO.File]::ReadAllText((Join-Path $env:RUNNER_TEMP 'pr341-test-exe.txt'))
+          $elevatedRecord = Join-Path $env:RUNNER_TEMP 'pr341-elevated-identity.txt'
+          $elevatedSid = ((Get-Content $elevatedRecord | Where-Object { $_ -like 'SID=*' }) -replace '^SID=', '').Trim()
+          if ([string]::IsNullOrWhiteSpace($elevatedSid)) { throw 'Elevated SID was not recorded' }
+          $evidence = Join-Path $env:RUNNER_TEMP 'pr341-restricted-evidence'
+          New-Item -ItemType Directory -Path $evidence -Force | Out-Null
+          $identityLog = Join-Path $evidence 'restricted-identity.log'
+          $testLog = Join-Path $evidence 'restricted-test.log'
+          $receipt = Join-Path $env:RUNNER_TEMP 'pr341-owned-account.txt'
+          $cleanupScript = Join-Path $env:RUNNER_TEMP 'pr341-cleanup.ps1'
+          $cleanupTemplate = @'
+          $ErrorActionPreference = 'Stop'
+          $receipt = '__RECEIPT__'
+          if (-not (Test-Path $receipt)) {
+            Write-Output 'CLEANUP_NO_RECEIPT=nothing owned by this run'
+            return
+          }
+          $record = Get-Content $receipt -Raw
+          if ($record -notmatch 'OWNED_BY_THIS_RUN=YES') {
+            Write-Output 'CLEANUP_NO_OWNERSHIP_RECEIPT=nothing owned by this run'
+            return
+          }
+          $name = (($record -split "`n" | Where-Object { $_ -like 'NAME=*' }) -replace '^NAME=', '').Trim()
+          if ($name -notmatch '^PR341R[0-9A-F]{8}$') {
+            throw "Refusing cleanup: unexpected owned account name '$name'"
+          }
+          if (-not (Get-LocalUser -Name $name -ErrorAction SilentlyContinue)) {
+            Write-Output "CLEANUP_ALREADY_ABSENT=$name"
+            Remove-Item -Path $receipt -Force -ErrorAction SilentlyContinue
+            return
+          }
+          Remove-LocalUser -Name $name -ErrorAction Stop
+          if (Get-LocalUser -Name $name -ErrorAction SilentlyContinue) {
+            throw "Failed to delete owned account: $name"
+          }
+          Remove-Item -Path $receipt -Force -ErrorAction SilentlyContinue
+          Write-Output "CLEANUP_DELETED_OWNED_ACCOUNT=$name"
+          '@
+          $cleanupTemplate.Replace('__RECEIPT__', $receipt) | Set-Content -Path $cleanupScript -Encoding ascii
+          $user = $null
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            $candidate = 'PR341R' + [guid]::NewGuid().ToString('N').Substring(0, 8).ToUpperInvariant()
+            if (Get-LocalUser -Name $candidate -ErrorAction SilentlyContinue) {
+              "ACCOUNT_NAME_COLLISION=$candidate (attempt $attempt)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+              continue
+            }
+            $user = $candidate
+            break
+          }
+          if (-not $user) { throw 'Could not allocate a unique bounded restricted account name after 3 attempts' }
+          $password = 'Pr341!' + [guid]::NewGuid().ToString('N')
+          $secure = ConvertTo-SecureString $password -AsPlainText -Force
+          try {
+            New-LocalUser -Name $user -Password $secure -PasswordNeverExpires -AccountNeverExpires -ErrorAction Stop | Out-Null
+            try {
+              $created = Get-LocalUser -Name $user -ErrorAction Stop
+              $receiptBody = "OWNED_BY_THIS_RUN=YES`nNAME=$user`nSID=$($created.SID.Value)`nCREATED_UTC=$((Get-Date).ToUniversalTime().ToString('o'))`nRUN_ID=$env:GITHUB_RUN_ID`n"
+              [IO.File]::WriteAllText($receipt, $receiptBody)
+            } catch {
+              Remove-LocalUser -Name $user -ErrorAction Stop
+              throw
+            }
+            icacls $evidence /grant "${user}:(OI)(CI)F" /inheritance:e | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to grant restricted identity access to the evidence directory' }
+            $workspace = (Get-Location).Path
+            icacls $workspace /grant "${user}:(RX)" /inheritance:e | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to grant restricted identity traverse on the workspace' }
+            $dependencies = Join-Path $workspace '.cargo-target\debug\deps'
+            icacls $dependencies /grant "${user}:(OI)(CI)RX" /inheritance:e | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to grant restricted identity execute on the test binary' }
+            $credential = New-Object PSCredential($user, $secure)
+            $probeTemplate = @'
+          $ErrorActionPreference = 'Stop'
+          $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+          $principal = [Security.Principal.WindowsPrincipal]::new($id)
+          $admin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+          "NAME=$($id.Name)`nSID=$($id.User.Value)`nIDENTITY_IS_ADMIN=$admin" | Set-Content -Path '__IDENTITY_LOG__' -Encoding ascii
+          '@
+            $probe = Join-Path $evidence 'probe.ps1'
+            $probeTemplate.Replace('__IDENTITY_LOG__', $identityLog) | Set-Content -Path $probe -Encoding ascii
+            $runnerTemplate = @'
+          @echo off
+          "__TEST_EXE__" --nocapture unprivileged_provisioning_is_denied_before_any_write > "__TEST_LOG__" 2>&1
+          exit /b %ERRORLEVEL%
+          '@
+            $runner = Join-Path $evidence 'run-test.cmd'
+            $runnerTemplate.Replace('__TEST_EXE__', $exe).Replace('__TEST_LOG__', $testLog) | Set-Content -Path $runner -Encoding ascii
+            $psExe = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+            $probeProc = Start-Process -FilePath $psExe -Credential $credential -ArgumentList "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$probe`"" -Wait -PassThru -WorkingDirectory $evidence
+            if ($probeProc.ExitCode -ne 0) { throw "Restricted identity probe failed: $($probeProc.ExitCode)" }
+            $testProc = Start-Process -FilePath $env:ComSpec -Credential $credential -ArgumentList "/c `"$runner`"" -Wait -PassThru -WorkingDirectory $evidence
+            if (-not (Test-Path $identityLog)) { throw 'Restricted identity probe produced no evidence' }
+            $identity = Get-Content $identityLog -Raw
+            if ($identity -notmatch 'IDENTITY_IS_ADMIN=False') {
+              throw 'Restricted token is elevated/administrator; identity separation NOT proven'
+            }
+            $restrictedSid = (($identity -split "`n" | Where-Object { $_ -like 'SID=*' }) -replace '^SID=', '').Trim()
+            if ([string]::IsNullOrWhiteSpace($restrictedSid)) { throw 'Restricted token SID was not captured' }
+            if ($restrictedSid -eq $elevatedSid) {
+              throw 'Restricted token reuses the elevated SID; identity separation NOT proven'
+            }
+            if (-not (Test-Path $testLog)) { throw 'Restricted-token test produced no evidence log' }
+            $restrictedOutput = Get-Content $testLog -Raw
+            if ($restrictedOutput -match 'SKIP:') {
+              throw 'Restricted-token test SKIPPED; unprivileged refusal NOT verified'
+            }
+            if ($restrictedOutput -notmatch 'unprivileged_provisioning_is_denied_before_any_write \.\.\. ok') {
+              throw 'Restricted-token target test did not run and pass'
+            }
+            if ($testProc.ExitCode -ne 0) { throw "Restricted-token test failed: $($testProc.ExitCode)" }
+            "RESTRICTED_SID=$restrictedSid" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            'RESTRICTED_IS_ADMIN=False' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            'UNPRIVILEGED_REFUSAL=REAL_TOKEN_EXECUTED' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          } finally {
+            if (Test-Path $cleanupScript) { & $cleanupScript }
+          }
+
+      - name: Remove only the restricted identity owned by this run
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $cleanupScript = Join-Path $env:RUNNER_TEMP 'pr341-cleanup.ps1'
+          if (-not (Test-Path $cleanupScript)) {
+            'DISPOSABLE_IDENTITY_CLEANUP=NO_ACCOUNT_CREATED_BY_THIS_RUN' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            return
+          }
+          & $cleanupScript | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+      - name: Acceptance coverage ledger - executed versus pending
+        if: always()
+        shell: pwsh
+        run: |
+          @'
+          ## Issue #340 privileged acceptance coverage
+
+          | Criterion | Evidence in this run | Status |
+          |---|---|---|
+          | First-install provisioning (elevated, isolated ProgramData) | None | PENDING |
+          | Protected registry ownership and DACL | Elevated unit negatives (`world_writable_directory_is_refused`, `missing_file_security_cannot_be_verified`, `ordinary_user_file_is_not_a_trusted_registry`) | UNIT ONLY |
+          | Ancestor security | Elevated unit (`registry_leaf_is_never_a_parent_directory_component`) | UNIT ONLY |
+          | Untrusted writable-path refusal | Elevated unit (`world_writable_directory_is_refused`) | UNIT ONLY |
+          | Junction/reparse refusal | Elevated unit (`reparse_point_or_junction_is_detected`), required no SKIP | UNIT ONLY |
+          | Unprivileged write refusal | Restricted real-token run of `unprivileged_provisioning_is_denied_before_any_write`, required no SKIP | REAL TOKEN |
+          | Update monotonicity | Elevated unit (`monotonic_update_refuses_rollback_revocation_reversal_and_owner_change`) | UNIT ONLY |
+          | Revocation permanence | Elevated unit (`revocation_tombstone_cannot_be_dropped_by_omission_then_readded`) | UNIT ONLY |
+          | Concurrent provisioning | Elevated unit (`concurrent_writers_share_one_mutex`, `shared_lock_identity_is_stable_across_calls_and_processes`) | UNIT ONLY |
+          | Safe failure and cleanup | Elevated unit (`acl_setup_failure_is_detected_instead_of_skipped`) | UNIT ONLY |
+
+          This run does **not** satisfy Stage 2 privileged acceptance. A green
+          result here is supplemental identity-separation and unit evidence only.
+          PR #341 merge remains WITHHELD. Repository-native `local_ci` remains
+          authoritative. No merge, deployment or named-pipe authority is granted.
+          '@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
