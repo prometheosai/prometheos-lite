@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -123,7 +124,84 @@ hosted_ci_markers: dict[str, Path] = {
 # Never accept an extra workflow, a replaced file, a symlink, or silent re-pinning.
 # local_ci.py remains the authoritative verification system.
 APPROVED_WORKFLOW = ".github/workflows/pr341-windows-acceptance.yml"
-APPROVED_WORKFLOW_SHA256 = "c98328e3eacb24b074af056101f5fec529fe8fa6567d75d501c78441c7720111"
+APPROVED_WORKFLOW_SHA256 = "1564068b35513d87854e75b4df8de391e4a980915f04ba3408c0e49e87b9e3a6"
+REVIEWED_PR341_SHA = "37a7ae33ca21fc25ad0f70f20022cd4a95634bce"
+APPROVED_WORKFLOW_ACTION = "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"
+
+
+def _yaml_block(text: str, key: str) -> list[str]:
+    """The simple indented scalar block under a top-level YAML key.
+
+    The approved workflow is deliberately a small, fixed document. Parsing its
+    few top-level blocks with indentation (rather than adding a YAML
+    dependency) keeps this gate dependency-free and fails closed on surprise.
+    """
+    block: list[str] = []
+    capturing = False
+    base = 0
+    for line in text.splitlines():
+        if re.match(rf"^{re.escape(key)}\s*:", line):
+            capturing = True
+            base = len(line) - len(line.lstrip())
+            continue
+        if not capturing:
+            continue
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if len(line) - len(line.lstrip()) <= base:
+            break
+        block.append(stripped)
+    return block
+
+
+def approved_workflow_semantics(path: Path) -> list[str]:
+    """Enforce the *shape* of the narrow exception, not just its bytes.
+
+    A hash pin alone would allow a careless re-pin to silently widen the
+    exception. These checks keep the workflow manual-only, read-only,
+    secret-free, exact-source bound and Windows-hosted, even if the pin were
+    deliberately moved. They are independent of the review digest.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return [f"approved Windows workflow unreadable ({exc})"]
+
+    problems: list[str] = []
+    triggers = [item.rstrip(":") for item in _yaml_block(text, "on")]
+    if triggers != ["workflow_dispatch"]:
+        problems.append("approved Windows workflow trigger is not manual-only")
+
+    permissions = _yaml_block(text, "permissions")
+    if permissions != ["contents: read"]:
+        problems.append("approved Windows workflow has over-broad permissions")
+
+    if re.search(r"\bsecrets\.", text) or re.search(r"\bgithub\.token\b", text):
+        problems.append("approved Windows workflow references secrets or tokens")
+
+    actions = re.findall(r"^\s*uses:\s*(\S+)", text, re.MULTILINE)
+    if not actions or any(action != APPROVED_WORKFLOW_ACTION for action in actions):
+        problems.append("approved Windows workflow uses an unapproved action or external service")
+
+    runners = re.findall(r"^\s*runs-on:\s*(\S+)", text, re.MULTILINE)
+    if not runners or any(not runner.startswith("windows-") for runner in runners):
+        problems.append("approved Windows workflow is not bound to a Windows hosted runner")
+
+    if "persist-credentials: false" not in text:
+        problems.append("approved Windows workflow does not discard checkout credentials")
+
+    if REVIEWED_PR341_SHA not in text:
+        problems.append("approved Windows workflow is not bound to the reviewed PR 341 source SHA")
+
+    for marker in ("IDENTITY_IS_ADMIN", "unprivileged_provisioning_is_denied_before_any_write"):
+        if marker not in text:
+            problems.append(
+                f"approved Windows workflow is missing identity-separation step: {marker}"
+            )
+    return problems
+
+
 workflow_dir = ROOT / ".github" / "workflows"
 workflow_file = ROOT / APPROVED_WORKFLOW
 hosted = [name for name, path in hosted_ci_markers.items() if path.exists()]
@@ -141,6 +219,8 @@ else:
         ).hexdigest()
         if workflow_digest != APPROVED_WORKFLOW_SHA256:
             hosted.append("approved Windows acceptance workflow changed without Principal review")
+        else:
+            hosted.extend(approved_workflow_semantics(workflow_file))
 lfs: list[str] = []
 if (ROOT / ".lfsconfig").exists():
     lfs.append(".lfsconfig")
@@ -368,6 +448,7 @@ if guard_violations:
     )
 print("PASS: fallback confinement and API LLM boundary")
 print("PASS: hosted-CI independence (only hash-locked manual Windows acceptance; no other hosted CI or LFS)")
+print("PASS: approved Windows workflow is manual-only, read-only, secret-free and exact-source bound")
 print("PASS: executable configuration review pins (build surfaces are reviewed changes)")
 print("PASS: no duplicate JSON keys in repository documents")
 print("PASS: vendored byte fidelity (LF-only upstream-locked bytes)")

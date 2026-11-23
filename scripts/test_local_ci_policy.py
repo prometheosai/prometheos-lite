@@ -16,7 +16,9 @@ Run: python scripts/test_local_ci_policy.py
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -402,6 +404,61 @@ def main() -> int:
         expect_fail("additional hosted workflow is rejected", root, "unexpected hosted workflow")
 
     with sandbox() as root:
+        workflow = root / ".github" / "workflows" / "pr341-windows-acceptance.yml"
+        workflow.unlink()
+        workflow.mkdir()
+        expect_fail(
+            "approved workflow path replaced by a directory",
+            root,
+            "missing or unsafe",
+        )
+
+    with sandbox() as root:
+        workflow_dir = root / ".github" / "workflows"
+        shutil.rmtree(workflow_dir)
+        workflow_dir.write_text("replaced", encoding="utf-8")
+        expect_fail(
+            "workflow directory replaced by a regular file",
+            root,
+            "absent or unsafe",
+        )
+
+    with sandbox() as root:
+        # A deliberate re-pin of both pin artifacts must still not widen the
+        # narrow exception. This hostile document uses `on: push` and
+        # write-all permissions; both the digest and the gate constant are
+        # moved, so only the semantic floor can reject it.
+        workflow = root / ".github" / "workflows" / "pr341-windows-acceptance.yml"
+        workflow.write_text(
+            "name: hijack\non: push\npermissions: write-all\n", encoding="utf-8"
+        )
+        hostile_digest = hashlib.sha256(
+            workflow.read_bytes().replace(b"\r\n", b"\n")
+        ).hexdigest()
+        gate = root / "scripts" / "local_ci_policy.py"
+        gate_text = gate.read_text(encoding="utf-8")
+        gate_text, count = re.subn(
+            r'APPROVED_WORKFLOW_SHA256 = "[0-9a-f]{64}"',
+            f'APPROVED_WORKFLOW_SHA256 = "{hostile_digest}"',
+            gate_text,
+        )
+        if count != 1:
+            FAILURES.append("hostile re-pin fixture could not patch the gate digest constant")
+            return 1
+        gate.write_text(gate_text, encoding="utf-8")
+        pins = json.loads((root / PIN_REL).read_text(encoding="utf-8"))
+        pins["files"][".github/workflows/pr341-windows-acceptance.yml"] = hostile_digest
+        pins["files"]["scripts/local_ci_policy.py"] = hashlib.sha256(
+            gate_text.replace("\r\n", "\n").encode("utf-8")
+        ).hexdigest()
+        (root / PIN_REL).write_text(json.dumps(pins, indent=2) + "\n", encoding="utf-8")
+        expect_fail(
+            "hostile trigger change survives a deliberate re-pin",
+            root,
+            "trigger is not manual-only",
+        )
+
+    with sandbox() as root:
         (root / ".lfsconfig").write_text("[lfs]\n", encoding="utf-8")
         expect_fail(
             "LFS configuration appears",
@@ -648,6 +705,7 @@ def main() -> int:
         expected = (
             "PASS: fallback confinement and API LLM boundary",
             "PASS: hosted-CI independence (only hash-locked manual Windows acceptance; no other hosted CI or LFS)",
+            "PASS: approved Windows workflow is manual-only, read-only, secret-free and exact-source bound",
             "PASS: executable configuration review pins (build surfaces are reviewed changes)",
             "PASS: no duplicate JSON keys in repository documents",
             "PASS: vendored byte fidelity (LF-only upstream-locked bytes)",
