@@ -1,0 +1,48 @@
+{
+  "schema": "autonomous-verification-policy/2",
+  "approved_patterns": [
+    {
+      "id": "python-unittest-quiet",
+      "argv": ["python", "-m", "unittest", "-q"],
+      "match": "exact"
+    },
+    {
+      "id": "python-unittest-discover",
+      "argv": ["python", "-m", "unittest", "discover", "-s", "tests", "-v"],
+      "match": "exact"
+    },
+    {
+      "id": "git-diff-check",
+      "argv": ["git", "diff", "--check"],
+      "match": "exact"
+    }
+  ],
+  "max_commands": 24,
+  "default_timeout_seconds": 600,
+  "max_timeout_seconds": 1800,
+  "max_output_bytes": 1048576,
+  "read_chunk_bytes": 4096,
+  "process_tree_termination_guaranteed": false,
+  "no_shell": true,
+  "reject_unpinned_executables": true,
+  "executable_registry": {
+    "python": {
+      "sha256": "d718435b892db4ad5b547d12fec61be7baa7faf7a58d857ea58053be24c7a000",
+      "note": "operator-reviewed digest of the Python interpreter used by this harness"
+    },
+    "git": {
+      "sha256": "177bc8a9af84fa3a400c694c975fda731d048279c074e1a93947ce8b067ebb48",
+      "note": "operator-reviewed digest of the Git executable used by this harness"
+    }
+  },
+  "executable_registry_note": "Digests are pinned at qualification time after inspecting the installed tools. On another host the operator must regenerate them with verify.py pin; an unpinned executable fails closed.",
+  "allowed_environment_keys": ["PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "HOME", "LANG", "LC_ALL", "TMP", "TEMP", "TMPDIR", "PYTHONDONTWRITEBYTECODE", "PYTHONIOENCODING"],
+  "sandbox": {
+    "mode": "unavailable",
+    "require_sandbox": false,
+    "filesystem_isolation_enforced": false,
+    "network_isolation_enforced": false
+  },
+  "required_negative_control_ids": [],
+  "note": "Argument templates are the authorization boundary. This is NOT an OS sandbox; no filesystem, network or privilege isolation is claimed."
+}
