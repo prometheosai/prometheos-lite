@@ -1,0 +1,50 @@
+name: PR341 Windows security acceptance (manual only)
+
+# Supplemental evidence only. Repository-native local_ci remains authoritative.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-owner-registry:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - name: Checkout immutable reviewed PR 341 head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 37a7ae33ca21fc25ad0f70f20022cd4a95634bce
+          persist-credentials: false
+
+      - name: Verify exact source and trusted PostCSS blob before build
+        shell: pwsh
+        run: |
+          $expected = '37a7ae33ca21fc25ad0f70f20022cd4a95634bce'
+          $actual = (git rev-parse HEAD).Trim()
+          if ($actual -ne $expected) { throw "Unexpected source commit: $actual" }
+          $trusted = '33ad091d26d8a9dc95ebdf616e217d985ec215b8'
+          $postcss = (git rev-parse 'HEAD:frontend/postcss.config.js').Trim()
+          if ($postcss -ne $trusted) { throw 'Untrusted PostCSS configuration' }
+          Write-Output "Exact immutable PR head and trusted PostCSS blob verified."
+
+      - name: Record Windows identity and operating environment
+        shell: pwsh
+        run: |
+          whoami /user
+          whoami /groups
+          rustc --version
+          cargo --version
+
+      - name: Focused Windows registry checks; do not disguise skips as acceptance
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo test --locked --lib work::owner_registry -- --nocapture 2>&1 | Tee-Object -FilePath owner-registry-tests.log
+          $testExit = $LASTEXITCODE
+          if ($testExit -ne 0) { throw "Focused registry tests failed: exit $testExit" }
+          if (Select-String -Path owner-registry-tests.log -Pattern 'SKIP:') {
+            throw 'Privileged/unprivileged or reparse acceptance was SKIPPED; this is NOT security clearance.'
+          }
+          Write-Output 'Focused registry tests had no reported SKIP; separate privileged acceptance remains required.'
