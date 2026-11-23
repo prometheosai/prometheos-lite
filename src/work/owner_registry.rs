@@ -1974,6 +1974,62 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Unique disposable directory whose cleanup is bound to scope exit, so
+    /// the test resource is removed even when an assertion panics.
+    #[cfg(windows)]
+    struct TempDirGuard(PathBuf);
+
+    #[cfg(windows)]
+    impl TempDirGuard {
+        fn unique(prefix: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "{}-{}-{}",
+                prefix,
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ));
+            // create_dir never removes a pre-existing path; a collision is a
+            // loud failure rather than silent deletion of someone else's data.
+            std::fs::create_dir(&path).expect("create unique temp dir");
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Install a full-control ACE with a locale-invariant SID. Setup failure
+    /// is returned to the caller: the caller must fail the test, never SKIP.
+    #[cfg(windows)]
+    fn grant_full_control_via_icacls(dir: &Path, sid: &str) -> Result<(), String> {
+        let output = std::process::Command::new("icacls")
+            .arg(dir)
+            .arg("/grant")
+            .arg(format!("*{sid}:(OI)(CI)F"))
+            .output()
+            .expect("run icacls");
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "icacls exit {:?}: {}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ))
+        }
+    }
+
     #[cfg(windows)]
     #[test]
     fn world_writable_directory_is_refused() {
@@ -1981,42 +2037,39 @@ mod tests {
         // (pt-BR resolves it to "Todos"); icacls then fails with 1332 and the
         // negative assertion is never exercised. The SID is locale-invariant.
         const EVERYONE_SID: &str = "S-1-1-0";
-        let dir = std::env::temp_dir().join(format!(
-            "prometheos-registry-world-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("create temp dir");
-        let output = std::process::Command::new("icacls")
-            .arg(&dir)
-            .arg("/grant")
-            .arg(format!("*{EVERYONE_SID}:(OI)(CI)F"))
-            .output()
-            .expect("run icacls");
-        if !output.status.success() {
-            eprintln!(
-                "SKIP: icacls could not modify temp ACL: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-            let _ = std::fs::remove_dir_all(&dir);
-            return;
-        }
+        let dir = TempDirGuard::unique("prometheos-registry-world");
+        grant_full_control_via_icacls(dir.path(), EVERYONE_SID).unwrap_or_else(|err| {
+            panic!("ACL setup failed; refusal assertion NOT exercised: {err}")
+        });
         // Prove the intended negative condition exists on the OS object before
         // treating the refusal assertion as exercised. A grant that reports
         // success but does not install the ACE fails loudly here.
-        let granted =
-            windows::dacl_grants_full_control_to(&dir, EVERYONE_SID).expect("read temp dir DACL");
+        let granted = windows::dacl_grants_full_control_to(dir.path(), EVERYONE_SID)
+            .expect("read temp dir DACL");
         assert!(
             granted,
             "icacls reported success but no full-control Everyone ACE was installed"
         );
-        let result = windows::validate_file_security(&dir);
-        let _ = std::fs::remove_dir_all(&dir);
-        assert!(result.is_err(), "a fully writable DACL must be refused");
+        assert!(
+            windows::validate_file_security(dir.path()).is_err(),
+            "a fully writable DACL must be refused"
+        );
+        // TempDirGuard removes this test's own directory on success or panic.
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn acl_setup_failure_is_detected_instead_of_skipped() {
+        // Negative control for the former fail-open branch: an unresolvable
+        // SID makes icacls fail. The helper must surface that as an error so
+        // the primary test fails instead of reporting a green SKIP.
+        let dir = TempDirGuard::unique("prometheos-registry-acl-negctl");
+        let err = grant_full_control_via_icacls(dir.path(), "S-1-1-999999999999999999999999")
+            .expect_err("an unresolvable SID must fail ACL setup");
+        assert!(
+            err.contains("icacls exit"),
+            "setup failure must be an explicit error, not a silent skip: {err}"
+        );
     }
 
     #[test]
