@@ -4,7 +4,7 @@
   "files": {
     ".cargo/config.toml": "c75eda3bf5bf8944eeeb48670ea59c816435f3f55cb0433744e26e7c3d855426",
     ".gitattributes": "939d0f5ac0e68b733d3c7f5d348af7c0dc5270902ff6998295a8f6462f9465c7",
-    ".github/workflows/pr341-windows-acceptance.yml": "1564068b35513d87854e75b4df8de391e4a980915f04ba3408c0e49e87b9e3a6",
+    ".github/workflows/pr341-windows-acceptance.yml": "b45b5ed1c912cef4d14251563fe2366f76c1d28287ce2e2291ef84f55d01b84c",
     "Cargo.lock": "bfd5092d58e24313c81796a5446282cf5a3c0cb5af552c560afaefcd6a428eae",
     "Cargo.toml": "e67ad085b3f42228f53179c00a971de075d7eff061d566ea4a50eac902035ffd",
     "clippy.toml": "34fe5d6236ee0e8df00792d5e11a8e5c96c01143593e100626a5d63398cf006a",
@@ -25,13 +25,13 @@
     "scripts/gate_completion_registry.json": "7ad70d8f6fcc890a8689adcd19c9404e825cce99196b3cd860cff02616105213",
     "scripts/gb_static_guard.py": "3ac5bddb819dfe19b08a7edaad2d2ec33195254566426776dc511a03c34c357f",
     "scripts/lib/target_dir.sh": "5d8375407b79e65e4a2961c817dd9ddbc0ec58e2d6736b072780ab09c508e8ff",
-    "scripts/local_ci_policy.py": "55b84da41bbdde8685f103639205289a510bc671c3f444867c936a3fdf7ed673",
+    "scripts/local_ci_policy.py": "37de854090463aa0fed44025fee7f9fa12de0a8eb4c94302309b23988960f214",
     "scripts/local_ci.py": "139aaf7aafa23ed78e6e122d286a69049660f5d7b1f56e6be6118def6a1c848a",
     "scripts/provider-governed-proposal-smoke.sh": "c6d0f4b0605f36d7117bda2f10a5e893b900f392aae3310f209ebd3211e715b1",
     "scripts/review_config_digests.py": "758cd37f3e142328deb581ee41cd70fe1548a910dc417c814f0ae851076db6e4",
     "scripts/reviewed_authority_baselines.json": "e22d2c1a901aa36ff9a3dabad56debfb1037f4dfe96e31ab6db0242dddb5a7aa",
     "scripts/reviewed_authorization_surfaces.json": "d10baffb85b89333212754c449938885d7f1f273d860cb7af1a753f289f63584",
-    "scripts/test_local_ci_policy.py": "ec592b011e830acbce9114de077f05427576e64323a9fce7d4e984d7573253e4",
+    "scripts/test_local_ci_policy.py": "8d1fb44feebe4cfc42964e55bd9df7393ba04d1989a073c340522ffac31a79bf",
     "scripts/test_local_ci_verify.py": "5b3b0c819fae21c14537124184307eb5a7cd796a000aaf3dcb33c31f72b1f9e7",
     "scripts/test_target_dir.sh": "96d52788f9104712496abd956bd336158c8c8dba38bfc8b4bfbb7ccf2cd63adb"
   }

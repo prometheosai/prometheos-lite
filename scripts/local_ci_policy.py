@@ -124,7 +124,7 @@ hosted_ci_markers: dict[str, Path] = {
 # Never accept an extra workflow, a replaced file, a symlink, or silent re-pinning.
 # local_ci.py remains the authoritative verification system.
 APPROVED_WORKFLOW = ".github/workflows/pr341-windows-acceptance.yml"
-APPROVED_WORKFLOW_SHA256 = "1564068b35513d87854e75b4df8de391e4a980915f04ba3408c0e49e87b9e3a6"
+APPROVED_WORKFLOW_SHA256 = "b45b5ed1c912cef4d14251563fe2366f76c1d28287ce2e2291ef84f55d01b84c"
 REVIEWED_PR341_SHA = "37a7ae33ca21fc25ad0f70f20022cd4a95634bce"
 APPROVED_WORKFLOW_ACTION = "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"
 
@@ -194,11 +194,19 @@ def approved_workflow_semantics(path: Path) -> list[str]:
     if REVIEWED_PR341_SHA not in text:
         problems.append("approved Windows workflow is not bound to the reviewed PR 341 source SHA")
 
-    for marker in ("IDENTITY_IS_ADMIN", "unprivileged_provisioning_is_denied_before_any_write"):
+    for marker in (
+        "IDENTITY_IS_ADMIN",
+        "unprivileged_provisioning_is_denied_before_any_write",
+        "OWNED_BY_THIS_RUN",
+        "CLEANUP_NO_OWNERSHIP_RECEIPT",
+        "ACCOUNT_NAME_COLLISION",
+    ):
         if marker not in text:
             problems.append(
-                f"approved Windows workflow is missing identity-separation step: {marker}"
+                f"approved Windows workflow is missing identity or ownership step: {marker}"
             )
+    if "PR341Restricted" in text:
+        problems.append("approved Windows workflow still uses a fixed restricted account name")
     return problems
 
 

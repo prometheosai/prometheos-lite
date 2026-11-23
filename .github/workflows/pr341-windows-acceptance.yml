@@ -125,11 +125,60 @@ jobs:
           New-Item -ItemType Directory -Path $evidence -Force | Out-Null
           $identityLog = Join-Path $evidence 'restricted-identity.log'
           $testLog = Join-Path $evidence 'restricted-test.log'
-          $user = 'PR341Restricted'
+          $receipt = Join-Path $env:RUNNER_TEMP 'pr341-owned-account.txt'
+          $cleanupScript = Join-Path $env:RUNNER_TEMP 'pr341-cleanup.ps1'
+          $cleanupTemplate = @'
+          $ErrorActionPreference = 'Stop'
+          $receipt = '__RECEIPT__'
+          if (-not (Test-Path $receipt)) {
+            Write-Output 'CLEANUP_NO_RECEIPT=nothing owned by this run'
+            return
+          }
+          $record = Get-Content $receipt -Raw
+          if ($record -notmatch 'OWNED_BY_THIS_RUN=YES') {
+            Write-Output 'CLEANUP_NO_OWNERSHIP_RECEIPT=nothing owned by this run'
+            return
+          }
+          $name = (($record -split "`n" | Where-Object { $_ -like 'NAME=*' }) -replace '^NAME=', '').Trim()
+          if ($name -notmatch '^PR341R[0-9A-F]{8}$') {
+            throw "Refusing cleanup: unexpected owned account name '$name'"
+          }
+          if (-not (Get-LocalUser -Name $name -ErrorAction SilentlyContinue)) {
+            Write-Output "CLEANUP_ALREADY_ABSENT=$name"
+            Remove-Item -Path $receipt -Force -ErrorAction SilentlyContinue
+            return
+          }
+          Remove-LocalUser -Name $name -ErrorAction Stop
+          if (Get-LocalUser -Name $name -ErrorAction SilentlyContinue) {
+            throw "Failed to delete owned account: $name"
+          }
+          Remove-Item -Path $receipt -Force -ErrorAction SilentlyContinue
+          Write-Output "CLEANUP_DELETED_OWNED_ACCOUNT=$name"
+          '@
+          $cleanupTemplate.Replace('__RECEIPT__', $receipt) | Set-Content -Path $cleanupScript -Encoding ascii
+          $user = $null
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            $candidate = 'PR341R' + [guid]::NewGuid().ToString('N').Substring(0, 8).ToUpperInvariant()
+            if (Get-LocalUser -Name $candidate -ErrorAction SilentlyContinue) {
+              "ACCOUNT_NAME_COLLISION=$candidate (attempt $attempt)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+              continue
+            }
+            $user = $candidate
+            break
+          }
+          if (-not $user) { throw 'Could not allocate a unique bounded restricted account name after 3 attempts' }
           $password = 'Pr341!' + [guid]::NewGuid().ToString('N')
           $secure = ConvertTo-SecureString $password -AsPlainText -Force
           try {
             New-LocalUser -Name $user -Password $secure -PasswordNeverExpires -AccountNeverExpires -ErrorAction Stop | Out-Null
+            try {
+              $created = Get-LocalUser -Name $user -ErrorAction Stop
+              $receiptBody = "OWNED_BY_THIS_RUN=YES`nNAME=$user`nSID=$($created.SID.Value)`nCREATED_UTC=$((Get-Date).ToUniversalTime().ToString('o'))`nRUN_ID=$env:GITHUB_RUN_ID`n"
+              [IO.File]::WriteAllText($receipt, $receiptBody)
+            } catch {
+              Remove-LocalUser -Name $user -ErrorAction Stop
+              throw
+            }
             icacls $evidence /grant "${user}:(OI)(CI)F" /inheritance:e | Out-Null
             if ($LASTEXITCODE -ne 0) { throw 'Failed to grant restricted identity access to the evidence directory' }
             $workspace = (Get-Location).Path
@@ -182,15 +231,20 @@ jobs:
             'RESTRICTED_IS_ADMIN=False' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
             'UNPRIVILEGED_REFUSAL=REAL_TOKEN_EXECUTED' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
           } finally {
-            Remove-LocalUser -Name $user -ErrorAction SilentlyContinue
+            if (Test-Path $cleanupScript) { & $cleanupScript }
           }
 
-      - name: Remove disposable restricted identity
+      - name: Remove only the restricted identity owned by this run
         if: always()
         shell: pwsh
         run: |
-          Remove-LocalUser -Name 'PR341Restricted' -ErrorAction SilentlyContinue
-          'DISPOSABLE_IDENTITY_REMOVED=YES' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          $ErrorActionPreference = 'Stop'
+          $cleanupScript = Join-Path $env:RUNNER_TEMP 'pr341-cleanup.ps1'
+          if (-not (Test-Path $cleanupScript)) {
+            'DISPOSABLE_IDENTITY_CLEANUP=NO_ACCOUNT_CREATED_BY_THIS_RUN' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            return
+          }
+          & $cleanupScript | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
 
       - name: Acceptance coverage ledger - executed versus pending
         if: always()

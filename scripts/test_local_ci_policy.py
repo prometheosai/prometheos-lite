@@ -458,6 +458,48 @@ def main() -> int:
             "trigger is not manual-only",
         )
 
+    # -- PR341 restricted-account ownership and cleanup safety (static) -----
+    # Static source regressions on the approved workflow. These guard the
+    # ownership logic; they are NOT a substitute for real Windows acceptance.
+    with sandbox() as root:
+        wf = (root / ".github" / "workflows" / "pr341-windows-acceptance.yml").read_text(
+            encoding="utf-8"
+        )
+        create_at = wf.find("New-LocalUser -Name $user")
+        write_at = wf.find("[IO.File]::WriteAllText($receipt, $receiptBody)")
+        acls_at = wf.find("icacls $evidence")
+        collision_at = wf.find("ACCOUNT_NAME_COLLISION")
+        removals = [ln for ln in wf.splitlines() if "Remove-LocalUser" in ln]
+        bad_removals = [ln for ln in removals if "ErrorAction Stop" not in ln]
+        invariants = {
+            "unique bounded account name": "PR341R' + [guid]::NewGuid()" in wf,
+            "bounded allocation attempts": "$attempt -le 3" in wf,
+            "collision checked before creation": collision_at > 0 and collision_at < create_at,
+            "creation requires explicit failure": (
+                "New-LocalUser -Name $user -Password $secure -PasswordNeverExpires "
+                "-AccountNeverExpires -ErrorAction Stop" in wf
+            ),
+            "receipt written only after creation": (
+                create_at > 0 and write_at > create_at and acls_at > write_at
+            ),
+            "cleanup gated on ownership receipt": (
+                "if ($record -notmatch 'OWNED_BY_THIS_RUN=YES')" in wf
+            ),
+            "owned account name validated before delete": "^PR341R[0-9A-F]{8}$" in wf,
+            "delete failure reported": "Failed to delete owned account" in wf,
+            "no unowned deletion path": not bad_removals,
+            "no fixed account name": "PR341Restricted" not in wf,
+            "cleanup skipped without receipt": (
+                "CLEANUP_NO_RECEIPT=nothing owned by this run" in wf
+            ),
+        }
+        for label, ok in invariants.items():
+            if ok:
+                print(f"PASS accept: workflow ownership control: {label}")
+            else:
+                FAILURES.append(f"workflow ownership control: {label}")
+                print(f"FAIL accept: workflow ownership control: {label}")
+
     with sandbox() as root:
         (root / ".lfsconfig").write_text("[lfs]\n", encoding="utf-8")
         expect_fail(
