@@ -6,6 +6,13 @@ Human-readable rendering of
 establish credential containment, grant source-trust clearance, grant runtime
 authority, or authorize a merge. `SECURITY_CLEARANCE: NOT SELF-GRANTED`.
 
+**Historical/current separation (S5):** this package is immutably pinned to
+candidate `4ce9529` (tree `306a453a`). At repair time current `main` was
+`770e68f5bb1163fdcf61c84f98b72a394840d390`. The evidence and the recorded
+artifact digest apply **only** to the historical candidate and are not a
+statement about current HEAD or any new build. No source-trust clearance is
+granted for either revision.
+
 ## Identity and scope
 
 | Field | Value |
@@ -29,10 +36,18 @@ or a clean-looking tree proves trust.
 | KNOWN_SUSPECT_ANCESTRY | VERIFIED | same ancestry enumeration; `observations.suspect_commits_in_ancestry_empty = true` |
 | DEPENDENCY_AND_BUILD_INPUT_REVIEW | VERIFIED (scoped) | tracked executable-configuration pins reviewed (`scripts/reviewed_config_digests.json`), one reviewed workflow only (`contents: read`, no secrets), no dependency lifecycle hooks in `frontend/package.json`, no new dependency introduced by this work |
 
-Residual: full independent transitive dependency provenance (SBOM/signature)
-was **not** established. GitHub reported 10 open Dependabot advisories on the
-default branch (1 high, 6 moderate, 3 low) at PR publication time; dependency
-changes require explicit owner approval and were not made.
+Residual: the lifecycle-script assertion is a narrow, read-only cross-check
+against the tracked `frontend/package.json` (scripts: `build`, `dev`, `lint`,
+`start`; no lifecycle hooks). It is **not** supply-chain verification: full
+independent transitive provenance (SBOM/signature) remains UNKNOWN. GitHub
+reported 10 open Dependabot advisories on the default branch (1 high, 6
+moderate, 3 low) at PR publication time; dependency changes require explicit
+owner approval and were not made.
+
+The validator independently enumerates the real `.github/workflows` directory
+and refuses symlinks, non-file entries, unreadable inventories and unexpected
+workflow files. Git ancestry/tree/blob queries fail closed: a missing or
+unreadable Git fact is an explicit finding, never an empty clean history.
 
 ## Credential and push-actor evidence
 
