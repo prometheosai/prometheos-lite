@@ -12,19 +12,27 @@ read-only collector job:
   deterministic policy digest, with no digest self-approval or circular
   collector/workflow digest dependency;
 - manual-only, contents: read, no secrets/tokens are preserved;
-- the workflow content digest changed, so a Principal re-pin is required.
+- preapproval: pins still name the historical digest and are intentionally stale;
+- postapproval: the executing workflow digest matches identical current pins in
+  both pin files (verified in memory only — no pin file is written here);
+- stale or inconsistent pins are rejected, and the historical digest remains
+  provenance rather than an active execution pin.
 """
 
 import hashlib
+import re
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / ".github" / "workflows" / "pr341-windows-acceptance.yml"
+CONFIG_PINS = ROOT / "scripts" / "reviewed_config_digests.json"
+POLICY = ROOT / "scripts" / "local_ci_policy.py"
 
 REVIEWED_PR341_SHA = "37a7ae33ca21fc25ad0f70f20022cd4a95634bce"
 REVIEWED_COLLECTOR_SHA = "96d9cbcefdeb09955c1fc7b50734d260263813f0"
 HISTORICAL_WORKFLOW_DIGEST = "b45b5ed1c912cef4d14251563fe2366f76c1d28287ce2e2291ef84f55d01b84c"
+EXPECTED_CURRENT_DIGEST = "53984301f49022049859218efb2ee2b44dd0e10902542f583ac7e19967cb30fe"
 APPROVED_CHECKOUT_ACTION = "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"
 EXPECTED_WORKFLOW_REF = (
     "prometheosai/prometheos-lite/.github/workflows/"
@@ -34,6 +42,36 @@ EXPECTED_WORKFLOW_REF = (
 
 def normalized_digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+
+
+def config_pin(text: str) -> str | None:
+    match = re.search(
+        r'"\.github/workflows/pr341-windows-acceptance\.yml"\s*:\s*"([0-9a-f]{64})"', text
+    )
+    return match.group(1) if match else None
+
+
+def policy_pin(text: str) -> str | None:
+    match = re.search(r'APPROVED_WORKFLOW_SHA256\s*=\s*"([0-9a-f]{64})"', text)
+    return match.group(1) if match else None
+
+
+def validate_postapproval_bindings(config: str | None, policy: str | None, actual: str) -> list[str]:
+    """Postapproval state only: all active bindings must name the same digest.
+
+    This is a pure document check. It never writes the pin files and does not
+    assert that a Principal re-pin has already happened.
+    """
+    errors = []
+    if config != actual:
+        errors.append("reviewed_config_digests.json workflow pin is stale or missing")
+    if policy != actual:
+        errors.append("local_ci_policy.py workflow pin is stale or missing")
+    if config is not None and policy is not None and config != policy:
+        errors.append("workflow digest bindings are inconsistent between the two pin files")
+    if config == HISTORICAL_WORKFLOW_DIGEST or policy == HISTORICAL_WORKFLOW_DIGEST:
+        errors.append("historical introduction digest must not be an active execution pin")
+    return errors
 
 
 class CollectorIntegrationPolicy(unittest.TestCase):
@@ -102,14 +140,51 @@ class CollectorIntegrationPolicy(unittest.TestCase):
         self.assertIn("PR341_EVIDENCE_OUT", self.text)
         self.assertIn("NONPRIVILEGED_CLAIMS_ONLY_UNVERIFIED", self.text)
 
-    def test_review_digest_change_requires_principal_repin(self):
-        self.assertNotEqual(normalized_digest(WORKFLOW), HISTORICAL_WORKFLOW_DIGEST)
-        # The pin files are deliberately NOT updated by this focused PR: the
-        # policy gate must keep failing until a Principal re-pins the digest.
-        pins = (ROOT / "scripts" / "reviewed_config_digests.json").read_text(encoding="utf-8")
-        self.assertIn(HISTORICAL_WORKFLOW_DIGEST, pins)
-        policy = (ROOT / "scripts" / "local_ci_policy.py").read_text(encoding="utf-8")
-        self.assertIn(HISTORICAL_WORKFLOW_DIGEST, policy)
+    def test_preapproval_state_requires_principal_repin(self):
+        # Preapproval: the workflow has new bytes but the pins still name the
+        # historical introduction digest. No pin file is modified by this PR.
+        actual = normalized_digest(WORKFLOW)
+        self.assertEqual(actual, EXPECTED_CURRENT_DIGEST)
+        self.assertNotEqual(actual, HISTORICAL_WORKFLOW_DIGEST)
+        pins_text = CONFIG_PINS.read_text(encoding="utf-8")
+        policy_text = POLICY.read_text(encoding="utf-8")
+        self.assertEqual(config_pin(pins_text), HISTORICAL_WORKFLOW_DIGEST)
+        self.assertEqual(policy_pin(policy_text), HISTORICAL_WORKFLOW_DIGEST)
+        self.assertNotIn(actual, pins_text)
+        self.assertNotIn(actual, policy_text)
+        # The preapproval state is deliberately rejected by the postapproval
+        # consistency rule; the policy gate must remain failing.
+        self.assertTrue(validate_postapproval_bindings(config_pin(pins_text), policy_pin(policy_text), actual))
+
+    def test_postapproval_pin_consistency_is_deterministic_in_memory(self):
+        # Simulate ONLY the Principal's deliberate re-pin in memory. This does
+        # NOT claim that a re-pin has happened and writes no files.
+        actual = normalized_digest(WORKFLOW)
+        pins_text = CONFIG_PINS.read_text(encoding="utf-8")
+        policy_text = POLICY.read_text(encoding="utf-8")
+        repinned_config = pins_text.replace(
+            f'"{HISTORICAL_WORKFLOW_DIGEST}"', f'"{EXPECTED_CURRENT_DIGEST}"'
+        )
+        repinned_policy = policy_text.replace(
+            f'"{HISTORICAL_WORKFLOW_DIGEST}"', f'"{EXPECTED_CURRENT_DIGEST}"'
+        )
+        config_digest = config_pin(repinned_config)
+        policy_digest = policy_pin(repinned_policy)
+        self.assertEqual(config_digest, actual)
+        self.assertEqual(policy_digest, actual)
+        self.assertEqual(config_digest, policy_digest)
+        self.assertEqual(validate_postapproval_bindings(config_digest, policy_digest, actual), [])
+        # Files on disk remain untouched: re-pinning is Principal-only.
+        self.assertEqual(config_pin(CONFIG_PINS.read_text(encoding="utf-8")), HISTORICAL_WORKFLOW_DIGEST)
+        self.assertEqual(policy_pin(POLICY.read_text(encoding="utf-8")), HISTORICAL_WORKFLOW_DIGEST)
+
+    def test_stale_or_inconsistent_pins_are_rejected(self):
+        actual = EXPECTED_CURRENT_DIGEST
+        self.assertTrue(validate_postapproval_bindings(HISTORICAL_WORKFLOW_DIGEST, HISTORICAL_WORKFLOW_DIGEST, actual))
+        self.assertTrue(validate_postapproval_bindings(None, None, actual))
+        self.assertTrue(validate_postapproval_bindings(actual, HISTORICAL_WORKFLOW_DIGEST, actual))
+        self.assertTrue(validate_postapproval_bindings(HISTORICAL_WORKFLOW_DIGEST, actual, actual))
+        self.assertEqual(validate_postapproval_bindings(actual, actual, actual), [])
 
 
 if __name__ == "__main__":
