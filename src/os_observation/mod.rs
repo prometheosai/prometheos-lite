@@ -10,6 +10,12 @@
 pub const CONTRACT_VERSION: &str = "prometheos.os-observation.v1";
 pub const SUPPORTED_VERSIONS: [&str; 1] = [CONTRACT_VERSION];
 pub const MAX_PAGE_LIMIT: u64 = 512;
+/// Canonical first durable journal sequence. The repository's work-event
+/// journal uses `seq INTEGER PRIMARY KEY AUTOINCREMENT`, whose first row is 1,
+/// and `after = 0` is the documented "from the beginning" cursor sentinel
+/// (`src/api/work_contexts.rs`, `src/db/repository/work_context_events.rs`).
+/// This is that existing contract, not a new numbering system.
+pub const INITIAL_JOURNAL_SEQUENCE: u64 = 1;
 pub const OBSERVE_EVENTS: &str = "observe:work-events";
 pub const OBSERVE_CAPABILITIES: &str = "observe:capabilities";
 
@@ -122,12 +128,27 @@ pub struct PageRequest {
     pub limit: u64,
 }
 
-/// Strict parsing: a malformed or empty-success cursor is refused, never
-/// defaulted into an apparently successful empty page.
+/// Canonical decimal u64 only: digits, no sign, no leading zeros (except
+/// `0`), no whitespace. An explicitly supplied empty or noncanonical cursor
+/// is malformed — it must never collapse into the `after = None` case.
+fn parse_cursor(value: &str) -> Result<u64, Refusal> {
+    if value.is_empty()
+        || value.chars().any(char::is_whitespace)
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+        || (value.len() > 1 && value.starts_with('0'))
+    {
+        return Err(Refusal::MalformedCursor);
+    }
+    value.parse::<u64>().map_err(|_| Refusal::MalformedCursor)
+}
+
+/// Strict parsing: an explicitly malformed or empty cursor is refused, never
+/// defaulted into an apparently successful empty page. An ABSENT cursor is
+/// the only way to request the beginning of the stream.
 pub fn parse_page(after: Option<&str>, limit: Option<&str>) -> Result<PageRequest, Refusal> {
     let after = match after {
-        None | Some("") => None,
-        Some(value) => Some(value.parse::<u64>().map_err(|_| Refusal::MalformedCursor)?),
+        None => None,
+        Some(value) => Some(parse_cursor(value)?),
     };
     let limit = match limit {
         None => MAX_PAGE_LIMIT,
@@ -139,13 +160,22 @@ pub fn parse_page(after: Option<&str>, limit: Option<&str>) -> Result<PageReques
     Ok(PageRequest { after, limit })
 }
 
-/// Reconnection with the caller's last durable cursor: contiguous sequence is
-/// accepted; a gap is an integrity refusal, never a silent skip.
+/// Reconnection with the caller's last durable cursor: the first event must
+/// carry the canonical initial sequence, and every later event must be exactly
+/// `previous + 1`. Checked arithmetic refuses overflow/duplicate `u64::MAX`;
+/// a gap is an integrity refusal, never a silent skip.
 pub fn check_sequence(previous: Option<u64>, next: u64) -> Result<(), Refusal> {
     match previous {
-        None => Ok(()),
-        Some(value) if next == value.saturating_add(1) => Ok(()),
-        Some(_) => Err(Refusal::SequenceGap),
+        None if next == INITIAL_JOURNAL_SEQUENCE => Ok(()),
+        None => Err(Refusal::SequenceGap),
+        Some(value) => {
+            let expected = value.checked_add(1).ok_or(Refusal::SequenceGap)?;
+            if next == expected {
+                Ok(())
+            } else {
+                Err(Refusal::SequenceGap)
+            }
+        }
     }
 }
 
@@ -271,6 +301,66 @@ mod tests {
             parse_page(None, Some((MAX_PAGE_LIMIT + 1).to_string().as_str())),
             Err(Refusal::MalformedLimit)
         );
+    }
+
+    #[test]
+    fn empty_and_noncanonical_cursors_are_refused_not_absent() {
+        // O1: an explicitly supplied empty cursor is malformed, never the
+        // same as an absent cursor.
+        for bad in [
+            "",
+            " ",
+            " 1",
+            "1 ",
+            "\t",
+            "+1",
+            "-1",
+            "01",
+            "0x10",
+            "1_0",
+            "18446744073709551616",
+        ] {
+            assert_eq!(
+                parse_page(Some(bad), None),
+                Err(Refusal::MalformedCursor),
+                "cursor {bad:?} must be refused"
+            );
+        }
+        // An ABSENT cursor and canonical values remain valid.
+        assert_eq!(parse_page(None, None).unwrap().after, None);
+        assert_eq!(parse_page(Some("0"), None).unwrap().after, Some(0));
+        assert_eq!(parse_page(Some("42"), None).unwrap().after, Some(42));
+        assert_eq!(
+            parse_page(Some("18446744073709551615"), None)
+                .unwrap()
+                .after,
+            Some(u64::MAX)
+        );
+    }
+
+    #[test]
+    fn initial_sequence_is_canonical_and_overflow_is_refused() {
+        // Canonical contract: AUTOINCREMENT first seq is 1; `after=0` is only
+        // the from-beginning cursor, never an initial event sequence.
+        assert_eq!(INITIAL_JOURNAL_SEQUENCE, 1);
+        assert!(check_sequence(None, INITIAL_JOURNAL_SEQUENCE).is_ok());
+        assert_eq!(check_sequence(None, 0), Err(Refusal::SequenceGap));
+        assert_eq!(check_sequence(None, 2), Err(Refusal::SequenceGap));
+
+        // Contiguous positive case, including the boundary before MAX.
+        assert!(check_sequence(Some(42), 43).is_ok());
+        assert!(check_sequence(Some(u64::MAX - 1), u64::MAX).is_ok());
+
+        // O2: checked arithmetic. MAX/MAX is a duplicate/overflow, not a
+        // continuation; MAX/0 and MAX/1 are refused as well.
+        assert_eq!(
+            check_sequence(Some(u64::MAX), u64::MAX),
+            Err(Refusal::SequenceGap)
+        );
+        assert_eq!(check_sequence(Some(u64::MAX), 0), Err(Refusal::SequenceGap));
+        assert_eq!(check_sequence(Some(u64::MAX), 1), Err(Refusal::SequenceGap));
+        assert_eq!(check_sequence(Some(42), 42), Err(Refusal::SequenceGap));
+        assert_eq!(check_sequence(Some(42), 44), Err(Refusal::SequenceGap));
     }
 
     #[test]
