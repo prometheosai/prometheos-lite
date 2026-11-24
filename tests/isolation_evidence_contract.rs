@@ -21,7 +21,25 @@
 //!   absence of host-mounted protected resources. These stay PROVIDER_ASSERTED
 //!   / UNPROVABLE and must never be promoted to independently attested.
 
-use serde_json::Value;
+use std::fs;
+use std::iter::once;
+use std::os::windows::ffi::OsStrExt;
+use std::os::windows::fs::MetadataExt;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::ptr;
+
+use serde_json::{Value, json};
+use winapi::shared::minwindef::TRUE;
+use winapi::um::fileapi::{
+    BY_HANDLE_FILE_INFORMATION, CreateFileW, GetFileInformationByHandle, OPEN_EXISTING,
+};
+use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
+use winapi::um::winbase::FILE_FLAG_BACKUP_SEMANTICS;
+use winapi::um::winnt::{
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    GENERIC_READ,
+};
 
 const SCHEMA: &str = "prometheos.isolation-evidence.v1";
 const REPOSITORY: &str = "prometheosai/prometheos-lite";
@@ -401,6 +419,214 @@ fn forged_but_structurally_valid_document_remains_unverified() {
     let doc = forged_document();
     assert_eq!(doc["stage2AttestationSha256"], ZEROED_STAGE2_ATTESTATION);
     assert_eq!(doc["stage2Executed"], serde_json::json!(false));
+}
+
+// ---------------------------------------------------------------------------
+// Nonprivileged real-facts collector.
+//
+// Run (no privileged provisioning, no workflow change):
+//   PR341_EVIDENCE_OUT=<path> cargo test --locked --test \
+//     isolation_evidence_contract test_collector_collects_real_nonprivileged_facts -- \
+//     --exact --nocapture
+//
+// Without `PR341_EVIDENCE_OUT` the collector runs read-only and writes nothing.
+// The emitted document is CLAIMED data, never an authenticated attestation.
+// ---------------------------------------------------------------------------
+
+fn ps_line(command: &str) -> Result<String, String> {
+    let output = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", command])
+        .output()
+        .map_err(|e| format!("powershell unavailable: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "OS probe failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Kernel identity of an OS object (volume serial + file index), via the same
+/// Win32 API family used by the reviewed provisioning code.
+fn kernel_identity(path: &Path) -> Result<(u32, u64), String> {
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(once(0u16)).collect();
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            ptr::null_mut(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err("kernel object handle unavailable".into());
+    }
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    let queried = unsafe { GetFileInformationByHandle(handle, &mut info) };
+    unsafe { CloseHandle(handle) };
+    if queried != TRUE {
+        return Err("kernel object identity query failed".into());
+    }
+    Ok((
+        info.dwVolumeSerialNumber,
+        ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64,
+    ))
+}
+
+fn path_is_reparse(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .map(|meta| meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0)
+        .unwrap_or(false)
+}
+
+fn env_claim(name: &str) -> Value {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map(Value::String)
+        .unwrap_or(Value::Null)
+}
+
+/// Collects only nonprivileged facts from the current Windows host. Provider
+/// values are copied verbatim from GitHub-set environment variables as CLAIMS.
+fn collect_nonprivileged_windows_facts() -> Result<Value, String> {
+    let known_folder = ps_line("[Environment]::GetFolderPath('CommonApplicationData')")?;
+    if known_folder.is_empty() || !PathBuf::from(&known_folder).is_absolute() {
+        return Err("ProgramData Known Folder is not an absolute path".into());
+    }
+    let program_data = PathBuf::from(&known_folder);
+    let (volume_serial, file_index) = kernel_identity(&program_data)
+        .map_err(|e| format!("ProgramData kernel identity unavailable: {e}"))?;
+    let reparse = path_is_reparse(&program_data);
+
+    let product_type = ps_line("(Get-CimInstance Win32_OperatingSystem).ProductType")?;
+    let installation_type = match product_type.as_str() {
+        "1" => "Client",
+        "2" => "DomainController",
+        "3" => "Server",
+        other => other,
+    };
+    let caption = ps_line("(Get-CimInstance Win32_OperatingSystem).Caption")?;
+    let build = ps_line("(Get-CimInstance Win32_OperatingSystem).BuildNumber")?;
+    let token_sid = ps_line("[Security.Principal.WindowsIdentity]::GetCurrent().User.Value")?;
+    let is_admin = ps_line(
+        "([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)",
+    )?;
+    let unc_mounts = ps_line(
+        "@(Get-PSDrive -PSProvider FileSystem | Where-Object { $_.DisplayRoot -like '\\\\*' }).Count",
+    )?;
+    let unc_mounts: u64 = unc_mounts
+        .parse()
+        .map_err(|e| format!("mount inventory malformed: {e}"))?;
+    let registry_absent = ps_line(&format!(
+        "Test-Path -LiteralPath '{}'",
+        program_data
+            .join("PrometheOS/Lite/owner-registry/registry.json")
+            .to_string_lossy()
+    ))?;
+    let registry_absent = registry_absent.eq_ignore_ascii_case("False");
+    let collected_at = ps_line("(Get-Date).ToUniversalTime().ToString('o')")?;
+
+    Ok(json!({
+        "schemaVersion": SCHEMA,
+        "event": env_claim("GITHUB_EVENT_NAME"),
+        "repository": env_claim("GITHUB_REPOSITORY"),
+        "headSha": env_claim("GITHUB_SHA"),
+        "workflowPath": APPROVED_WORKFLOW,
+        "workflowSha256": REVIEWED_WORKFLOW_SHA256,
+        "workflowRevision": REVIEWED_MAIN_SHA,
+        "runId": env_claim("GITHUB_RUN_ID"),
+        "runAttempt": std::env::var("GITHUB_RUN_ATTEMPT")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(Value::from)
+            .unwrap_or(Value::Null),
+        "providerAttested": {
+            "runnerEnvironment": env_claim("RUNNER_ENVIRONMENT"),
+            "runnerOs": env_claim("RUNNER_OS"),
+            "workflowRef": env_claim("GITHUB_WORKFLOW_REF"),
+            "eventRef": env_claim("GITHUB_REF"),
+            "actor": env_claim("GITHUB_ACTOR")
+        },
+        "osDerived": {
+            "buildLabEx": format!("{caption} build {build}"),
+            "installationType": installation_type.to_owned(),
+            "tokenSid": token_sid,
+            "tokenIsAdministrator": is_admin.eq_ignore_ascii_case("True")
+        },
+        "programData": {
+            "path": known_folder,
+            "reparse": reparse,
+            "volumeSerial": volume_serial,
+            "fileIndex": file_index,
+            "prometheosPathAbsentBeforeRun": registry_absent
+        },
+        "hostMounts": {
+            "enumerated": true,
+            "remoteCount": unc_mounts,
+            "protectedMountCount": unc_mounts
+        },
+        "selfAssertedOnly": false,
+        "stage2AttestationSha256": ZEROED_STAGE2_ATTESTATION,
+        "stage2Executed": false,
+        "provenance": {
+            "classification": "UNVERIFIED_PROVENANCE",
+            "producer": "nonprivileged-windows-facts-collector-v1",
+            "hostKind": if std::env::var_os("GITHUB_ACTIONS").is_some() {
+                "github-hosted-claimed"
+            } else {
+                "unknown-local"
+            },
+            "collectedAtUtc": collected_at,
+            "limitation": "provider fields are copied from environment; OS facts are locally observed; no trusted channel authenticates either"
+        }
+    }))
+}
+
+#[test]
+fn test_collector_collects_real_nonprivileged_facts() {
+    let doc = collect_nonprivileged_windows_facts().expect("collector must run read-only");
+    assert_eq!(doc["provenance"]["classification"], "UNVERIFIED_PROVENANCE");
+    assert_eq!(doc["stage2AttestationSha256"], ZEROED_STAGE2_ATTESTATION);
+    assert_eq!(doc["stage2Executed"], serde_json::json!(false));
+    assert!(
+        doc["osDerived"]["tokenSid"]
+            .as_str()
+            .is_some_and(|sid| sid.starts_with("S-1-")),
+        "real Windows token SID must be collected"
+    );
+    assert!(
+        doc["programData"]["volumeSerial"]
+            .as_u64()
+            .is_some_and(|v| v > 0),
+        "real kernel volume identity must be collected"
+    );
+    assert_eq!(doc["hostMounts"]["enumerated"], serde_json::json!(true));
+
+    let result = validate_structure_only(&doc);
+    let on_runner = std::env::var_os("GITHUB_ACTIONS").is_some();
+    if on_runner {
+        assert_eq!(result.structure, StructuralStatus::StructurallyValid);
+    } else {
+        assert_eq!(
+            result.structure,
+            StructuralStatus::StructurallyInvalid,
+            "off-runner collection must fail closed on missing provider claims"
+        );
+        assert!(!result.issues.is_empty());
+    }
+    assert_eq!(result.provenance, ProvenanceStatus::Unverified);
+    assert!(promote_to_authenticated(&result).is_err());
+    assert!(isolation_acceptance(&result).is_err());
+
+    if let Some(path) = std::env::var_os("PR341_EVIDENCE_OUT") {
+        let rendered = serde_json::to_string_pretty(&doc).expect("serialize evidence");
+        fs::write(PathBuf::from(path), rendered).expect("write evidence artifact");
+    }
 }
 
 #[test]
