@@ -249,9 +249,13 @@ fn verify_identity_transition(
 /// whole lifetime. It is NOT the production writer lock (see E3 note below).
 struct OwnedRegistry {
     path: PathBuf,
+    /// Missing ancestors recorded deepest-first during preflight.
     new_dirs: Vec<PathBuf>,
+    /// Kernel identity of each directory once production has created it.
+    dir_identities: Vec<(PathBuf, ObjectIdentity)>,
     identity: Option<ObjectIdentity>,
     history: Vec<(u64, ObjectIdentity)>,
+    residual_state: Option<String>,
     _lock: registry::windows::TestMutexGuard,
     cleaned: bool,
 }
@@ -302,8 +306,10 @@ impl OwnedRegistry {
         Ok(Self {
             path: path.to_path_buf(),
             new_dirs,
+            dir_identities: Vec::new(),
             identity: None,
             history: Vec::new(),
+            residual_state: None,
             _lock: lock,
             cleaned: false,
         })
@@ -319,10 +325,31 @@ impl OwnedRegistry {
         if dacl_grants_full_control_to(parent, SID_ADMINISTRATORS) != Ok(true) {
             return Err("created registry parent ACL is not trusted".into());
         }
+        // Production has now created the previously missing ancestors. Bind
+        // their real identities before any of them may ever be removed.
+        let mut dir_identities = Vec::new();
+        for dir in &self.new_dirs {
+            if reject_reparse(dir).is_err() {
+                return Err(format!(
+                    "created ancestor {} is a reparse point",
+                    dir.display()
+                ));
+            }
+            dir_identities.push((dir.clone(), object_identity(dir)?));
+        }
         let identity = object_identity(&self.path)?;
+        self.dir_identities = dir_identities;
         self.history.push((generation, identity));
         self.identity = Some(identity);
         Ok(())
+    }
+
+    /// A partial install or failed identity capture leaves state this test
+    /// cannot prove it owns. Mark it for manual investigation and disable all
+    /// deletion — never guess at ownership to make cleanup look complete.
+    fn mark_partial_failure(&mut self, stage: &str) {
+        self.residual_state = Some(stage.to_owned());
+        self.cleaned = true;
     }
 
     /// Verify the bound object is still the one this test created/approved.
@@ -403,10 +430,48 @@ impl OwnedRegistry {
             return Err("STAGE2_CLEANUP_FAILURE: owned object still present after removal".into());
         }
         let mut failures = Vec::new();
-        for dir in self.new_dirs.iter().rev() {
-            if fs::symlink_metadata(dir).is_ok()
-                && let Err(e) = fs::remove_dir(dir)
-            {
+        // new_dirs is recorded deepest-first. Removing in that order is the
+        // only safe order: a parent is never removed while it still contains
+        // a child created by this test.
+        for dir in self.new_dirs.iter() {
+            if fs::symlink_metadata(dir).is_err() {
+                continue;
+            }
+            let Some((_, recorded)) = self.dir_identities.iter().find(|(path, _)| path == dir)
+            else {
+                failures.push(format!("{}: no recorded directory identity", dir.display()));
+                continue;
+            };
+            if reject_reparse(dir).is_err() {
+                failures.push(format!("{}: reparse substitution", dir.display()));
+                continue;
+            }
+            match object_identity(dir) {
+                Ok(current) if current == *recorded => {}
+                Ok(_) => {
+                    failures.push(format!("{}: directory identity changed", dir.display()));
+                    continue;
+                }
+                Err(e) => {
+                    failures.push(format!("{}: {e}", dir.display()));
+                    continue;
+                }
+            }
+            let mut entries = match fs::read_dir(dir) {
+                Ok(entries) => entries,
+                Err(e) => {
+                    failures.push(format!("{}: contents unverifiable: {e}", dir.display()));
+                    continue;
+                }
+            };
+            if let Some(entry) = entries.next() {
+                let name = entry
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| "<unreadable>".to_owned());
+                failures.push(format!("{}: unexpected contents {name}", dir.display()));
+                continue;
+            }
+            if let Err(e) = fs::remove_dir(dir) {
                 failures.push(format!("{}: {e}", dir.display()));
             }
         }
@@ -420,6 +485,13 @@ impl OwnedRegistry {
 
 impl Drop for OwnedRegistry {
     fn drop(&mut self) {
+        if let Some(stage) = &self.residual_state {
+            eprintln!(
+                "PARTIAL_INSTALL_MANUAL_INVESTIGATION_REQUIRED: {stage} at {}; unverified state left untouched",
+                self.path.display()
+            );
+            return;
+        }
         if !self.cleaned
             && let Err(e) = self.cleanup()
         {
@@ -755,6 +827,120 @@ fn stage2_failed_identity_transition_missing_object_is_refused() {
 }
 
 #[test]
+fn stage2_multilevel_cleanup_removes_deepest_first() {
+    let base = OwnedTempDir::create_new(&temp_base(), "pr341-stage2-multilevel").expect("fixture");
+    grant_full_control(&base.path, SID_ADMINISTRATORS);
+    let leaf = base.path.join("a/b/c/registry.json");
+    let mut owned =
+        OwnedRegistry::try_acquire(&leaf, &leaf, &base.path).expect("acquire owned guard");
+    fs::create_dir_all(leaf.parent().expect("nested parent")).expect("nested directories");
+    for dir in ["a", "a/b", "a/b/c"] {
+        grant_full_control(&base.path.join(dir), SID_ADMINISTRATORS);
+    }
+    fs::write(&leaf, b"owned").expect("owned leaf");
+    owned.record_created_identity(1).expect("record identities");
+    assert_eq!(owned.new_dirs.len(), 3, "three owned ancestors recorded");
+
+    owned.cleanup().expect("deepest-first cleanup must succeed");
+    assert!(
+        !base.path.join("a").exists(),
+        "all nested owned directories must be removed"
+    );
+    assert!(base.path.exists(), "pre-existing parent must survive");
+}
+
+#[test]
+fn stage2_cleanup_preserves_unexpected_contents() {
+    let base = OwnedTempDir::create_new(&temp_base(), "pr341-stage2-unexpected").expect("fixture");
+    grant_full_control(&base.path, SID_ADMINISTRATORS);
+    let leaf = base.path.join("a/b/c/registry.json");
+    let mut owned =
+        OwnedRegistry::try_acquire(&leaf, &leaf, &base.path).expect("acquire owned guard");
+    fs::create_dir_all(leaf.parent().expect("nested parent")).expect("nested directories");
+    for dir in ["a", "a/b", "a/b/c"] {
+        grant_full_control(&base.path.join(dir), SID_ADMINISTRATORS);
+    }
+    fs::write(&leaf, b"owned").expect("owned leaf");
+    owned.record_created_identity(1).expect("record identities");
+    let unexpected = base.path.join("a/b/unowned.txt");
+    fs::write(&unexpected, b"not ours").expect("unowned content");
+
+    let result = owned.cleanup();
+    assert!(
+        result.is_err(),
+        "unexpected contents must block directory removal: {result:?}"
+    );
+    assert!(unexpected.exists(), "unowned content must be preserved");
+    assert!(
+        base.path.join("a/b").exists(),
+        "the directory holding unexpected content must be preserved"
+    );
+    assert!(
+        base.path.join("a").exists(),
+        "pre-existing parent must survive"
+    );
+}
+
+#[test]
+fn stage2_cleanup_refuses_directory_reparse_substitution() {
+    let base = OwnedTempDir::create_new(&temp_base(), "pr341-stage2-dir-reparse").expect("fixture");
+    grant_full_control(&base.path, SID_ADMINISTRATORS);
+    let leaf = base.path.join("a/b/c/registry.json");
+    let mut owned =
+        OwnedRegistry::try_acquire(&leaf, &leaf, &base.path).expect("acquire owned guard");
+    fs::create_dir_all(leaf.parent().expect("nested parent")).expect("nested directories");
+    for dir in ["a", "a/b", "a/b/c"] {
+        grant_full_control(&base.path.join(dir), SID_ADMINISTRATORS);
+    }
+    fs::write(&leaf, b"owned").expect("owned leaf");
+    owned.record_created_identity(1).expect("record identities");
+
+    let owned_dir = base.path.join("a/b/c");
+    let substituted = base.path.join("elsewhere");
+    fs::create_dir(&substituted).expect("substitution target");
+    fs::remove_dir_all(&owned_dir).expect("remove owned directory");
+    std::os::windows::fs::symlink_dir(&substituted, &owned_dir).expect("junction");
+    let result = owned.cleanup();
+    assert!(
+        result.is_err(),
+        "a reparse substitution must be refused: {result:?}"
+    );
+    assert!(
+        fs::symlink_metadata(&owned_dir)
+            .expect("junction survives")
+            .file_type()
+            .is_symlink(),
+        "unexpected substitution must be left in place"
+    );
+}
+
+#[test]
+fn stage2_partial_install_leaves_unverified_state() {
+    let base = OwnedTempDir::create_new(&temp_base(), "pr341-stage2-partial").expect("fixture");
+    grant_full_control(&base.path, SID_ADMINISTRATORS);
+    let leaf = base.path.join("a/b/c/registry.json");
+    let mut owned =
+        OwnedRegistry::try_acquire(&leaf, &leaf, &base.path).expect("acquire owned guard");
+
+    // Simulate a provisioning failure after creating some state but before
+    // identity capture. None of it is provably owned.
+    fs::create_dir_all(leaf.parent().expect("nested parent")).expect("partial directories");
+    fs::write(&leaf, b"partial").expect("partial leaf");
+    owned.mark_partial_failure("simulated first-install failure");
+    assert!(
+        owned.residual_state.is_some(),
+        "partial failure must be recorded"
+    );
+    let result = owned.cleanup();
+    assert!(result.is_err(), "unverified state must not be deleted");
+    assert!(leaf.exists(), "partial leaf preserved for investigation");
+    assert!(
+        base.path.join("a").exists(),
+        "partial directories preserved for investigation"
+    );
+}
+
+#[test]
 fn stage2_lock_child_process_helper() {
     // Invoked only by stage2_cross_process_lock_is_enforced with a private env.
     if std::env::var_os(LOCK_CHILD_VAR).is_none() {
@@ -827,10 +1013,14 @@ fn stage2_deterministic_privileged_scenario() {
         .expect("hard refusal on pre-existing or unverifiable protected state");
     let sid = SID_ADMINISTRATORS;
     let first = document(1, vec![binding(sid, "stage2-owner", false, 1)]);
-    provision_registry(&expected, &first).expect("elevated first install");
-    owned
-        .record_created_identity(1)
-        .expect("bind cleanup to the actual installed object");
+    if let Err(e) = provision_registry(&expected, &first) {
+        owned.mark_partial_failure("first-install provisioning");
+        panic!("elevated first install failed: {e:?}");
+    }
+    if let Err(e) = owned.record_created_identity(1) {
+        owned.mark_partial_failure("first-install identity capture");
+        panic!("bind cleanup to installed object failed: {e}");
+    }
 
     assert_eq!(load_registry(&expected).expect("installed bytes"), first);
     assert!(validate_registry_location(&expected).is_ok());
@@ -846,14 +1036,19 @@ fn stage2_deterministic_privileged_scenario() {
     assert_eq!(entries.len(), 1, "atomic publication leaves no temp files");
 
     let revoked = document(2, vec![binding(sid, "stage2-owner", true, 2)]);
-    owned
-        .verify_current_identity(1)
-        .expect("expected generation-1 state before the approved update");
+    if let Err(e) = owned.verify_current_identity(1) {
+        owned.mark_partial_failure("pre-update identity verification");
+        panic!("expected generation-1 state before update: {e}");
+    }
     let first_identity = owned.identity.expect("generation-1 identity");
-    provision_registry(&expected, &revoked).expect("monotonic revocation update");
-    owned
-        .bind_updated_identity(2)
-        .expect("verified generation-2 identity transition");
+    if let Err(e) = provision_registry(&expected, &revoked) {
+        owned.mark_partial_failure("generation-2 update provisioning");
+        panic!("monotonic revocation update failed: {e:?}");
+    }
+    if let Err(e) = owned.bind_updated_identity(2) {
+        owned.mark_partial_failure("generation-2 identity capture");
+        panic!("verified generation-2 identity transition failed: {e}");
+    }
     let second_identity = owned.identity.expect("generation-2 identity");
     assert_ne!(
         first_identity, second_identity,
