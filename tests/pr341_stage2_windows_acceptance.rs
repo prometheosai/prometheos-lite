@@ -16,8 +16,11 @@
 
 use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
+use std::iter::once;
+use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::ptr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::thread;
@@ -31,6 +34,16 @@ use registry::windows::{
 };
 use registry::{OwnerBinding, OwnerRegistry, Refusal, SID_ADMINISTRATORS, SID_EVERYONE};
 use sha2::{Digest, Sha256};
+use winapi::shared::minwindef::TRUE;
+use winapi::um::fileapi::{
+    BY_HANDLE_FILE_INFORMATION, CreateFileW, GetFileInformationByHandle, OPEN_EXISTING,
+};
+use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
+use winapi::um::winbase::FILE_FLAG_BACKUP_SEMANTICS;
+use winapi::um::winnt::{
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    GENERIC_READ,
+};
 
 const OPT_IN: &str = "PR341_STAGE2_ACCEPTANCE";
 const ATTESTATION_PATH_VAR: &str = "PR341_STAGE2_ATTESTATION";
@@ -142,12 +155,52 @@ fn hex_digest(bytes: &[u8]) -> String {
         .collect()
 }
 
-/// RAII owner for the protected registry. Acquires the cross-process named
-/// mutex for its whole lifetime and HARD-REFUSES any pre-existing target,
-/// unexpected ancestor, substitute path or unverifiable ACL.
+/// Kernel identity of the actual filesystem object, not merely its path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ObjectIdentity {
+    volume: u32,
+    index: u64,
+}
+
+fn object_identity(path: &Path) -> Result<ObjectIdentity, String> {
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(once(0u16)).collect();
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            ptr::null_mut(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err("object handle could not be opened for identity verification".into());
+    }
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    let queried = unsafe { GetFileInformationByHandle(handle, &mut info) };
+    unsafe { CloseHandle(handle) };
+    if queried != TRUE {
+        return Err("kernel object identity could not be queried".into());
+    }
+    if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err("object is a reparse point".into());
+    }
+    Ok(ObjectIdentity {
+        volume: info.dwVolumeSerialNumber,
+        index: ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64,
+    })
+}
+
+/// RAII owner for the protected registry. The cross-process named mutex is
+/// acquired BEFORE any protected-path state is inspected and held for the
+/// whole lifetime. After install, the created object's kernel identity is
+/// recorded and re-verified immediately before deletion.
 struct OwnedRegistry {
     path: PathBuf,
     new_dirs: Vec<PathBuf>,
+    identity: Option<ObjectIdentity>,
     _lock: registry::windows::TestMutexGuard,
     cleaned: bool,
 }
@@ -159,6 +212,9 @@ impl OwnedRegistry {
         {
             return Err("substitute registry path".into());
         }
+        // Lock first: no protected state is read until exclusive ownership is held.
+        let lock = acquire_test_mutex(&test_mutex_name(expected))
+            .map_err(|e| format!("cross-process lock unavailable: {}", e.as_str()))?;
         match fs::symlink_metadata(path) {
             Ok(_) => return Err("pre-existing protected registry — refusing to mutate".into()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -170,6 +226,13 @@ impl OwnedRegistry {
         }
         if dacl_grants_full_control_to(root, SID_ADMINISTRATORS).is_err() {
             return Err("ProgramData ACL cannot be verified".into());
+        }
+        let parent = path.parent().ok_or("registry path has no parent")?;
+        if reject_reparse(parent).is_err() {
+            return Err("registry parent is a reparse point".into());
+        }
+        if dacl_grants_full_control_to(parent, SID_ADMINISTRATORS).is_err() {
+            return Err("registry parent ACL cannot be verified".into());
         }
         let mut new_dirs = Vec::new();
         let mut current = path.parent();
@@ -191,23 +254,55 @@ impl OwnedRegistry {
             }
             current = dir.parent();
         }
-        let lock = acquire_test_mutex(&test_mutex_name(expected))
-            .map_err(|e| format!("cross-process lock unavailable: {}", e.as_str()))?;
         Ok(Self {
             path: path.to_path_buf(),
             new_dirs,
+            identity: None,
             _lock: lock,
             cleaned: false,
         })
     }
 
+    /// Bind cleanup to the exact object created by this run while the mutex
+    /// is still held. Never infer ownership from a path alone.
+    fn record_created_identity(&mut self) -> Result<(), String> {
+        let identity = object_identity(&self.path)?;
+        self.identity = Some(identity);
+        Ok(())
+    }
+
     fn cleanup(&mut self) -> Result<(), String> {
-        let mut failures = Vec::new();
-        if (self.path.exists() || fs::symlink_metadata(&self.path).is_ok())
-            && let Err(e) = fs::remove_file(&self.path)
+        // One cleanup attempt only: no destructive retries.
+        self.cleaned = true;
+        let Some(recorded) = self.identity else {
+            return Err("STAGE2_CLEANUP_FAILURE: no owned object identity recorded".to_owned());
+        };
+        let Some(parent) = self.path.parent() else {
+            return Err("STAGE2_CLEANUP_FAILURE: registry path has no parent".to_owned());
+        };
+        if reject_reparse(parent).is_err()
+            || dacl_grants_full_control_to(parent, SID_ADMINISTRATORS).is_err()
         {
-            failures.push(format!("leaf: {e}"));
+            return Err("STAGE2_CLEANUP_FAILURE: parent reparse or unverifiable ACL".to_owned());
         }
+        let current = object_identity(&self.path)
+            .map_err(|e| format!("STAGE2_CLEANUP_FAILURE: owned object unverifiable: {e}"))?;
+        if current != recorded {
+            return Err(format!(
+                "STAGE2_CLEANUP_FAILURE: object identity changed at {} — refusing to delete",
+                self.path.display()
+            ));
+        }
+        if reject_reparse(&self.path).is_err() {
+            return Err("STAGE2_CLEANUP_FAILURE: owned object became a reparse point".into());
+        }
+        if let Err(e) = fs::remove_file(&self.path) {
+            return Err(format!("STAGE2_CLEANUP_FAILURE: leaf removal failed: {e}"));
+        }
+        if fs::symlink_metadata(&self.path).is_ok() {
+            return Err("STAGE2_CLEANUP_FAILURE: owned object still present after removal".into());
+        }
+        let mut failures = Vec::new();
         for dir in self.new_dirs.iter().rev() {
             if fs::symlink_metadata(dir).is_ok()
                 && let Err(e) = fs::remove_dir(dir)
@@ -215,7 +310,6 @@ impl OwnedRegistry {
                 failures.push(format!("{}: {e}", dir.display()));
             }
         }
-        self.cleaned = true;
         if failures.is_empty() {
             Ok(())
         } else {
@@ -373,24 +467,109 @@ fn stage2_temp_fixture_collision_is_refused() {
 
 #[test]
 fn stage2_cleanup_failure_is_reported() {
-    let base = PathBuf::from(
-        std::env::var("RUNNER_TEMP")
-            .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into_owned()),
-    );
-    let dir = OwnedTempDir::create_new(&base, "pr341-stage2-cleanup").expect("create fixture");
+    let dir = OwnedTempDir::create_new(&temp_base(), "pr341-stage2-cleanup").expect("fixture");
     let leaf = dir.path.join("registry.json");
     let mut owned =
         OwnedRegistry::try_acquire(&leaf, &leaf, &dir.path).expect("acquire owned fixture guard");
-    // Replace the expected leaf with a directory: removal by file API must fail
-    // and the failure must be returned, not silently swallowed.
-    fs::create_dir(&leaf).expect("create unexpected directory at owned leaf");
+    // No identity was recorded: cleanup must fail closed and leave objects alone.
     let result = owned.cleanup();
     assert!(
         result.is_err(),
         "cleanup failure must be reported visibly: {result:?}"
     );
-    owned.cleaned = true;
-    let _ = fs::remove_dir(&leaf);
+    assert!(!leaf.exists(), "no object existed before cleanup");
+}
+
+#[test]
+fn stage2_cleanup_rejects_replaced_object() {
+    let dir = OwnedTempDir::create_new(&temp_base(), "pr341-stage2-replace").expect("fixture");
+    let leaf = dir.path.join("registry.json");
+    let mut owned =
+        OwnedRegistry::try_acquire(&leaf, &leaf, &dir.path).expect("acquire owned fixture guard");
+    fs::write(&leaf, b"owned-by-this-test").expect("create owned object");
+    owned
+        .record_created_identity()
+        .expect("record real object identity");
+
+    // External substitution: same path, different kernel object.
+    fs::remove_file(&leaf).expect("remove owned object");
+    fs::write(&leaf, b"replacement").expect("create replacement object");
+    let result = owned.cleanup();
+    assert!(
+        result.is_err(),
+        "a replaced object must not be deleted: {result:?}"
+    );
+    assert_eq!(
+        fs::read(&leaf).expect("replacement survives"),
+        b"replacement",
+        "unexpected object must be left untouched"
+    );
+}
+
+#[test]
+fn stage2_cleanup_rejects_reparse_substitution() {
+    let dir = OwnedTempDir::create_new(&temp_base(), "pr341-stage2-reparse").expect("fixture");
+    let leaf = dir.path.join("registry.json");
+    let target = dir.path.join("elsewhere.txt");
+    let mut owned =
+        OwnedRegistry::try_acquire(&leaf, &leaf, &dir.path).expect("acquire owned fixture guard");
+    fs::write(&leaf, b"owned-by-this-test").expect("create owned object");
+    owned
+        .record_created_identity()
+        .expect("record real object identity");
+
+    fs::remove_file(&leaf).expect("remove owned object");
+    fs::write(&target, b"do not follow").expect("create substitution target");
+    std::os::windows::fs::symlink_file(&target, &leaf).expect("create file symlink");
+    let result = owned.cleanup();
+    assert!(
+        result.is_err(),
+        "a reparse substitution must never be deleted: {result:?}"
+    );
+    assert!(
+        fs::symlink_metadata(&leaf)
+            .expect("symlink survives")
+            .file_type()
+            .is_symlink(),
+        "substitution must be left in place"
+    );
+}
+
+#[test]
+fn stage2_in_process_lock_blocks_then_acquires() {
+    // Deterministic D1 regression: contention is tested WITHOUT an owned
+    // registry guard, so no thread waits on a lock the test itself retains.
+    let name = test_mutex_name(&static_preflight().expect("static preflight"));
+    let (held_tx, held_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let holder_name = name.clone();
+    let holder = thread::spawn(move || {
+        let _guard = acquire_test_mutex(&holder_name).expect("holder lock");
+        held_tx.send(()).expect("signal held");
+        let _ = release_rx.recv();
+    });
+    held_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("holder acquired");
+
+    let (acquired_tx, acquired_rx) = mpsc::channel();
+    let contender_name = name;
+    let contender = thread::spawn(move || {
+        let _guard = acquire_test_mutex(&contender_name).expect("contender lock");
+        acquired_tx.send(()).expect("signal acquired");
+    });
+    assert!(
+        acquired_rx
+            .recv_timeout(Duration::from_millis(250))
+            .is_err(),
+        "contender must block while another holder owns the mutex"
+    );
+    release_tx.send(()).expect("release holder");
+    acquired_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("contender acquired only after release");
+    holder.join().expect("holder clean exit");
+    contender.join().expect("contender clean exit");
 }
 
 #[test]
@@ -467,6 +646,9 @@ fn stage2_deterministic_privileged_scenario() {
     let sid = SID_ADMINISTRATORS;
     let first = document(1, vec![binding(sid, "stage2-owner", false, 1)]);
     provision_registry(&expected, &first).expect("elevated first install");
+    owned
+        .record_created_identity()
+        .expect("bind cleanup to the actual installed object");
 
     assert_eq!(load_registry(&expected).expect("installed bytes"), first);
     assert!(validate_registry_location(&expected).is_ok());
@@ -499,35 +681,9 @@ fn stage2_deterministic_privileged_scenario() {
         "no cross-owner authorization"
     );
 
-    let (held_tx, held_rx) = mpsc::channel();
-    let (release_tx, release_rx) = mpsc::channel::<()>();
-    let lock_name = test_mutex_name(&expected);
-    let holder_name = lock_name.clone();
-    let holder = thread::spawn(move || {
-        let _g = acquire_test_mutex(&holder_name).expect("thread lock");
-        held_tx.send(()).unwrap();
-        let _ = release_rx.recv();
-    });
-    held_rx
-        .recv_timeout(Duration::from_secs(5))
-        .expect("thread locked");
-    let (acquired_tx, acquired_rx) = mpsc::channel();
-    let contender_name = lock_name;
-    let contender = thread::spawn(move || {
-        let _g = acquire_test_mutex(&contender_name).expect("contender lock");
-        acquired_tx.send(()).unwrap();
-    });
-    assert!(
-        acquired_rx
-            .recv_timeout(Duration::from_millis(300))
-            .is_err()
-    );
-    release_tx.send(()).unwrap();
-    acquired_rx
-        .recv_timeout(Duration::from_secs(5))
-        .expect("contender acquired after release");
-    holder.join().unwrap();
-    contender.join().unwrap();
+    // Contention is verified in stage2_in_process_lock_blocks_then_acquires
+    // and stage2_cross_process_lock_is_enforced, never while this exclusive
+    // registry guard is held.
 
     let base = temp_base();
     let acl_dir = OwnedTempDir::create_new(&base, "pr341-stage2-acl").expect("ACL fixture");
