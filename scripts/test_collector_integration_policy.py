@@ -1,15 +1,16 @@
 """State-independent security regressions for the pinned collector integration.
 
 This does NOT authenticate anything, does NOT dispatch the workflow and never
-writes a real policy pin. The tests accept exactly TWO legitimate pin states:
+writes a real policy pin. The tests accept TWO legitimate pin states:
 
-- UNAPPROVED: both pin files name the historical introduction digest; the
-  repository policy gate is expected to fail.
+- PREAPPROVAL: both pin files name the previously approved workflow digest;
+  the repository policy gate is expected to fail for the changed workflow.
 - APPROVED: both pin files name the reviewed executing-workflow digest; the
   repository policy gate passes.
 
-Mixed, missing, unknown or mismatched pins are rejected. Every test passes in
-both legitimate snapshots because the on-disk state is classified, not assumed.
+The historical introduction digest remains provenance only. Mixed, missing,
+unknown or mismatched pins are rejected. Every test passes in both legitimate
+snapshots because the on-disk state is classified, not assumed.
 """
 
 import hashlib
@@ -27,9 +28,11 @@ CONFIG_PINS = ROOT / "scripts" / "reviewed_config_digests.json"
 POLICY = ROOT / "scripts" / "local_ci_policy.py"
 
 REVIEWED_PR341_SHA = "37a7ae33ca21fc25ad0f70f20022cd4a95634bce"
-REVIEWED_COLLECTOR_SHA = "96d9cbcefdeb09955c1fc7b50734d260263813f0"
+REVIEWED_COLLECTOR_SHA = "debd59d5de62b7c4bb6e30d9d9c797d68a8e3b68"
+COLLECTOR_CONTRACT_BLOB = "41d06dda3ce49eb8fc7d5378ef35b604e869a568"
 HISTORICAL_WORKFLOW_DIGEST = "b45b5ed1c912cef4d14251563fe2366f76c1d28287ce2e2291ef84f55d01b84c"
-EXPECTED_CURRENT_DIGEST = "53984301f49022049859218efb2ee2b44dd0e10902542f583ac7e19967cb30fe"
+PREVIOUS_APPROVED_DIGEST = "53984301f49022049859218efb2ee2b44dd0e10902542f583ac7e19967cb30fe"
+EXPECTED_CURRENT_DIGEST = "f9d2ff4d6c494df2bc6bd8826734896a1ba2349b9b6b15c18e37f141b55797cf"
 APPROVED_CHECKOUT_ACTION = "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"
 EXPECTED_WORKFLOW_REF = (
     "prometheosai/prometheos-lite/.github/workflows/"
@@ -74,16 +77,18 @@ def pin_state(config: str | None, policy: str | None) -> str:
         return "MISSING"
     if config != policy:
         return "MIXED"
-    if config == HISTORICAL_WORKFLOW_DIGEST:
-        return "UNAPPROVED"
+    if config == PREVIOUS_APPROVED_DIGEST:
+        return "PREAPPROVAL"
     if config == EXPECTED_CURRENT_DIGEST:
         return "APPROVED"
+    if config == HISTORICAL_WORKFLOW_DIGEST:
+        return "UNAPPROVED"
     return "UNKNOWN"
 
 
 def validate_pin_state(config: str | None, policy: str | None) -> list[str]:
     state = pin_state(config, policy)
-    if state in ("UNAPPROVED", "APPROVED"):
+    if state in ("PREAPPROVAL", "APPROVED", "UNAPPROVED"):
         return []
     if state == "MISSING":
         return ["a required workflow pin is missing"]
@@ -133,6 +138,8 @@ class CollectorIntegrationPolicy(unittest.TestCase):
         )
         self.assertEqual(self.text.count(f"ref: {REVIEWED_PR341_SHA}"), 2)
         self.assertIn(f"ref: {REVIEWED_COLLECTOR_SHA}", self.text)
+        self.assertNotIn("96d9cbcefdeb09955c1fc7b50734d260263813f0", self.text)
+        self.assertIn("git hash-object", self.text)
         self.assertIn("path: collector-src", self.text)
         self.assertEqual(self.text.count("persist-credentials: false"), 3)
         self.assertNotRegex(self.text, r"ref:\s*(main|master|HEAD|\$\{\{)")
@@ -148,6 +155,10 @@ class CollectorIntegrationPolicy(unittest.TestCase):
         self.assertIn("Unexpected production source commit", self.text)
         self.assertIn("Unexpected collector commit", self.text)
         self.assertIn("Staged collector contract does not match the pinned source blob", self.text)
+        self.assertIn("--message-format=json", self.text)
+        self.assertIn("resolve_cargo_test_artifact.py", self.text)
+        self.assertNotIn(".cargo-target\\debug\\deps", self.text)
+        self.assertNotIn("LastWriteTime", self.text)
 
     def test_active_workflow_identity_is_bound_without_self_approval(self):
         self.assertIn("Bind active workflow identity", self.text)
@@ -173,28 +184,28 @@ class CollectorIntegrationPolicy(unittest.TestCase):
         self.assertEqual(normalized_digest(WORKFLOW), EXPECTED_CURRENT_DIGEST)
         config = config_pin(self.config_text)
         policy = policy_pin(self.policy_text)
-        self.assertIn(pin_state(config, policy), ("UNAPPROVED", "APPROVED"))
+        self.assertIn(pin_state(config, policy), ("PREAPPROVAL", "APPROVED"))
         self.assertEqual(validate_pin_state(config, policy), [])
         self.assertEqual(config, policy)
 
-    def test_unapproved_and_approved_states_are_both_legitimate(self):
+    def test_preapproval_and_approved_states_are_both_legitimate(self):
         self.assertEqual(
-            pin_state(HISTORICAL_WORKFLOW_DIGEST, HISTORICAL_WORKFLOW_DIGEST), "UNAPPROVED"
+            pin_state(PREVIOUS_APPROVED_DIGEST, PREVIOUS_APPROVED_DIGEST), "PREAPPROVAL"
         )
         self.assertEqual(
             pin_state(EXPECTED_CURRENT_DIGEST, EXPECTED_CURRENT_DIGEST), "APPROVED"
         )
         self.assertEqual(
-            validate_pin_state(HISTORICAL_WORKFLOW_DIGEST, HISTORICAL_WORKFLOW_DIGEST), []
+            validate_pin_state(PREVIOUS_APPROVED_DIGEST, PREVIOUS_APPROVED_DIGEST), []
         )
         self.assertEqual(
             validate_pin_state(EXPECTED_CURRENT_DIGEST, EXPECTED_CURRENT_DIGEST), []
         )
-        # UNAPPROVED is legitimate but must fail the postapproval consistency
-        # check; APPROVED is legitimate and must pass it.
+        # PREAPPROVAL is legitimate but must fail the postapproval consistency
+        # check for the new workflow; APPROVED must pass it.
         self.assertTrue(
             validate_postapproval_bindings(
-                HISTORICAL_WORKFLOW_DIGEST, HISTORICAL_WORKFLOW_DIGEST, EXPECTED_CURRENT_DIGEST
+                PREVIOUS_APPROVED_DIGEST, PREVIOUS_APPROVED_DIGEST, EXPECTED_CURRENT_DIGEST
             )
         )
         self.assertEqual(
@@ -206,11 +217,11 @@ class CollectorIntegrationPolicy(unittest.TestCase):
 
     def test_mixed_missing_unknown_and_mismatched_pins_are_rejected(self):
         for config, policy in [
-            (HISTORICAL_WORKFLOW_DIGEST, EXPECTED_CURRENT_DIGEST),
-            (EXPECTED_CURRENT_DIGEST, HISTORICAL_WORKFLOW_DIGEST),
+            (PREVIOUS_APPROVED_DIGEST, EXPECTED_CURRENT_DIGEST),
+            (EXPECTED_CURRENT_DIGEST, PREVIOUS_APPROVED_DIGEST),
             (None, None),
             (EXPECTED_CURRENT_DIGEST, None),
-            (None, HISTORICAL_WORKFLOW_DIGEST),
+            (None, PREVIOUS_APPROVED_DIGEST),
             ("f" * 64, "f" * 64),
         ]:
             with self.subTest(config=config, policy=policy):
@@ -221,12 +232,12 @@ class CollectorIntegrationPolicy(unittest.TestCase):
         self.assertTrue(validate_postapproval_bindings(None, None, EXPECTED_CURRENT_DIGEST))
         self.assertTrue(
             validate_postapproval_bindings(
-                EXPECTED_CURRENT_DIGEST, HISTORICAL_WORKFLOW_DIGEST, EXPECTED_CURRENT_DIGEST
+                EXPECTED_CURRENT_DIGEST, PREVIOUS_APPROVED_DIGEST, EXPECTED_CURRENT_DIGEST
             )
         )
         self.assertTrue(
             validate_postapproval_bindings(
-                HISTORICAL_WORKFLOW_DIGEST, EXPECTED_CURRENT_DIGEST, EXPECTED_CURRENT_DIGEST
+                PREVIOUS_APPROVED_DIGEST, EXPECTED_CURRENT_DIGEST, EXPECTED_CURRENT_DIGEST
             )
         )
         self.assertEqual(

@@ -71,14 +71,17 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          cargo test --locked --lib work::owner_registry --no-run
+          # Machine-readable Cargo output; no name search, no timestamp sort,
+          # no hardcoded debug/deps path. The resolver fails closed on
+          # missing/ambiguous/wrong-identity/malformed compiler artifacts.
+          $cargoJson = Join-Path $env:RUNNER_TEMP 'pr341-cargo-artifacts.json'
+          cargo test --locked --lib work::owner_registry --no-run --message-format=json > $cargoJson
           if ($LASTEXITCODE -ne 0) { throw "Focused test build failed: $LASTEXITCODE" }
-          $dependencies = Join-Path (Get-Location).Path '.cargo-target\debug\deps'
-          $exe = Get-ChildItem -Path $dependencies -Filter 'prometheos_lite-*.exe' -File |
-                 Sort-Object LastWriteTime -Descending | Select-Object -First 1
-          if (-not $exe) { throw 'Focused lib test executable not found' }
-          [IO.File]::WriteAllText((Join-Path $env:RUNNER_TEMP 'pr341-test-exe.txt'), $exe.FullName)
-          "TEST_BINARY=$($exe.Name)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          $exe = & python scripts/resolve_cargo_test_artifact.py --input $cargoJson
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($exe)) { throw 'Exact focused lib test executable could not be resolved' }
+          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw "Resolved test executable is not a file: $exe" }
+          [IO.File]::WriteAllText((Join-Path $env:RUNNER_TEMP 'pr341-test-exe.txt'), $exe)
+          "TEST_BINARY=$exe" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
 
       - name: Elevated path - owner-registry unit and negative controls
         shell: pwsh
@@ -184,8 +187,12 @@ jobs:
             $workspace = (Get-Location).Path
             icacls $workspace /grant "${user}:(RX)" /inheritance:e | Out-Null
             if ($LASTEXITCODE -ne 0) { throw 'Failed to grant restricted identity traverse on the workspace' }
-            $dependencies = Join-Path $workspace '.cargo-target\debug\deps'
-            icacls $dependencies /grant "${user}:(OI)(CI)RX" /inheritance:e | Out-Null
+            # Use the exact compiler-resolved executable path. Never assume a
+            # Cargo output directory: the hosted layout used build/<id>/out.
+            $exeParent = Split-Path -Parent $exe
+            icacls $exeParent /grant "${user}:(RX)" /inheritance:e | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to grant restricted identity traverse on the test binary directory' }
+            icacls $exe /grant "${user}:(RX)" /inheritance:e | Out-Null
             if ($LASTEXITCODE -ne 0) { throw 'Failed to grant restricted identity execute on the test binary' }
             $credential = New-Object PSCredential($user, $secure)
             $probeTemplate = @'
@@ -291,7 +298,7 @@ jobs:
       - name: Check out separately pinned reviewed collector source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: 96d9cbcefdeb09955c1fc7b50734d260263813f0
+          ref: debd59d5de62b7c4bb6e30d9d9c797d68a8e3b68
           persist-credentials: false
           fetch-depth: 0
           path: collector-src
@@ -301,7 +308,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $sourceExpected = '37a7ae33ca21fc25ad0f70f20022cd4a95634bce'
-          $collectorExpected = '96d9cbcefdeb09955c1fc7b50734d260263813f0'
+          $collectorExpected = 'debd59d5de62b7c4bb6e30d9d9c797d68a8e3b68'
           $source = (git rev-parse HEAD).Trim()
           if ($LASTEXITCODE -ne 0 -or $source -ne $sourceExpected) { throw "Unexpected production source commit: $source" }
           $collector = (git -C collector-src rev-parse HEAD).Trim()
