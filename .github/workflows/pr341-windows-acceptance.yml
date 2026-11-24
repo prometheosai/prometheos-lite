@@ -291,7 +291,7 @@ jobs:
       - name: Check out separately pinned reviewed collector source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: 8dad48fb4ae6fe90f2edfac7fd1a592989de9b46
+          ref: d52d2ae98fbbf38310adf36eee6717bab6117b0c
           persist-credentials: false
           fetch-depth: 0
           path: collector-src
@@ -301,7 +301,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $sourceExpected = '37a7ae33ca21fc25ad0f70f20022cd4a95634bce'
-          $collectorExpected = '8dad48fb4ae6fe90f2edfac7fd1a592989de9b46'
+          $collectorExpected = 'd52d2ae98fbbf38310adf36eee6717bab6117b0c'
           $source = (git rev-parse HEAD).Trim()
           if ($LASTEXITCODE -ne 0 -or $source -ne $sourceExpected) { throw "Unexpected production source commit: $source" }
           $collector = (git -C collector-src rev-parse HEAD).Trim()

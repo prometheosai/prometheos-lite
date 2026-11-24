@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / ".github" / "workflows" / "pr341-windows-acceptance.yml"
 
 REVIEWED_PR341_SHA = "37a7ae33ca21fc25ad0f70f20022cd4a95634bce"
-REVIEWED_COLLECTOR_SHA = "8dad48fb4ae6fe90f2edfac7fd1a592989de9b46"
+REVIEWED_COLLECTOR_SHA = "d52d2ae98fbbf38310adf36eee6717bab6117b0c"
 HISTORICAL_WORKFLOW_DIGEST = "b45b5ed1c912cef4d14251563fe2366f76c1d28287ce2e2291ef84f55d01b84c"
 APPROVED_CHECKOUT_ACTION = "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"
 
