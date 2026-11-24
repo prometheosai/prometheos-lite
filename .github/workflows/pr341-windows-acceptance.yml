@@ -71,16 +71,102 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          # Machine-readable Cargo output; no name search, no timestamp sort,
-          # no hardcoded debug/deps path. The resolver fails closed on
-          # missing/ambiguous/wrong-identity/malformed compiler artifacts.
+          # The pinned PR #341 checkout predates the helper script, so the
+          # reviewed resolver is embedded here and materialized into this
+          # run's owned temp directory. Its exact bytes are hash-verified
+          # before execution. No mutable checkout is used for helper source.
+          $resolverSource = @'
+"""Resolve exactly one Cargo compiler-artifact for the focused lib test target.
+
+Reads Cargo's `--message-format=json` output, selects the single expected
+compiler-artifact by identity and test profile, verifies its executable is a
+real file on disk, and prints its exact absolute path. Missing, ambiguous,
+wrong-identity or malformed input fails closed.
+
+This deliberately does NOT search the filesystem by name or modification time:
+the hosted runner used a nonstandard Cargo output layout, so any hardcoded
+`debug/deps` assumption is unsafe.
+"""
+
+import argparse
+import json
+import os
+import sys
+
+EXPECTED_TARGET_NAME = "prometheos_lite"
+EXPECTED_TARGET_KIND = "lib"
+
+
+def resolve(input_path: str) -> str:
+    with open(input_path, encoding="utf-8-sig") as handle:
+        raw_lines = handle.read().splitlines()
+
+    candidates = []
+    for line_number, line in enumerate(raw_lines, 1):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except (ValueError, TypeError) as error:
+            raise ValueError(f"malformed Cargo JSON on line {line_number}: {error}") from error
+        if not isinstance(record, dict) or record.get("reason") != "compiler-artifact":
+            continue
+        target = record.get("target")
+        profile = record.get("profile")
+        if not isinstance(target, dict) or not isinstance(profile, dict):
+            continue
+        kinds = target.get("kind")
+        if (
+            target.get("name") == EXPECTED_TARGET_NAME
+            and isinstance(kinds, list)
+            and EXPECTED_TARGET_KIND in kinds
+            and target.get("test") is True
+            and profile.get("test") is True
+        ):
+            candidates.append(record)
+
+    if not candidates:
+        raise ValueError("no matching compiler-artifact for the focused lib test target")
+    if len(candidates) != 1:
+        raise ValueError(f"ambiguous compiler-artifact selection: {len(candidates)} candidates")
+
+    executable = candidates[0].get("executable")
+    if not isinstance(executable, str) or not executable:
+        raise ValueError("compiler-artifact has no executable")
+    absolute = os.path.abspath(executable)
+    if not os.path.isfile(absolute):
+        raise ValueError(f"compiler-artifact executable is not a real file: {absolute}")
+    return absolute
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input", required=True, help="path to Cargo --message-format=json output")
+    args = parser.parse_args()
+    try:
+        print(resolve(args.input))
+    except (OSError, ValueError) as error:
+        print(f"cargo artifact resolution failed: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'@
+          $resolverSource = $resolverSource.Replace("`r`n", "`n")
+          $resolver = Join-Path $env:RUNNER_TEMP 'resolve_cargo_test_artifact.py'
+          [IO.File]::WriteAllText($resolver, $resolverSource, (New-Object Text.UTF8Encoding($false)))
+          $actualResolverHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $resolver).Hash.ToLowerInvariant()
+          if ($actualResolverHash -ne 'fa3a0b71bd623f8e1a5d3078f0cb845a0df93a7974fac5cdd755cc2a9247aaa4') { throw 'Embedded resolver bytes do not match the reviewed pin' }
           $cargoJson = Join-Path $env:RUNNER_TEMP 'pr341-cargo-artifacts.json'
           cargo test --locked --lib work::owner_registry --no-run --message-format=json > $cargoJson
           if ($LASTEXITCODE -ne 0) { throw "Focused test build failed: $LASTEXITCODE" }
-          $exe = & python scripts/resolve_cargo_test_artifact.py --input $cargoJson
+          $exe = & python $resolver --input $cargoJson
           if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($exe)) { throw 'Exact focused lib test executable could not be resolved' }
           if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw "Resolved test executable is not a file: $exe" }
           [IO.File]::WriteAllText((Join-Path $env:RUNNER_TEMP 'pr341-test-exe.txt'), $exe)
+          "RESOLVER_SHA=$actualResolverHash" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
           "TEST_BINARY=$exe" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
 
       - name: Elevated path - owner-registry unit and negative controls
@@ -187,13 +273,28 @@ jobs:
             $workspace = (Get-Location).Path
             icacls $workspace /grant "${user}:(RX)" /inheritance:e | Out-Null
             if ($LASTEXITCODE -ne 0) { throw 'Failed to grant restricted identity traverse on the workspace' }
-            # Use the exact compiler-resolved executable path. Never assume a
-            # Cargo output directory: the hosted layout used build/<id>/out.
-            $exeParent = Split-Path -Parent $exe
-            icacls $exeParent /grant "${user}:(RX)" /inheritance:e | Out-Null
-            if ($LASTEXITCODE -ne 0) { throw 'Failed to grant restricted identity traverse on the test binary directory' }
-            icacls $exe /grant "${user}:(RX)" /inheritance:e | Out-Null
-            if ($LASTEXITCODE -ne 0) { throw 'Failed to grant restricted identity execute on the test binary' }
+            # Resolve every intermediate directory between the workspace and
+            # the exact compiler-resolved executable and grant RX on each one
+            # individually. Never recursively widen the build tree, and never
+            # grant access outside the owned workspace.
+            $workspaceFull = [IO.Path]::GetFullPath($workspace)
+            $exeFull = [IO.Path]::GetFullPath($exe)
+            if (-not $exeFull.StartsWith($workspaceFull + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+              throw "Resolved test executable is outside the owned workspace: $exeFull"
+            }
+            $exeParent = Split-Path -Parent $exeFull
+            $relative = [IO.Path]::GetRelativePath($workspaceFull, $exeParent)
+            $cursor = $workspaceFull
+            foreach ($part in ($relative -split '[\\/]')) {
+              if ([string]::IsNullOrWhiteSpace($part)) { continue }
+              $cursor = Join-Path $cursor $part
+              if (-not (Test-Path -LiteralPath $cursor -PathType Container)) { throw "Missing intermediate test-binary directory: $cursor" }
+              icacls $cursor /grant "${user}:(RX)" /inheritance:e | Out-Null
+              if ($LASTEXITCODE -ne 0) { throw "Failed to grant restricted identity traverse on $cursor" }
+              "ACL_TRAVERSE=$cursor" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            }
+            icacls $exeFull /grant "${user}:(RX)" /inheritance:e | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "Failed to grant restricted identity execute on $exeFull" }
             $credential = New-Object PSCredential($user, $secure)
             $probeTemplate = @'
           $ErrorActionPreference = 'Stop'

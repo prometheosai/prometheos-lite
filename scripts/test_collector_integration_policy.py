@@ -30,9 +30,11 @@ POLICY = ROOT / "scripts" / "local_ci_policy.py"
 REVIEWED_PR341_SHA = "37a7ae33ca21fc25ad0f70f20022cd4a95634bce"
 REVIEWED_COLLECTOR_SHA = "debd59d5de62b7c4bb6e30d9d9c797d68a8e3b68"
 COLLECTOR_CONTRACT_BLOB = "41d06dda3ce49eb8fc7d5378ef35b604e869a568"
+RESOLVER_SOURCE_BLOB = "6f9a8254c19aaf67aae487ee9f2ee53fbb1e546a"
+RESOLVER_EMBEDDED_SHA256 = "fa3a0b71bd623f8e1a5d3078f0cb845a0df93a7974fac5cdd755cc2a9247aaa4"
 HISTORICAL_WORKFLOW_DIGEST = "b45b5ed1c912cef4d14251563fe2366f76c1d28287ce2e2291ef84f55d01b84c"
 PREVIOUS_APPROVED_DIGEST = "53984301f49022049859218efb2ee2b44dd0e10902542f583ac7e19967cb30fe"
-EXPECTED_CURRENT_DIGEST = "f9d2ff4d6c494df2bc6bd8826734896a1ba2349b9b6b15c18e37f141b55797cf"
+EXPECTED_CURRENT_DIGEST = "65dcce0bf11b3791b2dc180bfbd9d010fed97fb6682862d6a559895edf63db1a"
 APPROVED_CHECKOUT_ACTION = "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"
 EXPECTED_WORKFLOW_REF = (
     "prometheosai/prometheos-lite/.github/workflows/"
@@ -157,8 +159,32 @@ class CollectorIntegrationPolicy(unittest.TestCase):
         self.assertIn("Staged collector contract does not match the pinned source blob", self.text)
         self.assertIn("--message-format=json", self.text)
         self.assertIn("resolve_cargo_test_artifact.py", self.text)
+        self.assertIn(RESOLVER_EMBEDDED_SHA256, self.text)
         self.assertNotIn(".cargo-target\\debug\\deps", self.text)
         self.assertNotIn("LastWriteTime", self.text)
+
+    def test_embedded_resolver_and_least_privilege_traversal(self):
+        # W1: the resolver is embedded in the workflow so the pinned PR #341
+        # checkout need not contain it.
+        opening = self.text.index("$resolverSource = @'")
+        closing = self.text.index("'@\n", opening)
+        embedded = self.text[opening + len("$resolverSource = @'\n"):closing]
+        embedded = embedded.replace("\r\n", "\n")
+        if not embedded.endswith("\n"):
+            embedded += "\n"
+        self.assertEqual(
+            hashlib.sha256(embedded.encode("utf-8")).hexdigest(), RESOLVER_EMBEDDED_SHA256
+        )
+        self.assertIn("GetRelativePath", self.text)
+        self.assertIn("Missing intermediate test-binary directory", self.text)
+        self.assertIn("outside the owned workspace", self.text)
+        self.assertIn("ACL_TRAVERSE=", self.text)
+        # No recursive grant on the build tree; only the owned evidence dir
+        # keeps the bounded (OI)(CI)F grant.
+        self.assertEqual(self.text.count("(OI)(CI)RX"), 0)
+        self.assertEqual(self.text.count("(OI)(CI)F"), 1)
+        self.assertIn("if ($testProc.ExitCode -ne 0)", self.text)
+        self.assertIn("Restricted-token test SKIPPED", self.text)
 
     def test_active_workflow_identity_is_bound_without_self_approval(self):
         self.assertIn("Bind active workflow identity", self.text)
