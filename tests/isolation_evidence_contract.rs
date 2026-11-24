@@ -467,8 +467,10 @@ fn revision_and_workflow_binding_are_enforced() {
     );
 
     let mut doc = valid_document();
+    // Synthetic value only: the collector must never embed any real workflow
+    // digest, so this fixture is deliberately unrelated to every known digest.
     doc["activeWorkflowDigest"] =
-        serde_json::json!("2d4cdf4d4b62e9d6b2f881be64542fb89e36fe5ccf969b5ea13a320f21b098ee");
+        serde_json::json!("deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
     assert_eq!(
         validate_structure_only(&doc).structure,
         StructuralStatus::StructurallyInvalid,
