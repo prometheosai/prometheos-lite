@@ -193,14 +193,65 @@ fn object_identity(path: &Path) -> Result<ObjectIdentity, String> {
     })
 }
 
-/// RAII owner for the protected registry. The cross-process named mutex is
+/// Classification of a ProgramData descendant, used before any mutation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AncestorState {
+    /// Expected on a fresh runner: production will create and protect it.
+    ExpectedMissing,
+    /// Already present and verified trusted; never deleted by this test.
+    TrustedExisting,
+    /// A junction/symlink substitution — always refused.
+    UnsafeReparse,
+    /// Present but the Administrators DACL could not be confirmed.
+    UntrustedAcl,
+    /// State could not be established — fail closed.
+    UnverifiableAcl,
+}
+
+fn classify_ancestor(path: &Path) -> Result<AncestorState, String> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => {
+            if reject_reparse(path).is_err() {
+                return Ok(AncestorState::UnsafeReparse);
+            }
+            match dacl_grants_full_control_to(path, SID_ADMINISTRATORS) {
+                Ok(true) => Ok(AncestorState::TrustedExisting),
+                Ok(false) => Ok(AncestorState::UntrustedAcl),
+                Err(_) => Ok(AncestorState::UnverifiableAcl),
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(AncestorState::ExpectedMissing),
+        Err(e) => Err(format!("ancestor state unverifiable: {e}")),
+    }
+}
+
+/// A verified atomic-rename transition: the kernel object must actually change
+/// and the canonical document generation must advance.
+fn verify_identity_transition(
+    previous: ObjectIdentity,
+    observed: ObjectIdentity,
+    previous_generation: u64,
+    observed_generation: u64,
+) -> Result<(), String> {
+    if observed == previous {
+        return Err("no replacement observed: leaf identity did not change".into());
+    }
+    if observed_generation <= previous_generation {
+        return Err(format!(
+            "generation did not advance: {previous_generation} -> {observed_generation}"
+        ));
+    }
+    Ok(())
+}
+
+/// RAII owner for the protected registry. The test-only cross-process mutex is
 /// acquired BEFORE any protected-path state is inspected and held for the
-/// whole lifetime. After install, the created object's kernel identity is
-/// recorded and re-verified immediately before deletion.
+/// whole lifetime. It is NOT the production writer lock (see E3 note below).
 struct OwnedRegistry {
     path: PathBuf,
     new_dirs: Vec<PathBuf>,
     identity: Option<ObjectIdentity>,
+    history: Vec<(u64, ObjectIdentity)>,
     _lock: registry::windows::TestMutexGuard,
     cleaned: bool,
 }
@@ -227,30 +278,24 @@ impl OwnedRegistry {
         if dacl_grants_full_control_to(root, SID_ADMINISTRATORS).is_err() {
             return Err("ProgramData ACL cannot be verified".into());
         }
-        let parent = path.parent().ok_or("registry path has no parent")?;
-        if reject_reparse(parent).is_err() {
-            return Err("registry parent is a reparse point".into());
-        }
-        if dacl_grants_full_control_to(parent, SID_ADMINISTRATORS).is_err() {
-            return Err("registry parent ACL cannot be verified".into());
-        }
         let mut new_dirs = Vec::new();
         let mut current = path.parent();
         while let Some(dir) = current {
             if dir == root {
                 break;
             }
-            match fs::symlink_metadata(dir) {
-                Ok(_) => {
-                    return Err(format!(
-                        "unexpected pre-existing ancestor {}",
-                        dir.display()
-                    ));
+            match classify_ancestor(dir)? {
+                AncestorState::ExpectedMissing => new_dirs.push(dir.to_path_buf()),
+                AncestorState::TrustedExisting => {}
+                AncestorState::UnsafeReparse => {
+                    return Err(format!("unsafe reparse ancestor {}", dir.display()));
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    new_dirs.push(dir.to_path_buf())
+                AncestorState::UntrustedAcl => {
+                    return Err(format!("untrusted ACL on ancestor {}", dir.display()));
                 }
-                Err(e) => return Err(format!("ancestor state unverifiable: {e}")),
+                AncestorState::UnverifiableAcl => {
+                    return Err(format!("unverifiable ACL on ancestor {}", dir.display()));
+                }
             }
             current = dir.parent();
         }
@@ -258,16 +303,71 @@ impl OwnedRegistry {
             path: path.to_path_buf(),
             new_dirs,
             identity: None,
+            history: Vec::new(),
             _lock: lock,
             cleaned: false,
         })
     }
 
-    /// Bind cleanup to the exact object created by this run while the mutex
-    /// is still held. Never infer ownership from a path alone.
-    fn record_created_identity(&mut self) -> Result<(), String> {
+    /// After production has created/verified its ancestors, confirm the parent
+    /// is a trusted non-reparse object, then bind to the exact installed leaf.
+    fn record_created_identity(&mut self, generation: u64) -> Result<(), String> {
+        let parent = self.path.parent().ok_or("registry path has no parent")?;
+        if reject_reparse(parent).is_err() {
+            return Err("created registry parent is a reparse point".into());
+        }
+        if dacl_grants_full_control_to(parent, SID_ADMINISTRATORS) != Ok(true) {
+            return Err("created registry parent ACL is not trusted".into());
+        }
         let identity = object_identity(&self.path)?;
+        self.history.push((generation, identity));
         self.identity = Some(identity);
+        Ok(())
+    }
+
+    /// Verify the bound object is still the one this test created/approved.
+    fn verify_current_identity(&self, generation: u64) -> Result<(), String> {
+        let expected = self.history.last().ok_or("no identity has been recorded")?;
+        if expected.0 != generation {
+            return Err(format!(
+                "recorded generation {} != expected {generation}",
+                expected.0
+            ));
+        }
+        let observed = object_identity(&self.path)?;
+        if observed != expected.1 {
+            return Err("unexplained identity substitution before approved update".into());
+        }
+        Ok(())
+    }
+
+    /// Bind cleanup to the verified object produced by an approved atomic
+    /// replacement. Requires a genuinely new kernel object and an advanced
+    /// canonical generation; otherwise fails closed.
+    fn bind_updated_identity(&mut self, generation: u64) -> Result<(), String> {
+        let previous = self.identity.ok_or("no previous identity recorded")?;
+        let previous_generation = self
+            .history
+            .last()
+            .ok_or("no previous generation recorded")?
+            .0;
+        let observed = object_identity(&self.path)?;
+        let installed = load_registry(&self.path)
+            .map_err(|e| format!("updated registry invalid: {}", e.as_str()))?;
+        verify_identity_transition(
+            previous,
+            observed,
+            previous_generation,
+            installed.generation,
+        )?;
+        if installed.generation != generation {
+            return Err(format!(
+                "unexpected installed generation {} != {generation}",
+                installed.generation
+            ));
+        }
+        self.history.push((generation, observed));
+        self.identity = Some(observed);
         Ok(())
     }
 
@@ -393,11 +493,11 @@ impl Drop for OwnedSentinel {
     }
 }
 
-fn grant_everyone_full_control(path: &Path) {
+fn grant_full_control(path: &Path, sid: &str) {
     let output = Command::new("icacls")
         .arg(path)
         .arg("/grant")
-        .arg(format!("*{SID_EVERYONE}:(OI)(CI)F"))
+        .arg(format!("*{sid}:(OI)(CI)F"))
         .output()
         .expect("icacls must be available on the hosted runner");
     assert!(
@@ -405,6 +505,10 @@ fn grant_everyone_full_control(path: &Path) {
         "ACL setup failure must fail the test, never skip: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn grant_everyone_full_control(path: &Path) {
+    grant_full_control(path, SID_EVERYONE);
 }
 
 #[test]
@@ -483,12 +587,13 @@ fn stage2_cleanup_failure_is_reported() {
 #[test]
 fn stage2_cleanup_rejects_replaced_object() {
     let dir = OwnedTempDir::create_new(&temp_base(), "pr341-stage2-replace").expect("fixture");
+    grant_full_control(&dir.path, SID_ADMINISTRATORS);
     let leaf = dir.path.join("registry.json");
     let mut owned =
         OwnedRegistry::try_acquire(&leaf, &leaf, &dir.path).expect("acquire owned fixture guard");
     fs::write(&leaf, b"owned-by-this-test").expect("create owned object");
     owned
-        .record_created_identity()
+        .record_created_identity(1)
         .expect("record real object identity");
 
     // External substitution: same path, different kernel object.
@@ -509,13 +614,14 @@ fn stage2_cleanup_rejects_replaced_object() {
 #[test]
 fn stage2_cleanup_rejects_reparse_substitution() {
     let dir = OwnedTempDir::create_new(&temp_base(), "pr341-stage2-reparse").expect("fixture");
+    grant_full_control(&dir.path, SID_ADMINISTRATORS);
     let leaf = dir.path.join("registry.json");
     let target = dir.path.join("elsewhere.txt");
     let mut owned =
         OwnedRegistry::try_acquire(&leaf, &leaf, &dir.path).expect("acquire owned fixture guard");
     fs::write(&leaf, b"owned-by-this-test").expect("create owned object");
     owned
-        .record_created_identity()
+        .record_created_identity(1)
         .expect("record real object identity");
 
     fs::remove_file(&leaf).expect("remove owned object");
@@ -570,6 +676,82 @@ fn stage2_in_process_lock_blocks_then_acquires() {
         .expect("contender acquired only after release");
     holder.join().expect("holder clean exit");
     contender.join().expect("contender clean exit");
+}
+
+#[test]
+fn stage2_ancestor_classification_missing_then_trusted() {
+    let base = OwnedTempDir::create_new(&temp_base(), "pr341-stage2-ancestors").expect("fixture");
+    grant_full_control(&base.path, SID_ADMINISTRATORS);
+    let parent = base.path.join("missing-parent");
+    assert_eq!(
+        classify_ancestor(&parent).expect("missing classification"),
+        AncestorState::ExpectedMissing,
+        "a missing registry descendant must be a permitted first-install case"
+    );
+    fs::create_dir(&parent).expect("create descendant");
+    grant_full_control(&parent, SID_ADMINISTRATORS);
+    assert_eq!(
+        classify_ancestor(&parent).expect("existing classification"),
+        AncestorState::TrustedExisting,
+        "an existing verified descendant must be trusted and never deleted"
+    );
+}
+
+#[test]
+fn stage2_ancestor_reparse_is_refused() {
+    let base =
+        OwnedTempDir::create_new(&temp_base(), "pr341-stage2-ancestor-reparse").expect("fixture");
+    let target = base.path.join("target");
+    fs::create_dir(&target).expect("target");
+    let link = base.path.join("substitute");
+    std::os::windows::fs::symlink_dir(&target, &link).expect("junction");
+    assert_eq!(
+        classify_ancestor(&link).expect("reparse classification"),
+        AncestorState::UnsafeReparse,
+        "a junction in place of an ancestor must be refused"
+    );
+}
+
+#[test]
+fn stage2_identity_transition_requires_replacement() {
+    let object = ObjectIdentity {
+        volume: 1,
+        index: 10,
+    };
+    assert!(
+        verify_identity_transition(object, object, 1, 2).is_err(),
+        "identical kernel identity proves no atomic rename occurred"
+    );
+    let replacement = ObjectIdentity {
+        volume: 1,
+        index: 11,
+    };
+    assert!(
+        verify_identity_transition(object, replacement, 1, 1).is_err(),
+        "a replacement without generation advance must be refused"
+    );
+    assert!(
+        verify_identity_transition(object, replacement, 1, 2).is_ok(),
+        "a distinct object with an advanced generation is a valid transition"
+    );
+}
+
+#[test]
+fn stage2_failed_identity_transition_missing_object_is_refused() {
+    let base = OwnedTempDir::create_new(&temp_base(), "pr341-stage2-transition").expect("fixture");
+    grant_full_control(&base.path, SID_ADMINISTRATORS);
+    let leaf = base.path.join("registry.json");
+    let mut owned =
+        OwnedRegistry::try_acquire(&leaf, &leaf, &base.path).expect("acquire owned fixture guard");
+    fs::write(&leaf, b"generation-1").expect("create generation-1 object");
+    owned
+        .record_created_identity(1)
+        .expect("bind generation-1 identity");
+    fs::remove_file(&leaf).expect("simulate failed replacement");
+    assert!(
+        owned.bind_updated_identity(2).is_err(),
+        "a missing object after an attempted update must fail closed"
+    );
 }
 
 #[test]
@@ -647,7 +829,7 @@ fn stage2_deterministic_privileged_scenario() {
     let first = document(1, vec![binding(sid, "stage2-owner", false, 1)]);
     provision_registry(&expected, &first).expect("elevated first install");
     owned
-        .record_created_identity()
+        .record_created_identity(1)
         .expect("bind cleanup to the actual installed object");
 
     assert_eq!(load_registry(&expected).expect("installed bytes"), first);
@@ -664,7 +846,20 @@ fn stage2_deterministic_privileged_scenario() {
     assert_eq!(entries.len(), 1, "atomic publication leaves no temp files");
 
     let revoked = document(2, vec![binding(sid, "stage2-owner", true, 2)]);
+    owned
+        .verify_current_identity(1)
+        .expect("expected generation-1 state before the approved update");
+    let first_identity = owned.identity.expect("generation-1 identity");
     provision_registry(&expected, &revoked).expect("monotonic revocation update");
+    owned
+        .bind_updated_identity(2)
+        .expect("verified generation-2 identity transition");
+    let second_identity = owned.identity.expect("generation-2 identity");
+    assert_ne!(
+        first_identity, second_identity,
+        "atomic rename must produce a distinct kernel object"
+    );
+    assert_eq!(owned.history.len(), 2, "both generations have provenance");
     assert_eq!(
         resolve_owner(&expected, sid),
         Ok(None),
@@ -701,4 +896,16 @@ fn stage2_deterministic_privileged_scenario() {
         .expect("owned cleanup must succeed and be visible");
     assert!(!expected.exists(), "only test-owned registry removed");
     assert!(sentinel.path.exists(), "unowned sentinel survives cleanup");
+}
+
+/// E3 scope note: `acquire_test_mutex` creates a TEST-ONLY named mutex with a
+/// restricted Local DACL. Production `provision_registry` uses the separate
+/// private `acquire_update_lock` / `lock_name(path, true)` identity. The two
+/// mutex tests in this file prove synchronization between test participants
+/// only; they do NOT prove production writer exclusion.
+#[test]
+fn stage2_production_writer_lock_evidence_is_pending() {
+    eprintln!(
+        "PENDING — PRODUCTION_WRITER_LOCK_NOT_COVERED: production acquire_update_lock evidence requires an approved runtime environment"
+    );
 }
