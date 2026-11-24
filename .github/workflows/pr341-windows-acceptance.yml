@@ -271,3 +271,80 @@ jobs:
           PR #341 merge remains WITHHELD. Repository-native `local_ci` remains
           authoritative. No merge, deployment or named-pipe authority is granted.
           '@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+  collector-facts:
+    # Supplemental, read-only execution of the nonprivileged collector. The
+    # production source checkout stays pinned to PR #341 (37a7ae33); the
+    # collector contract is sourced only from a separately pinned reviewed
+    # commit and its exact bytes are verified before any collector code runs.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - name: Check out immutable reviewed PR 341 head (production source)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: 37a7ae33ca21fc25ad0f70f20022cd4a95634bce
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Check out separately pinned reviewed collector source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: 96d9cbcefdeb09955c1fc7b50734d260263813f0
+          persist-credentials: false
+          fetch-depth: 0
+          path: collector-src
+
+      - name: Verify both pinned source identities before executing collector code
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sourceExpected = '37a7ae33ca21fc25ad0f70f20022cd4a95634bce'
+          $collectorExpected = '96d9cbcefdeb09955c1fc7b50734d260263813f0'
+          $source = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $source -ne $sourceExpected) { throw "Unexpected production source commit: $source" }
+          $collector = (git -C collector-src rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $collector -ne $collectorExpected) { throw "Unexpected collector commit: $collector" }
+          $trusted = '33ad091d26d8a9dc95ebdf616e217d985ec215b8'
+          $postcss = (git rev-parse 'HEAD:frontend/postcss.config.js').Trim()
+          if ($LASTEXITCODE -ne 0 -or $postcss -ne $trusted) { throw 'Untrusted PostCSS configuration' }
+          "SOURCE_SHA=$source" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "COLLECTOR_SHA=$collector" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "POSTCSS_BLOB=$postcss" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+      - name: Bind active workflow identity (reviewed policy digest, no self-approval)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # The historical introduction digest (b45b5ed1...) is provenance only.
+          # The executing workflow's bytes are bound by the deterministic,
+          # Principal-reviewed repository policy digest pin, never by a digest
+          # asserted here and never by a digest embedded in the collector.
+          $expectedRef = 'prometheosai/prometheos-lite/.github/workflows/pr341-windows-acceptance.yml@refs/heads/main'
+          $actualRef = $env:GITHUB_WORKFLOW_REF
+          if (-not $actualRef -or $actualRef -ne $expectedRef) { throw "Unbound executing workflow identity: $actualRef" }
+          'ACTIVE_WORKFLOW_IDENTITY=REVIEWED_WORKFLOW_REF_BOUND' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          'ACTIVE_WORKFLOW_DIGEST=BOUND_BY_PRINCIPAL_POLICY_PIN_NOT_ASSERTED_HERE' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          'HISTORICAL_INTRODUCTION_DIGEST=PROVENANCE_ONLY_NOT_CURRENT_VERIFICATION' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+      - name: Stage pinned collector contract and verify its exact bytes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $expectedBlob = (git -C collector-src rev-parse 'HEAD:tests/isolation_evidence_contract.rs').Trim()
+          if ($LASTEXITCODE -ne 0 -or -not $expectedBlob) { throw 'Collector contract blob is absent from the pinned source' }
+          & git -C collector-src show 'HEAD:tests/isolation_evidence_contract.rs' > 'tests/isolation_evidence_contract.rs'
+          if ($LASTEXITCODE -ne 0) { throw 'Collector contract extraction failed' }
+          $actualBlob = (git hash-object 'tests/isolation_evidence_contract.rs').Trim()
+          if ($LASTEXITCODE -ne 0 -or $actualBlob -ne $expectedBlob) { throw 'Staged collector contract does not match the pinned source blob' }
+          "COLLECTOR_CONTRACT_BLOB=$actualBlob" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+      - name: Run pinned nonprivileged collector (read-only, claims only)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:PR341_EVIDENCE_OUT = Join-Path $env:RUNNER_TEMP 'pr341-collector-evidence.json'
+          & cargo test --locked --test isolation_evidence_contract test_collector_collects_real_nonprivileged_facts -- --exact --nocapture
+          if ($LASTEXITCODE -ne 0) { throw "Pinned collector failed: $LASTEXITCODE" }
+          'COLLECTOR_RESULT=NONPRIVILEGED_CLAIMS_ONLY_UNVERIFIED' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
