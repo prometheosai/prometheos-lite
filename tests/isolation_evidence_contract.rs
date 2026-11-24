@@ -20,6 +20,17 @@
 //! - Unprovable from inside the runner: image disposability and the complete
 //!   absence of host-mounted protected resources. These stay PROVIDER_ASSERTED
 //!   / UNPROVABLE and must never be promoted to independently attested.
+//!
+//! Revision semantics (H1/H2 repair): `headSha`/`candidateHead` are the exact
+//! checked-out PR #341 source; `workflowSha` is the observed `GITHUB_SHA` of
+//! the dispatch and is labelled `OBSERVED_CLAIM_UNVERIFIED`; `workflowRevision`
+//! is the historical revision where the reviewed workflow was introduced;
+//! `workflowSha256` is the pinned workflow CONTENT digest. A moving `main`
+//! therefore does not invalidate the pin. The merged workflow cannot invoke
+//! this collector because its checkout predates it; any integration requires
+//! a separate DRAFT workflow PR with exact reviewed source identity and a
+//! deliberate digest re-pin (see `validate_integration_plan`). No privileged
+//! acceptance is enabled by this target.
 
 #[cfg(windows)]
 use std::fs;
@@ -58,8 +69,19 @@ const REPOSITORY: &str = "prometheosai/prometheos-lite";
 const APPROVED_WORKFLOW: &str = ".github/workflows/pr341-windows-acceptance.yml";
 const REVIEWED_WORKFLOW_SHA256: &str =
     "b45b5ed1c912cef4d14251563fe2366f76c1d28287ce2e2291ef84f55d01b84c";
+/// The audited revision at which the reviewed workflow CONTENT was introduced.
+/// It is a historical binding, NOT the live `GITHUB_SHA` of a dispatch. `main`
+/// may advance without changing the workflow bytes; the content digest below
+/// remains the authoritative pin.
 const REVIEWED_MAIN_SHA: &str = "981c39955fb82b181202b932bfeaf2119b22e669";
+/// Synthetic, full-length event SHA used to prove that `main` advancing does
+/// not invalidate an unchanged, pinned workflow file.
+const ADVANCED_MAIN_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+/// Marks `workflowSha` as an observed claim. Run-to-workflow-revision binding
+/// must be established externally; this contract never authenticates it.
+const WORKFLOW_SHA_PROVENANCE: &str = "OBSERVED_CLAIM_UNVERIFIED";
 const REVIEWED_PR341_SHA: &str = "37a7ae33ca21fc25ad0f70f20022cd4a95634bce";
+const COLLECTOR_TEST_NAME: &str = "isolation_evidence_contract";
 /// GitHub `GITHUB_WORKFLOW_REF` format is `{owner}/{repo}/{workflow_path}@{ref}`.
 /// This is NOT `GITHUB_REF` (event ref) and NOT the checked-out commit SHA.
 const EXPECTED_WORKFLOW_REF: &str =
@@ -154,18 +176,37 @@ fn validate_structure_only(doc: &Value) -> StructuralOnlyResult {
     if req_str(doc, &["candidateHead"], &mut errors) != Some(REVIEWED_PR341_SHA) {
         errors.push("candidate PR head binding mismatch".into());
     }
-    if req_str(doc, &["workflowSha"], &mut errors) != Some(REVIEWED_MAIN_SHA) {
-        errors.push("GitHub workflow/event SHA must be the reviewed main revision".into());
+    // H1: `workflowSha` is the observed GITHUB_SHA of the dispatch, i.e. the
+    // branch revision that hosted the run. It is NOT the pinned PR #341 source
+    // and NOT the historical revision that introduced the workflow. It is
+    // accepted as a well-formed claim, never compared to REVIEWED_MAIN_SHA.
+    let workflow_sha = req_str(doc, &["workflowSha"], &mut errors);
+    if workflow_sha
+        .is_some_and(|sha| sha.len() != 40 || !sha.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    {
+        errors.push("workflowSha must be a full GitHub commit SHA claim".into());
+    }
+    if let (Some(workflow_sha), Some(head_sha)) =
+        (workflow_sha, doc.get("headSha").and_then(Value::as_str))
+        && workflow_sha == head_sha
+    {
+        errors.push("workflowSha must not be reused as the checked-out source SHA".into());
+    }
+    if req_str(doc, &["workflowShaProvenance"], &mut errors) != Some(WORKFLOW_SHA_PROVENANCE) {
+        errors.push("workflowSha must be labelled as an unverified observed claim".into());
     }
     req_bool(doc, &["checkoutVerified"], true, &mut errors);
     if req_str(doc, &["workflowPath"], &mut errors) != Some(APPROVED_WORKFLOW) {
         errors.push("workflow path binding mismatch".into());
     }
+    // The workflow CONTENT digest stays pinned; a moving event SHA must not
+    // loosen this check.
     if req_str(doc, &["workflowSha256"], &mut errors) != Some(REVIEWED_WORKFLOW_SHA256) {
         errors.push("reviewed workflow digest mismatch".into());
     }
+    // Historical introduction revision, not the live event SHA.
     if req_str(doc, &["workflowRevision"], &mut errors) != Some(REVIEWED_MAIN_SHA) {
-        errors.push("workflow revision binding mismatch".into());
+        errors.push("workflow introduction revision binding mismatch".into());
     }
 
     if let Some(run_id) = req_str(doc, &["runId"], &mut errors)
@@ -283,7 +324,8 @@ fn valid_document() -> Value {
         "repository": REPOSITORY,
         "headSha": REVIEWED_PR341_SHA,
         "candidateHead": REVIEWED_PR341_SHA,
-        "workflowSha": REVIEWED_MAIN_SHA,
+        "workflowSha": ADVANCED_MAIN_SHA,
+        "workflowShaProvenance": WORKFLOW_SHA_PROVENANCE,
         "checkoutVerified": true,
         "workflowPath": APPROVED_WORKFLOW,
         "workflowSha256": REVIEWED_WORKFLOW_SHA256,
@@ -672,6 +714,7 @@ fn collect_nonprivileged_windows_facts() -> Result<Value, String> {
         "headSha": checkout.map(Value::String).unwrap_or(Value::Null),
         "candidateHead": REVIEWED_PR341_SHA,
         "workflowSha": env_claim("GITHUB_SHA"),
+        "workflowShaProvenance": WORKFLOW_SHA_PROVENANCE,
         "checkoutVerified": checkout_verified,
         "workflowPath": APPROVED_WORKFLOW,
         "workflowSha256": REVIEWED_WORKFLOW_SHA256,
@@ -778,6 +821,169 @@ fn test_collector_collects_real_nonprivileged_facts() {
         let rendered = serde_json::to_string_pretty(&doc).expect("serialize evidence");
         fs::write(PathBuf::from(path), rendered).expect("write evidence artifact");
     }
+}
+
+#[test]
+fn main_advances_without_workflow_content_change_remains_structurally_valid() {
+    // H1: a future workflow_dispatch runs on whatever `main` revision is
+    // current. The workflow BYTES and their content digest are unchanged, so
+    // a different GITHUB_SHA must not invalidate the document.
+    let mut doc = valid_document();
+    doc["workflowSha"] = serde_json::json!(ADVANCED_MAIN_SHA);
+    doc["workflowRevision"] = serde_json::json!(REVIEWED_MAIN_SHA);
+    doc["workflowSha256"] = serde_json::json!(REVIEWED_WORKFLOW_SHA256);
+    assert_eq!(
+        validate_structure_only(&doc).structure,
+        StructuralStatus::StructurallyValid,
+        "a moving event SHA must not break an unchanged pinned workflow"
+    );
+    // The content pin is NOT loosened by that allowance.
+    doc["workflowSha256"] = serde_json::json!("ffff");
+    assert_eq!(
+        validate_structure_only(&doc).structure,
+        StructuralStatus::StructurallyInvalid
+    );
+    // Nor is a malformed / reused event SHA.
+    let mut doc = valid_document();
+    doc["workflowSha"] = serde_json::json!("not-a-sha");
+    assert_eq!(
+        validate_structure_only(&doc).structure,
+        StructuralStatus::StructurallyInvalid
+    );
+    let mut doc = valid_document();
+    doc["workflowSha"] = serde_json::json!(REVIEWED_PR341_SHA);
+    assert_eq!(
+        validate_structure_only(&doc).structure,
+        StructuralStatus::StructurallyInvalid,
+        "event SHA must not be the checked-out source SHA"
+    );
+}
+
+#[test]
+fn workflow_sha_provenance_label_is_required() {
+    let mut doc = valid_document();
+    doc.as_object_mut()
+        .expect("object")
+        .remove("workflowShaProvenance");
+    assert_eq!(
+        validate_structure_only(&doc).structure,
+        StructuralStatus::StructurallyInvalid
+    );
+    let mut doc = valid_document();
+    doc["workflowShaProvenance"] = serde_json::json!("PROVIDER_ATTESTED");
+    assert_eq!(
+        validate_structure_only(&doc).structure,
+        StructuralStatus::StructurallyInvalid,
+        "a structural contract cannot authenticate the event SHA"
+    );
+}
+
+/// H2 integration strategy, enforced as a document check. The current merged
+/// workflow pins PR #341 source, which predates this collector, so it cannot
+/// invoke it. Before any workflow change: acquire the collector from an exact
+/// reviewed source SHA, keep the workflow content pin, use a separate DRAFT
+/// workflow PR with a deliberate re-pin, and never enable privileged
+/// acceptance.
+fn validate_integration_plan(plan: &Value) -> Vec<String> {
+    let mut errors = Vec::new();
+    if plan.get("workflowContentDigest").and_then(Value::as_str) != Some(REVIEWED_WORKFLOW_SHA256) {
+        errors.push("workflow content digest must stay pinned".into());
+    }
+    if plan
+        .get("currentWorkflowCanInvokeCollector")
+        .and_then(Value::as_bool)
+        != Some(false)
+    {
+        errors.push("current pinned workflow cannot invoke the collector".into());
+    }
+    if plan
+        .get("collectorSourceSha")
+        .and_then(Value::as_str)
+        .is_none_or(|sha| {
+            sha.len() != 40
+                || !sha.bytes().all(|byte| byte.is_ascii_hexdigit())
+                || sha == REVIEWED_PR341_SHA
+        })
+    {
+        errors.push("collector must be acquired from an exact reviewed SHA other than the pinned PR 341 head".into());
+    }
+    if plan.get("separateDraftWorkflowPr").and_then(Value::as_bool) != Some(true) {
+        errors.push("workflow integration requires a separate DRAFT PR".into());
+    }
+    if plan.get("deliberateDigestRepin").and_then(Value::as_bool) != Some(true) {
+        errors.push("workflow content change requires a deliberate digest re-pin".into());
+    }
+    if plan.get("privilegedAcceptance").and_then(Value::as_bool) != Some(false) {
+        errors.push("no privileged acceptance may be enabled".into());
+    }
+    errors
+}
+
+fn valid_integration_plan() -> Value {
+    serde_json::json!({
+        "workflowContentDigest": REVIEWED_WORKFLOW_SHA256,
+        "workflowIntroductionRevision": REVIEWED_MAIN_SHA,
+        "currentPinnedSource": REVIEWED_PR341_SHA,
+        "collectorTest": COLLECTOR_TEST_NAME,
+        "currentWorkflowCanInvokeCollector": false,
+        "collectorSourceSha": ADVANCED_MAIN_SHA,
+        "separateDraftWorkflowPr": true,
+        "deliberateDigestRepin": true,
+        "privilegedAcceptance": false
+    })
+}
+
+#[test]
+fn current_workflow_cannot_invoke_collector_negative_control() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let workflow = std::fs::read_to_string(root.join(APPROVED_WORKFLOW))
+        .expect("reviewed workflow must be readable in this tree");
+    assert!(
+        !workflow.contains(COLLECTOR_TEST_NAME),
+        "the pinned manual workflow must not claim to invoke the collector"
+    );
+    assert!(
+        workflow.contains(REVIEWED_PR341_SHA),
+        "the workflow must remain bound to the exact PR 341 source"
+    );
+    assert!(
+        workflow.contains("work::owner_registry"),
+        "the workflow's focused test target must remain the owner registry"
+    );
+    assert!(
+        validate_integration_plan(&valid_integration_plan()).is_empty(),
+        "the bounded integration strategy must be internally consistent"
+    );
+}
+
+#[test]
+fn collector_integration_plan_refuses_unsafe_shortcuts() {
+    let mut plan = valid_integration_plan();
+    plan["currentWorkflowCanInvokeCollector"] = serde_json::json!(true);
+    assert!(
+        !validate_integration_plan(&plan).is_empty(),
+        "claiming the current workflow can collect is refused"
+    );
+
+    let mut plan = valid_integration_plan();
+    plan["collectorSourceSha"] = serde_json::json!(REVIEWED_PR341_SHA);
+    assert!(
+        !validate_integration_plan(&plan).is_empty(),
+        "the pinned PR 341 checkout cannot be the collector source"
+    );
+
+    let mut plan = valid_integration_plan();
+    plan["separateDraftWorkflowPr"] = serde_json::json!(false);
+    plan["deliberateDigestRepin"] = serde_json::json!(false);
+    assert!(!validate_integration_plan(&plan).is_empty());
+
+    let mut plan = valid_integration_plan();
+    plan["workflowContentDigest"] = serde_json::json!("ffff");
+    assert!(!validate_integration_plan(&plan).is_empty());
+
+    let mut plan = valid_integration_plan();
+    plan["privilegedAcceptance"] = serde_json::json!(true);
+    assert!(!validate_integration_plan(&plan).is_empty());
 }
 
 #[test]
