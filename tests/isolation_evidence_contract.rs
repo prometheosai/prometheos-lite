@@ -1,16 +1,18 @@
 //! Machine-readable isolation evidence contract for the merged manual Windows
 //! acceptance workflow (PR #346, main `981c3995`).
 //!
-//! This target is NONPRIVILEGED and deterministic. It VALIDATES evidence
-//! documents; it never creates, signs, or approves one. A validator pass means
-//! only "the document has the required, distinguishable fields" — it is not
-//! proof of runner isolation and not Stage 2 security acceptance.
+//! This target is NONPRIVILEGED and deterministic. It checks DOCUMENT SHAPE
+//! only. It never creates, signs, authenticates, approves or accepts evidence.
+//! A pass means only "the caller-supplied document has the required,
+//! distinguishable fields" — `STRUCTURAL_ONLY / UNVERIFIED_PROVENANCE`.
+//! All provider/OS values in such a document are CLAIMS until sourced through
+//! a separately trusted channel. There is no promotion path to authentication
+//! or Stage 2 acceptance in this prototype.
 //!
 //! Trust boundary:
-//! - Provider-attested: values emitted by the GitHub Actions runner for THIS
-//!   run (run id, attempt, repository, ref, sha, actor, runner environment).
-//!   They are provider-controlled, not self-asserted by test code, but are
-//!   meaningful only with the reviewed workflow that does not overwrite them.
+//! - Claimed provider fields (run id, attempt, repository, refs, sha, actor,
+//!   runner environment): values ASSERTED by the document. This prototype has
+//!   no trusted channel to GitHub, so they are `Claimed`, never authenticated.
 //! - OS-derived: values read from kernel/registry APIs inside the runner
 //!   (OS build, ProgramData volume/file identity, drive types).
 //! - Self-asserted: ordinary environment variables or test-supplied strings.
@@ -28,6 +30,11 @@ const REVIEWED_WORKFLOW_SHA256: &str =
     "b45b5ed1c912cef4d14251563fe2366f76c1d28287ce2e2291ef84f55d01b84c";
 const REVIEWED_MAIN_SHA: &str = "981c39955fb82b181202b932bfeaf2119b22e669";
 const REVIEWED_PR341_SHA: &str = "37a7ae33ca21fc25ad0f70f20022cd4a95634bce";
+/// GitHub `GITHUB_WORKFLOW_REF` format is `{owner}/{repo}/{workflow_path}@{ref}`.
+/// This is NOT `GITHUB_REF` (event ref) and NOT the checked-out commit SHA.
+const EXPECTED_WORKFLOW_REF: &str =
+    "prometheosai/prometheos-lite/.github/workflows/pr341-windows-acceptance.yml@refs/heads/main";
+const EXPECTED_EVENT_REF: &str = "refs/heads/main";
 const ZEROED_STAGE2_ATTESTATION: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
 
@@ -73,9 +80,39 @@ fn req_zero(root: &Value, path: &[&str], out: &mut Vec<String>) {
     }
 }
 
-/// Fail-closed validation. An empty error list means the document is
-/// structurally complete; it is NOT an isolation or acceptance proof.
-fn validate_evidence(doc: &Value) -> Result<(), Vec<String>> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StructuralStatus {
+    StructurallyValid,
+    StructurallyInvalid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProvenanceStatus {
+    /// No trusted channel exists in this prototype. Always unverified.
+    Unverified,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StructuralOnlyResult {
+    structure: StructuralStatus,
+    provenance: ProvenanceStatus,
+    issues: Vec<String>,
+}
+
+/// Deliberately impossible: a structural check cannot authenticate a caller-
+/// supplied document. No signature, issuer or credential is introduced here.
+fn promote_to_authenticated(_: &StructuralOnlyResult) -> Result<(), &'static str> {
+    Err("AUTHENTICATION_NOT_AVAILABLE: structural contract cannot authenticate provenance")
+}
+
+/// Deliberately impossible: this prototype produces no security acceptance.
+fn isolation_acceptance(_: &StructuralOnlyResult) -> Result<(), &'static str> {
+    Err("ISOLATION_ACCEPTANCE_NOT_AVAILABLE: no trusted isolation evidence producer or consumer")
+}
+
+/// Fail-closed STRUCTURAL check only. Never an authentication, isolation or
+/// Stage 2 acceptance result.
+fn validate_structure_only(doc: &Value) -> StructuralOnlyResult {
     let mut errors = Vec::new();
 
     if req_str(doc, &["schemaVersion"], &mut errors) != Some(SCHEMA) {
@@ -115,7 +152,15 @@ fn validate_evidence(doc: &Value) -> Result<(), Vec<String>> {
     if req_str(doc, &["providerAttested", "runnerOs"], &mut errors) != Some("windows") {
         errors.push("runner OS is not provider-attested windows".into());
     }
-    req_str(doc, &["providerAttested", "workflowRef"], &mut errors);
+    if req_str(doc, &["providerAttested", "workflowRef"], &mut errors)
+        != Some(EXPECTED_WORKFLOW_REF)
+    {
+        errors.push("workflowRef is not the exact reviewed workflow identity".into());
+    }
+    // GITHUB_REF (event ref) is a different value from GITHUB_WORKFLOW_REF.
+    if req_str(doc, &["providerAttested", "eventRef"], &mut errors) != Some(EXPECTED_EVENT_REF) {
+        errors.push("eventRef is not the reviewed dispatch branch".into());
+    }
     req_str(doc, &["providerAttested", "actor"], &mut errors);
 
     // OS-derived identity, not environment variables.
@@ -149,16 +194,20 @@ fn validate_evidence(doc: &Value) -> Result<(), Vec<String>> {
     }
     req_bool(doc, &["stage2Executed"], false, &mut errors);
 
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(errors)
+    StructuralOnlyResult {
+        structure: if errors.is_empty() {
+            StructuralStatus::StructurallyValid
+        } else {
+            StructuralStatus::StructurallyInvalid
+        },
+        provenance: ProvenanceStatus::Unverified,
+        issues: errors,
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ClaimClass {
-    ProviderAttested,
+    Claimed,
     OsDerived,
     SelfAsserted,
     Unprovable,
@@ -167,9 +216,11 @@ enum ClaimClass {
 
 fn claim_class(claim: &str) -> ClaimClass {
     match claim {
-        "provider.run_id" | "provider.environment" | "provider.os" | "provider.actor" => {
-            ClaimClass::ProviderAttested
-        }
+        "provider.run_id"
+        | "provider.environment"
+        | "provider.os"
+        | "provider.actor"
+        | "provider.workflow_ref" => ClaimClass::Claimed,
         "os.build" | "programdata.identity" | "hostmounts.drive_types" => ClaimClass::OsDerived,
         "self.env_vars" | "self.test_strings" => ClaimClass::SelfAsserted,
         "image.disposable" | "hostmounts.no_protected_resources_anywhere" => ClaimClass::Unprovable,
@@ -194,7 +245,8 @@ fn valid_document() -> Value {
         "providerAttested": {
             "runnerEnvironment": "github-hosted",
             "runnerOs": "windows",
-            "workflowRef": "refs/heads/main",
+            "workflowRef": EXPECTED_WORKFLOW_REF,
+            "eventRef": EXPECTED_EVENT_REF,
             "actor": "diegorhoger"
         },
         "osDerived": {
@@ -220,66 +272,93 @@ fn valid_document() -> Value {
 }
 
 #[test]
-fn valid_evidence_document_passes_fail_closed_validation() {
-    assert!(validate_evidence(&valid_document()).is_ok());
+fn valid_evidence_document_is_only_structurally_valid() {
+    let result = validate_structure_only(&valid_document());
+    assert_eq!(result.structure, StructuralStatus::StructurallyValid);
+    assert_eq!(result.provenance, ProvenanceStatus::Unverified);
+    assert!(result.issues.is_empty());
 }
 
 #[test]
 fn self_asserted_environment_only_is_rejected() {
     let mut doc = valid_document();
     doc["selfAssertedOnly"] = serde_json::json!(true);
-    assert!(validate_evidence(&doc).is_err());
+    assert_eq!(
+        validate_structure_only(&doc).structure,
+        StructuralStatus::StructurallyInvalid
+    );
 }
 
 #[test]
 fn revision_and_workflow_binding_are_enforced() {
     let mut doc = valid_document();
     doc["headSha"] = serde_json::json!("deadbeef");
-    assert!(validate_evidence(&doc).is_err());
+    assert_eq!(
+        validate_structure_only(&doc).structure,
+        StructuralStatus::StructurallyInvalid
+    );
 
     let mut doc = valid_document();
     doc["workflowSha256"] = serde_json::json!("ffff");
-    assert!(validate_evidence(&doc).is_err());
+    assert_eq!(
+        validate_structure_only(&doc).structure,
+        StructuralStatus::StructurallyInvalid
+    );
 
     let mut doc = valid_document();
     doc["workflowRevision"] = serde_json::json!("deadbeef");
-    assert!(validate_evidence(&doc).is_err());
+    assert_eq!(
+        validate_structure_only(&doc).structure,
+        StructuralStatus::StructurallyInvalid
+    );
 }
 
 #[test]
 fn missing_os_derived_attestation_is_rejected() {
     let mut doc = valid_document();
     doc.as_object_mut().expect("object").remove("osDerived");
-    assert!(validate_evidence(&doc).is_err());
+    assert_eq!(
+        validate_structure_only(&doc).structure,
+        StructuralStatus::StructurallyInvalid
+    );
 }
 
 #[test]
 fn reparse_programdata_and_remote_mounts_are_rejected() {
     let mut doc = valid_document();
     doc["programData"]["reparse"] = serde_json::json!(true);
-    assert!(validate_evidence(&doc).is_err());
+    assert_eq!(
+        validate_structure_only(&doc).structure,
+        StructuralStatus::StructurallyInvalid
+    );
 
     let mut doc = valid_document();
     doc["hostMounts"]["remoteCount"] = serde_json::json!(1);
-    assert!(validate_evidence(&doc).is_err());
+    assert_eq!(
+        validate_structure_only(&doc).structure,
+        StructuralStatus::StructurallyInvalid
+    );
 }
 
 #[test]
 fn zeroed_stage2_attestation_is_required() {
     let mut doc = valid_document();
     doc["stage2AttestationSha256"] = serde_json::json!("abcd");
-    assert!(validate_evidence(&doc).is_err());
+    assert_eq!(
+        validate_structure_only(&doc).structure,
+        StructuralStatus::StructurallyInvalid
+    );
     let mut doc = valid_document();
     doc["stage2Executed"] = serde_json::json!(true);
-    assert!(validate_evidence(&doc).is_err());
+    assert_eq!(
+        validate_structure_only(&doc).structure,
+        StructuralStatus::StructurallyInvalid
+    );
 }
 
 #[test]
 fn evidence_classes_are_explicit_and_unprovable_claims_stay_unprovable() {
-    assert_eq!(
-        claim_class("provider.environment"),
-        ClaimClass::ProviderAttested
-    );
+    assert_eq!(claim_class("provider.environment"), ClaimClass::Claimed);
     assert_eq!(claim_class("os.build"), ClaimClass::OsDerived);
     assert_eq!(claim_class("self.env_vars"), ClaimClass::SelfAsserted);
     assert_eq!(claim_class("image.disposable"), ClaimClass::Unprovable);
@@ -288,4 +367,72 @@ fn evidence_classes_are_explicit_and_unprovable_claims_stay_unprovable() {
         ClaimClass::Unprovable
     );
     assert_eq!(claim_class("stage2.privileged"), ClaimClass::NotRun);
+}
+
+/// A document an untrusted caller could author: every required field is
+/// present and pinned correctly, but the provider/OS values are fabricated.
+fn forged_document() -> Value {
+    let mut doc = valid_document();
+    doc["runId"] = serde_json::json!("999999999");
+    doc["providerAttested"]["actor"] = serde_json::json!("forged-actor");
+    doc["osDerived"]["buildLabEx"] = serde_json::json!("forged-build-label");
+    doc["programData"]["volumeSerial"] = serde_json::json!(999);
+    doc["programData"]["fileIndex"] = serde_json::json!(777);
+    doc
+}
+
+#[test]
+fn forged_but_structurally_valid_document_remains_unverified() {
+    let result = validate_structure_only(&forged_document());
+    assert_eq!(
+        result.structure,
+        StructuralStatus::StructurallyValid,
+        "shape checks cannot detect a forged caller-supplied document"
+    );
+    assert_eq!(result.provenance, ProvenanceStatus::Unverified);
+    assert!(
+        promote_to_authenticated(&result).is_err(),
+        "no promotion to authenticated evidence is possible"
+    );
+    assert!(
+        isolation_acceptance(&result).is_err(),
+        "no isolation acceptance is possible"
+    );
+    let doc = forged_document();
+    assert_eq!(doc["stage2AttestationSha256"], ZEROED_STAGE2_ATTESTATION);
+    assert_eq!(doc["stage2Executed"], serde_json::json!(false));
+}
+
+#[test]
+fn workflow_ref_is_bound_to_exact_reviewed_identity() {
+    assert_eq!(
+        validate_structure_only(&valid_document()).structure,
+        StructuralStatus::StructurallyValid
+    );
+
+    let mutations = [
+        "refs/heads/attacker", // event ref only
+        REVIEWED_PR341_SHA,    // checkout commit
+        "prometheosai/prometheos-lite/.github/workflows/other.yml@refs/heads/main",
+        "evil/prometheos-lite/.github/workflows/pr341-windows-acceptance.yml@refs/heads/main",
+        "prometheosai/prometheos-lite/.github/workflows/pr341-windows-acceptance.yml@refs/heads/attacker",
+        "prometheosai/prometheos-lite/.github/workflows/pr341-windows-acceptance.yml", // missing @ref
+    ];
+    for bad_ref in mutations {
+        let mut doc = valid_document();
+        doc["providerAttested"]["workflowRef"] = serde_json::json!(bad_ref);
+        assert_eq!(
+            validate_structure_only(&doc).structure,
+            StructuralStatus::StructurallyInvalid,
+            "workflowRef {bad_ref} must be rejected"
+        );
+    }
+
+    let mut doc = valid_document();
+    doc["providerAttested"]["eventRef"] = serde_json::json!("refs/heads/attacker");
+    assert_eq!(
+        validate_structure_only(&doc).structure,
+        StructuralStatus::StructurallyInvalid,
+        "the dispatch event ref is bound separately from the workflow ref"
+    );
 }
