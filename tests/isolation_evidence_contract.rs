@@ -274,7 +274,11 @@ fn validate_structure_only(doc: &Value) -> StructuralOnlyResult {
     {
         errors.push("runner is not provider-attested github-hosted".into());
     }
-    if req_str(doc, &["providerAttested", "runnerOs"], &mut errors) != Some("windows") {
+    // GitHub sets `RUNNER_OS=Windows` (canonical casing) on windows-hosted
+    // runners. Compare case-insensitively while preserving the raw claim.
+    if req_str(doc, &["providerAttested", "runnerOs"], &mut errors)
+        .is_none_or(|os| !os.eq_ignore_ascii_case("windows"))
+    {
         errors.push("runner OS is not provider-attested windows".into());
     }
     if req_str(doc, &["providerAttested", "workflowRef"], &mut errors)
@@ -423,6 +427,36 @@ fn valid_evidence_document_is_only_structurally_valid() {
     assert_eq!(result.structure, StructuralStatus::StructurallyValid);
     assert_eq!(result.provenance, ProvenanceStatus::Unverified);
     assert!(result.issues.is_empty());
+}
+
+/// Deterministic regression for the hosted-runner casing defect: GitHub's
+/// `RUNNER_OS` is `Windows`, while the fixture uses lowercase `windows`.
+#[test]
+fn github_hosted_runner_os_casing_is_accepted() {
+    let mut doc = valid_document();
+    doc["providerAttested"]["runnerOs"] = serde_json::json!("Windows");
+    assert_eq!(
+        validate_structure_only(&doc).structure,
+        StructuralStatus::StructurallyValid,
+        "canonical GitHub RUNNER_OS casing must be accepted"
+    );
+
+    let mut doc = valid_document();
+    doc["providerAttested"]["runnerOs"] = serde_json::json!("WINDOWS");
+    assert_eq!(
+        validate_structure_only(&doc).structure,
+        StructuralStatus::StructurallyValid
+    );
+
+    for bad in ["linux", "macOS", "windows-2022", ""] {
+        let mut doc = valid_document();
+        doc["providerAttested"]["runnerOs"] = serde_json::json!(bad);
+        assert_eq!(
+            validate_structure_only(&doc).structure,
+            StructuralStatus::StructurallyInvalid,
+            "runner OS {bad:?} must be refused"
+        );
+    }
 }
 
 #[test]
