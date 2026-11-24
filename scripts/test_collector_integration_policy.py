@@ -1,26 +1,23 @@
-"""Deterministic security regressions for the pinned collector integration.
+"""State-independent security regressions for the pinned collector integration.
 
-This does NOT authenticate anything and does NOT dispatch the workflow. It only
-asserts the *shape* of the single approved manual workflow after adding the
-read-only collector job:
+This does NOT authenticate anything, does NOT dispatch the workflow and never
+writes a real policy pin. The tests accept exactly TWO legitimate pin states:
 
-- production source stays pinned to the reviewed PR 341 head;
-- the collector is sourced only from a separately pinned 40-hex commit;
-- both source identities (and PostCSS) are verified before collector code runs;
-- the staged collector bytes are verified against the pinned git blob;
-- the ACTIVE workflow identity is bound through the separately reviewed,
-  deterministic policy digest, with no digest self-approval or circular
-  collector/workflow digest dependency;
-- manual-only, contents: read, no secrets/tokens are preserved;
-- preapproval: pins still name the historical digest and are intentionally stale;
-- postapproval: the executing workflow digest matches identical current pins in
-  both pin files (verified in memory only — no pin file is written here);
-- stale or inconsistent pins are rejected, and the historical digest remains
-  provenance rather than an active execution pin.
+- UNAPPROVED: both pin files name the historical introduction digest; the
+  repository policy gate is expected to fail.
+- APPROVED: both pin files name the reviewed executing-workflow digest; the
+  repository policy gate passes.
+
+Mixed, missing, unknown or mismatched pins are rejected. Every test passes in
+both legitimate snapshots because the on-disk state is classified, not assumed.
 """
 
 import hashlib
 import re
+import shutil
+import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -39,29 +36,64 @@ EXPECTED_WORKFLOW_REF = (
     "pr341-windows-acceptance.yml@refs/heads/main"
 )
 
+CONFIG_WORKFLOW_PIN_RE = (
+    r'"\.github/workflows/pr341-windows-acceptance\.yml"\s*:\s*"(?P<digest>[0-9a-f]{64})"'
+)
+POLICY_WORKFLOW_PIN_RE = r'APPROVED_WORKFLOW_SHA256\s*=\s*"(?P<digest>[0-9a-f]{64})"'
+POLICY_SELF_PIN_RE = r'"scripts/local_ci_policy\.py"\s*:\s*"(?P<digest>[0-9a-f]{64})"'
+
 
 def normalized_digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
 
 
 def config_pin(text: str) -> str | None:
-    match = re.search(
-        r'"\.github/workflows/pr341-windows-acceptance\.yml"\s*:\s*"([0-9a-f]{64})"', text
-    )
-    return match.group(1) if match else None
+    match = re.search(CONFIG_WORKFLOW_PIN_RE, text)
+    return match.group("digest") if match else None
 
 
 def policy_pin(text: str) -> str | None:
-    match = re.search(r'APPROVED_WORKFLOW_SHA256\s*=\s*"([0-9a-f]{64})"', text)
-    return match.group(1) if match else None
+    match = re.search(POLICY_WORKFLOW_PIN_RE, text)
+    return match.group("digest") if match else None
+
+
+def set_pin(text: str, pattern: str, digest: str) -> str:
+    updated, count = re.subn(
+        pattern,
+        lambda m: m.group(0).replace(m.group("digest"), digest),
+        text,
+    )
+    if count != 1:
+        raise AssertionError(f"expected exactly one pin for {pattern!r}, found {count}")
+    return updated
+
+
+def pin_state(config: str | None, policy: str | None) -> str:
+    """Classify the two active workflow pins without assuming the date."""
+    if config is None or policy is None:
+        return "MISSING"
+    if config != policy:
+        return "MIXED"
+    if config == HISTORICAL_WORKFLOW_DIGEST:
+        return "UNAPPROVED"
+    if config == EXPECTED_CURRENT_DIGEST:
+        return "APPROVED"
+    return "UNKNOWN"
+
+
+def validate_pin_state(config: str | None, policy: str | None) -> list[str]:
+    state = pin_state(config, policy)
+    if state in ("UNAPPROVED", "APPROVED"):
+        return []
+    if state == "MISSING":
+        return ["a required workflow pin is missing"]
+    if state == "MIXED":
+        return ["workflow pins are mixed or inconsistent between the two files"]
+    return ["workflow pins name an unknown digest"]
 
 
 def validate_postapproval_bindings(config: str | None, policy: str | None, actual: str) -> list[str]:
-    """Postapproval state only: all active bindings must name the same digest.
-
-    This is a pure document check. It never writes the pin files and does not
-    assert that a Principal re-pin has already happened.
-    """
+    """APPROVED-state only: every active binding must name the executing digest."""
     errors = []
     if config != actual:
         errors.append("reviewed_config_digests.json workflow pin is stale or missing")
@@ -69,8 +101,6 @@ def validate_postapproval_bindings(config: str | None, policy: str | None, actua
         errors.append("local_ci_policy.py workflow pin is stale or missing")
     if config is not None and policy is not None and config != policy:
         errors.append("workflow digest bindings are inconsistent between the two pin files")
-    if config == HISTORICAL_WORKFLOW_DIGEST or policy == HISTORICAL_WORKFLOW_DIGEST:
-        errors.append("historical introduction digest must not be an active execution pin")
     return errors
 
 
@@ -78,6 +108,8 @@ class CollectorIntegrationPolicy(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.text = WORKFLOW.read_text(encoding="utf-8")
+        cls.config_text = CONFIG_PINS.read_text(encoding="utf-8")
+        cls.policy_text = POLICY.read_text(encoding="utf-8")
 
     def test_manual_only_and_read_only_preserved(self):
         self.assertIn("workflow_dispatch:", self.text)
@@ -103,7 +135,6 @@ class CollectorIntegrationPolicy(unittest.TestCase):
         self.assertIn(f"ref: {REVIEWED_COLLECTOR_SHA}", self.text)
         self.assertIn("path: collector-src", self.text)
         self.assertEqual(self.text.count("persist-credentials: false"), 3)
-        # No mutable branch ref may be used for the collector checkout.
         self.assertNotRegex(self.text, r"ref:\s*(main|master|HEAD|\$\{\{)")
 
     def test_identities_verified_before_collector_executes(self):
@@ -126,13 +157,10 @@ class CollectorIntegrationPolicy(unittest.TestCase):
             "ACTIVE_WORKFLOW_DIGEST=BOUND_BY_PRINCIPAL_POLICY_PIN_NOT_ASSERTED_HERE",
             self.text,
         )
-        # No digest of the executing workflow is embedded in the workflow or
-        # asserted as verified: re-pinning remains a Principal-only action.
         self.assertNotIn(normalized_digest(WORKFLOW), self.text)
         for line in self.text.splitlines():
             if HISTORICAL_WORKFLOW_DIGEST in line:
                 self.assertIn("provenance only", line)
-        # The historical digest is not presented as verification here.
         self.assertNotIn("HISTORICAL_INTRODUCTION_DIGEST=" + HISTORICAL_WORKFLOW_DIGEST, self.text)
 
     def test_collector_run_is_read_only_and_claims_only(self):
@@ -140,51 +168,120 @@ class CollectorIntegrationPolicy(unittest.TestCase):
         self.assertIn("PR341_EVIDENCE_OUT", self.text)
         self.assertIn("NONPRIVILEGED_CLAIMS_ONLY_UNVERIFIED", self.text)
 
-    def test_preapproval_state_requires_principal_repin(self):
-        # Preapproval: the workflow has new bytes but the pins still name the
-        # historical introduction digest. No pin file is modified by this PR.
-        actual = normalized_digest(WORKFLOW)
-        self.assertEqual(actual, EXPECTED_CURRENT_DIGEST)
-        self.assertNotEqual(actual, HISTORICAL_WORKFLOW_DIGEST)
-        pins_text = CONFIG_PINS.read_text(encoding="utf-8")
-        policy_text = POLICY.read_text(encoding="utf-8")
-        self.assertEqual(config_pin(pins_text), HISTORICAL_WORKFLOW_DIGEST)
-        self.assertEqual(policy_pin(policy_text), HISTORICAL_WORKFLOW_DIGEST)
-        self.assertNotIn(actual, pins_text)
-        self.assertNotIn(actual, policy_text)
-        # The preapproval state is deliberately rejected by the postapproval
-        # consistency rule; the policy gate must remain failing.
-        self.assertTrue(validate_postapproval_bindings(config_pin(pins_text), policy_pin(policy_text), actual))
+    def test_pin_state_is_state_independent(self):
+        """Passes identically before and after the Principal's re-pin."""
+        self.assertEqual(normalized_digest(WORKFLOW), EXPECTED_CURRENT_DIGEST)
+        config = config_pin(self.config_text)
+        policy = policy_pin(self.policy_text)
+        self.assertIn(pin_state(config, policy), ("UNAPPROVED", "APPROVED"))
+        self.assertEqual(validate_pin_state(config, policy), [])
+        self.assertEqual(config, policy)
 
-    def test_postapproval_pin_consistency_is_deterministic_in_memory(self):
-        # Simulate ONLY the Principal's deliberate re-pin in memory. This does
-        # NOT claim that a re-pin has happened and writes no files.
-        actual = normalized_digest(WORKFLOW)
-        pins_text = CONFIG_PINS.read_text(encoding="utf-8")
-        policy_text = POLICY.read_text(encoding="utf-8")
-        repinned_config = pins_text.replace(
-            f'"{HISTORICAL_WORKFLOW_DIGEST}"', f'"{EXPECTED_CURRENT_DIGEST}"'
+    def test_unapproved_and_approved_states_are_both_legitimate(self):
+        self.assertEqual(
+            pin_state(HISTORICAL_WORKFLOW_DIGEST, HISTORICAL_WORKFLOW_DIGEST), "UNAPPROVED"
         )
-        repinned_policy = policy_text.replace(
-            f'"{HISTORICAL_WORKFLOW_DIGEST}"', f'"{EXPECTED_CURRENT_DIGEST}"'
+        self.assertEqual(
+            pin_state(EXPECTED_CURRENT_DIGEST, EXPECTED_CURRENT_DIGEST), "APPROVED"
         )
-        config_digest = config_pin(repinned_config)
-        policy_digest = policy_pin(repinned_policy)
-        self.assertEqual(config_digest, actual)
-        self.assertEqual(policy_digest, actual)
-        self.assertEqual(config_digest, policy_digest)
-        self.assertEqual(validate_postapproval_bindings(config_digest, policy_digest, actual), [])
-        # Files on disk remain untouched: re-pinning is Principal-only.
-        self.assertEqual(config_pin(CONFIG_PINS.read_text(encoding="utf-8")), HISTORICAL_WORKFLOW_DIGEST)
-        self.assertEqual(policy_pin(POLICY.read_text(encoding="utf-8")), HISTORICAL_WORKFLOW_DIGEST)
+        self.assertEqual(
+            validate_pin_state(HISTORICAL_WORKFLOW_DIGEST, HISTORICAL_WORKFLOW_DIGEST), []
+        )
+        self.assertEqual(
+            validate_pin_state(EXPECTED_CURRENT_DIGEST, EXPECTED_CURRENT_DIGEST), []
+        )
+        # UNAPPROVED is legitimate but must fail the postapproval consistency
+        # check; APPROVED is legitimate and must pass it.
+        self.assertTrue(
+            validate_postapproval_bindings(
+                HISTORICAL_WORKFLOW_DIGEST, HISTORICAL_WORKFLOW_DIGEST, EXPECTED_CURRENT_DIGEST
+            )
+        )
+        self.assertEqual(
+            validate_postapproval_bindings(
+                EXPECTED_CURRENT_DIGEST, EXPECTED_CURRENT_DIGEST, EXPECTED_CURRENT_DIGEST
+            ),
+            [],
+        )
 
-    def test_stale_or_inconsistent_pins_are_rejected(self):
-        actual = EXPECTED_CURRENT_DIGEST
-        self.assertTrue(validate_postapproval_bindings(HISTORICAL_WORKFLOW_DIGEST, HISTORICAL_WORKFLOW_DIGEST, actual))
-        self.assertTrue(validate_postapproval_bindings(None, None, actual))
-        self.assertTrue(validate_postapproval_bindings(actual, HISTORICAL_WORKFLOW_DIGEST, actual))
-        self.assertTrue(validate_postapproval_bindings(HISTORICAL_WORKFLOW_DIGEST, actual, actual))
-        self.assertEqual(validate_postapproval_bindings(actual, actual, actual), [])
+    def test_mixed_missing_unknown_and_mismatched_pins_are_rejected(self):
+        for config, policy in [
+            (HISTORICAL_WORKFLOW_DIGEST, EXPECTED_CURRENT_DIGEST),
+            (EXPECTED_CURRENT_DIGEST, HISTORICAL_WORKFLOW_DIGEST),
+            (None, None),
+            (EXPECTED_CURRENT_DIGEST, None),
+            (None, HISTORICAL_WORKFLOW_DIGEST),
+            ("f" * 64, "f" * 64),
+        ]:
+            with self.subTest(config=config, policy=policy):
+                self.assertNotEqual(pin_state(config, policy), "APPROVED")
+                self.assertTrue(validate_pin_state(config, policy))
+
+    def test_stale_pin_negative_control_is_preserved(self):
+        self.assertTrue(validate_postapproval_bindings(None, None, EXPECTED_CURRENT_DIGEST))
+        self.assertTrue(
+            validate_postapproval_bindings(
+                EXPECTED_CURRENT_DIGEST, HISTORICAL_WORKFLOW_DIGEST, EXPECTED_CURRENT_DIGEST
+            )
+        )
+        self.assertTrue(
+            validate_postapproval_bindings(
+                HISTORICAL_WORKFLOW_DIGEST, EXPECTED_CURRENT_DIGEST, EXPECTED_CURRENT_DIGEST
+            )
+        )
+        self.assertEqual(
+            validate_postapproval_bindings(
+                EXPECTED_CURRENT_DIGEST, EXPECTED_CURRENT_DIGEST, EXPECTED_CURRENT_DIGEST
+            ),
+            [],
+        )
+
+    def test_postapproval_policy_gate_passes_in_isolated_disposable_copy(self):
+        """Simulate a Principal re-pin in a disposable copy; real pins untouched."""
+        preferred_base = Path("D:/opencode-temp")
+        base = str(preferred_base) if preferred_base.is_dir() else None
+        temporary = Path(tempfile.mkdtemp(prefix="prometheos-postapproval-", dir=base))
+        try:
+            repo = temporary / "repo"
+            shutil.copytree(
+                ROOT,
+                repo,
+                ignore=shutil.ignore_patterns(".git", ".cargo-target", "node_modules"),
+            )
+            config_path = repo / "scripts" / "reviewed_config_digests.json"
+            policy_path = repo / "scripts" / "local_ci_policy.py"
+            config = config_path.read_text(encoding="utf-8")
+            policy = policy_path.read_text(encoding="utf-8")
+            config = set_pin(config, CONFIG_WORKFLOW_PIN_RE, EXPECTED_CURRENT_DIGEST)
+            policy = set_pin(policy, POLICY_WORKFLOW_PIN_RE, EXPECTED_CURRENT_DIGEST)
+            policy_path.write_text(policy, encoding="utf-8")
+            # Changing local_ci_policy.py requires its own reviewed pin update.
+            policy_self_digest = hashlib.sha256(
+                policy_path.read_bytes().replace(b"\r\n", b"\n")
+            ).hexdigest()
+            config = set_pin(config, POLICY_SELF_PIN_RE, policy_self_digest)
+            config_path.write_text(config, encoding="utf-8")
+
+            self.assertEqual(config_pin(config_path.read_text(encoding="utf-8")), EXPECTED_CURRENT_DIGEST)
+            self.assertEqual(policy_pin(policy_path.read_text(encoding="utf-8")), EXPECTED_CURRENT_DIGEST)
+
+            result = subprocess.run(
+                [sys.executable, "scripts/local_ci_policy.py"],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(
+                result.returncode,
+                0,
+                f"postapproval policy gate failed: {result.stdout}\n{result.stderr}",
+            )
+        finally:
+            shutil.rmtree(temporary, ignore_errors=True)
+
+        # No real pin was modified by this test.
+        self.assertEqual(config_pin(CONFIG_PINS.read_text(encoding="utf-8")), config_pin(self.config_text))
+        self.assertEqual(policy_pin(POLICY.read_text(encoding="utf-8")), policy_pin(self.policy_text))
 
 
 if __name__ == "__main__":
