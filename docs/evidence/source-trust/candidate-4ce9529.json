@@ -1,0 +1,96 @@
+{
+  "schemaVersion": "prometheos.source-trust-evidence.v1",
+  "PROJECT": "PROMETHEOS_LITE_ONLY",
+  "CANDIDATE_SOURCE_SHA": "4ce9529a7b0f1a08084e0de1c7a1440e1de90e26",
+  "CANDIDATE_TREE_SHA": "306a453a64a769c4fc4d156802e22de8ef3c91ea",
+  "BASE_MAIN_SHA": "4ce9529a7b0f1a08084e0de1c7a1440e1de90e26",
+  "SOURCE_ANCESTRY_VERDICT": "VERIFIED",
+  "KNOWN_SUSPECT_CONTENT_IN_CANDIDATE": "VERIFIED",
+  "KNOWN_SUSPECT_ANCESTRY": "VERIFIED",
+  "DEPENDENCY_AND_BUILD_INPUT_REVIEW": "VERIFIED",
+  "AUTHENTICATED_PUSHING_ACTOR": "BLOCKED",
+  "WRITER_ISOLATION": "BLOCKED",
+  "CREDENTIAL_ROTATION": "BLOCKED",
+  "EXPOSURE_REVIEW": "BLOCKED",
+  "ADMINISTRATOR_RECEIPT": "NOT_RUN",
+  "BUILD_COMMAND": "python scripts/local_ci.py run --suite core",
+  "BUILD_INPUTS": [
+    "Cargo.lock",
+    "Cargo.toml",
+    "requirements-local-ci.txt",
+    "frontend/package-lock.json",
+    "frontend/postcss.config.js",
+    ".github/workflows/pr341-windows-acceptance.yml",
+    "scripts/reviewed_config_digests.json"
+  ],
+  "BUILD_ARTIFACT_SHA256": "27a8c5b8388b0fd01be71d475a8c94665e08f8a025b08203f1f23ea0388de156",
+  "BUILD_ENVIRONMENT": "windows-local-host, cargo/rustup toolchain, Python 3.14.10, .cargo-target target-dir; no paid or external service",
+  "BUILD_REPRODUCIBILITY": "NOT_RUN",
+  "TEST_RESULTS": {
+    "suite": "core",
+    "status": "PARTIAL",
+    "executed_at_candidate": [
+      "rustfmt (cargo fmt --all -- --check): exit 0",
+      "clippy --all-targets --all-features -- -D warnings: exit 0",
+      "cargo test --doc --all-features: 4 passed, 0 failed",
+      "cargo build --release --all-features: exit 0 (separate rerun; artifact digest above)"
+    ],
+    "not_run": [
+      "cargo test --all-targets --all-features",
+      "guardrails / runtime policy / verification policy / patch diagnostics",
+      "governance compiler / harness catalog / graph suspension / permit suspension",
+      "expanded composite runtime / repository onboarding",
+      "catalog schema validation / verifier regressions / repository policy / policy regressions",
+      "local_ci suites platform and smoke"
+    ],
+    "interruption": "The repository-native core run was terminated by the harness 3600s limit during its release-build check. No evidence record was emitted. Only the checks listed under executed_at_candidate are claimed; all others are NOT_RUN."
+  },
+  "SOURCE_INTEGRITY_STATUS": "BLOCKED",
+  "SECURITY_CLEARANCE": "BLOCKED",
+  "RUNTIME_AUTHORITY": "BLOCKED",
+  "PRINCIPAL_REVIEW_REQUIRED": true,
+  "observations": {
+    "postcss_blob": "33ad091d26d8a9dc95ebdf616e217d985ec215b8",
+    "postcss_size_bytes": 82,
+    "candidate_tree_sha": "306a453a64a769c4fc4d156802e22de8ef3c91ea",
+    "suspect_commits_in_ancestry_empty": true,
+    "workflow_files": [
+      ".github/workflows/pr341-windows-acceptance.yml"
+    ],
+    "workflow_permissions": [
+      "contents: read"
+    ],
+    "workflow_uses_secrets": false,
+    "unreviewed_executable_inputs_empty": true,
+    "dependency_lifecycle_scripts": []
+  },
+  "build": {
+    "evidence_candidate_sha": "4ce9529a7b0f1a08084e0de1c7a1440e1de90e26",
+    "artifact_path": ".cargo-target/release/prometheos.exe",
+    "artifact_sha256": "27a8c5b8388b0fd01be71d475a8c94665e08f8a025b08203f1f23ea0388de156"
+  },
+  "runtime": {
+    "stage2_executed": false,
+    "runtime_test_executed": false,
+    "runtime_acceptance_claimed": false,
+    "observation_boundary_active": false
+  },
+  "clearance": {
+    "required_revisions": [
+      "4ce9529a7b0f1a08084e0de1c7a1440e1de90e26"
+    ],
+    "excluded_revisions": [
+      "6d6fb679b1b383a1f34266ceada4d1cab381140c",
+      "14b83781405e1dccc737da74b2203bd00593ccb4",
+      "468017b4a78e5ed2aa988ed685de960d34ad24ac"
+    ]
+  },
+  "notes": {
+    "security_clearance": "NOT_SELF_GRANTED — owner/Principal decision; documentary evidence cannot grant clearance",
+    "runtime_authority": "NOT_GRANTED — observation boundary not activated; no execution or protected mutation authority",
+    "issue297_disposition": "Archived at owner direction 2026-11-20; owner testimony attributes historic writes to a ChatGPT-connected connection. Not authenticated attribution and NOT security clearance.",
+    "build_input_scope": "Tracked executable configuration pins and the single reviewed workflow were inspected; full independent transitive dependency provenance (SBOM/signature) was not established and is not claimed. GitHub reported 10 open Dependabot advisories on main (1 high, 6 moderate, 3 low) at PR publication time; no dependency change was made.",
+    "artifact_digest_scope": "SHA-256 is over the release binary produced by cargo build --release --all-features at the exact candidate in a clean worktree. It proves byte identity relative to that build only, not publisher identity, and has not been reproduced against an independently trusted reference.",
+    "administrator_actions": "No credential rotation, writer isolation, audit attribution, ref/tag mutation, issue triage or merge was performed by this work."
+  }
+}
