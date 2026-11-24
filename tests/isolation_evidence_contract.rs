@@ -21,21 +21,33 @@
 //!   absence of host-mounted protected resources. These stay PROVIDER_ASSERTED
 //!   / UNPROVABLE and must never be promoted to independently attested.
 
+#[cfg(windows)]
 use std::fs;
+#[cfg(windows)]
 use std::iter::once;
+#[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
+#[cfg(windows)]
 use std::os::windows::fs::MetadataExt;
+#[cfg(windows)]
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
 use std::process::Command;
+#[cfg(windows)]
 use std::ptr;
 
 use serde_json::{Value, json};
+#[cfg(windows)]
 use winapi::shared::minwindef::TRUE;
+#[cfg(windows)]
 use winapi::um::fileapi::{
     BY_HANDLE_FILE_INFORMATION, CreateFileW, GetFileInformationByHandle, OPEN_EXISTING,
 };
+#[cfg(windows)]
 use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
+#[cfg(windows)]
 use winapi::um::winbase::FILE_FLAG_BACKUP_SEMANTICS;
+#[cfg(windows)]
 use winapi::um::winnt::{
     FILE_ATTRIBUTE_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
     GENERIC_READ,
@@ -53,6 +65,7 @@ const REVIEWED_PR341_SHA: &str = "37a7ae33ca21fc25ad0f70f20022cd4a95634bce";
 const EXPECTED_WORKFLOW_REF: &str =
     "prometheosai/prometheos-lite/.github/workflows/pr341-windows-acceptance.yml@refs/heads/main";
 const EXPECTED_EVENT_REF: &str = "refs/heads/main";
+const PARTIAL_UNC_COVERAGE: &str = "PARTIAL_UNC_MAPPINGS_ONLY";
 const ZEROED_STAGE2_ATTESTATION: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
 
@@ -86,14 +99,6 @@ fn req_u64(root: &Value, path: &[&str], minimum: u64, out: &mut Vec<String>) {
     match field(root, path).and_then(Value::as_u64) {
         Some(value) if value >= minimum => {}
         Some(_) => out.push(format!("{} below {minimum}", path.join("."))),
-        None => out.push(format!("missing integer {}", path.join("."))),
-    }
-}
-
-fn req_zero(root: &Value, path: &[&str], out: &mut Vec<String>) {
-    match field(root, path).and_then(Value::as_u64) {
-        Some(0) => {}
-        Some(_) => out.push(format!("{} must be zero", path.join("."))),
         None => out.push(format!("missing integer {}", path.join("."))),
     }
 }
@@ -142,9 +147,17 @@ fn validate_structure_only(doc: &Value) -> StructuralOnlyResult {
     if req_str(doc, &["repository"], &mut errors) != Some(REPOSITORY) {
         errors.push("repository binding mismatch".into());
     }
+    // headSha is the CHECKED-OUT SOURCE commit (git rev-parse HEAD), not GITHUB_SHA.
     if req_str(doc, &["headSha"], &mut errors) != Some(REVIEWED_PR341_SHA) {
-        errors.push("candidate revision binding mismatch".into());
+        errors.push("checked-out source commit is not the pinned PR 341 head".into());
     }
+    if req_str(doc, &["candidateHead"], &mut errors) != Some(REVIEWED_PR341_SHA) {
+        errors.push("candidate PR head binding mismatch".into());
+    }
+    if req_str(doc, &["workflowSha"], &mut errors) != Some(REVIEWED_MAIN_SHA) {
+        errors.push("GitHub workflow/event SHA must be the reviewed main revision".into());
+    }
+    req_bool(doc, &["checkoutVerified"], true, &mut errors);
     if req_str(doc, &["workflowPath"], &mut errors) != Some(APPROVED_WORKFLOW) {
         errors.push("workflow path binding mismatch".into());
     }
@@ -199,9 +212,23 @@ fn validate_structure_only(doc: &Value) -> StructuralOnlyResult {
         &mut errors,
     );
 
-    req_bool(doc, &["hostMounts", "enumerated"], true, &mut errors);
-    req_zero(doc, &["hostMounts", "remoteCount"], &mut errors);
-    req_zero(doc, &["hostMounts", "protectedMountCount"], &mut errors);
+    // G3: UNC mappings are a PARTIAL observation. Complete mount inventory is
+    // NOT available, so protectedMountCount must stay explicitly unknown.
+    if req_str(doc, &["hostMounts", "coverage"], &mut errors) != Some(PARTIAL_UNC_COVERAGE) {
+        errors.push("mount inventory coverage must be declared partial".into());
+    }
+    req_bool(
+        doc,
+        &["hostMounts", "inventoryComplete"],
+        false,
+        &mut errors,
+    );
+    req_u64(doc, &["hostMounts", "uncMappingsObserved"], 0, &mut errors);
+    if field(doc, &["hostMounts", "protectedMountCount"]).is_some_and(|v| !v.is_null()) {
+        errors.push(
+            "protectedMountCount is unmeasured and must be null, not a fabricated number".into(),
+        );
+    }
 
     // Self-asserted claims can never satisfy the gate.
     req_bool(doc, &["selfAssertedOnly"], false, &mut errors);
@@ -255,6 +282,9 @@ fn valid_document() -> Value {
         "event": "workflow_dispatch",
         "repository": REPOSITORY,
         "headSha": REVIEWED_PR341_SHA,
+        "candidateHead": REVIEWED_PR341_SHA,
+        "workflowSha": REVIEWED_MAIN_SHA,
+        "checkoutVerified": true,
         "workflowPath": APPROVED_WORKFLOW,
         "workflowSha256": REVIEWED_WORKFLOW_SHA256,
         "workflowRevision": REVIEWED_MAIN_SHA,
@@ -279,9 +309,10 @@ fn valid_document() -> Value {
             "prometheosPathAbsentBeforeRun": true
         },
         "hostMounts": {
-            "enumerated": true,
-            "remoteCount": 0,
-            "protectedMountCount": 0
+            "coverage": PARTIAL_UNC_COVERAGE,
+            "inventoryComplete": false,
+            "uncMappingsObserved": 0,
+            "protectedMountCount": null
         },
         "selfAssertedOnly": false,
         "stage2AttestationSha256": ZEROED_STAGE2_ATTESTATION,
@@ -332,6 +363,56 @@ fn revision_and_workflow_binding_are_enforced() {
 }
 
 #[test]
+fn workflow_event_sha_is_distinct_from_checked_out_source() {
+    assert_eq!(
+        validate_structure_only(&valid_document()).structure,
+        StructuralStatus::StructurallyValid
+    );
+    let mut doc = valid_document();
+    doc["workflowSha"] = serde_json::json!(REVIEWED_PR341_SHA);
+    assert_eq!(
+        validate_structure_only(&doc).structure,
+        StructuralStatus::StructurallyInvalid,
+        "event SHA is the main revision, not the checked-out PR source"
+    );
+    let mut doc = valid_document();
+    doc["headSha"] = serde_json::json!(REVIEWED_MAIN_SHA);
+    assert_eq!(
+        validate_structure_only(&doc).structure,
+        StructuralStatus::StructurallyInvalid,
+        "checked-out source must be the pinned PR head"
+    );
+    let mut doc = valid_document();
+    doc["checkoutVerified"] = serde_json::json!(false);
+    assert_eq!(
+        validate_structure_only(&doc).structure,
+        StructuralStatus::StructurallyInvalid
+    );
+    let mut doc = valid_document();
+    doc.as_object_mut().expect("object").remove("candidateHead");
+    assert_eq!(
+        validate_structure_only(&doc).structure,
+        StructuralStatus::StructurallyInvalid
+    );
+}
+
+#[test]
+fn missing_git_checkout_identity_fails_closed() {
+    let mut doc = valid_document();
+    doc["headSha"] = Value::Null;
+    assert_eq!(
+        validate_structure_only(&doc).structure,
+        StructuralStatus::StructurallyInvalid
+    );
+    let mut doc = valid_document();
+    doc["checkoutVerified"] = serde_json::json!(false);
+    assert_eq!(
+        validate_structure_only(&doc).structure,
+        StructuralStatus::StructurallyInvalid
+    );
+}
+
+#[test]
 fn missing_os_derived_attestation_is_rejected() {
     let mut doc = valid_document();
     doc.as_object_mut().expect("object").remove("osDerived");
@@ -342,19 +423,48 @@ fn missing_os_derived_attestation_is_rejected() {
 }
 
 #[test]
-fn reparse_programdata_and_remote_mounts_are_rejected() {
+fn reparse_programdata_is_rejected() {
     let mut doc = valid_document();
     doc["programData"]["reparse"] = serde_json::json!(true);
     assert_eq!(
         validate_structure_only(&doc).structure,
         StructuralStatus::StructurallyInvalid
     );
+}
 
+#[test]
+fn incomplete_or_fabricated_mount_inventory_is_rejected() {
     let mut doc = valid_document();
-    doc["hostMounts"]["remoteCount"] = serde_json::json!(1);
+    doc["hostMounts"]["inventoryComplete"] = serde_json::json!(true);
     assert_eq!(
         validate_structure_only(&doc).structure,
         StructuralStatus::StructurallyInvalid
+    );
+
+    let mut doc = valid_document();
+    doc["hostMounts"]["protectedMountCount"] = serde_json::json!(0);
+    assert_eq!(
+        validate_structure_only(&doc).structure,
+        StructuralStatus::StructurallyInvalid,
+        "an unmeasured count must not be fabricated as zero"
+    );
+
+    let mut doc = valid_document();
+    doc["hostMounts"]
+        .as_object_mut()
+        .expect("object")
+        .remove("coverage");
+    assert_eq!(
+        validate_structure_only(&doc).structure,
+        StructuralStatus::StructurallyInvalid
+    );
+
+    let mut doc = valid_document();
+    doc.as_object_mut().expect("object").remove("hostMounts");
+    assert_eq!(
+        validate_structure_only(&doc).structure,
+        StructuralStatus::StructurallyInvalid,
+        "missing inventory must fail closed"
     );
 }
 
@@ -433,6 +543,7 @@ fn forged_but_structurally_valid_document_remains_unverified() {
 // The emitted document is CLAIMED data, never an authenticated attestation.
 // ---------------------------------------------------------------------------
 
+#[cfg(windows)]
 fn ps_line(command: &str) -> Result<String, String> {
     let output = Command::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", command])
@@ -449,6 +560,7 @@ fn ps_line(command: &str) -> Result<String, String> {
 
 /// Kernel identity of an OS object (volume serial + file index), via the same
 /// Win32 API family used by the reviewed provisioning code.
+#[cfg(windows)]
 fn kernel_identity(path: &Path) -> Result<(u32, u64), String> {
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain(once(0u16)).collect();
     let handle = unsafe {
@@ -477,12 +589,14 @@ fn kernel_identity(path: &Path) -> Result<(u32, u64), String> {
     ))
 }
 
+#[cfg(windows)]
 fn path_is_reparse(path: &Path) -> bool {
     fs::symlink_metadata(path)
         .map(|meta| meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0)
         .unwrap_or(false)
 }
 
+#[cfg(windows)]
 fn env_claim(name: &str) -> Value {
     std::env::var(name)
         .ok()
@@ -493,6 +607,24 @@ fn env_claim(name: &str) -> Value {
 
 /// Collects only nonprivileged facts from the current Windows host. Provider
 /// values are copied verbatim from GitHub-set environment variables as CLAIMS.
+#[cfg(windows)]
+fn git_head_commit() -> Option<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Some(sha)
+    } else {
+        None
+    }
+}
+
+#[cfg(windows)]
 fn collect_nonprivileged_windows_facts() -> Result<Value, String> {
     let known_folder = ps_line("[Environment]::GetFolderPath('CommonApplicationData')")?;
     if known_folder.is_empty() || !PathBuf::from(&known_folder).is_absolute() {
@@ -530,12 +662,17 @@ fn collect_nonprivileged_windows_facts() -> Result<Value, String> {
     ))?;
     let registry_absent = registry_absent.eq_ignore_ascii_case("False");
     let collected_at = ps_line("(Get-Date).ToUniversalTime().ToString('o')")?;
+    let checkout = git_head_commit();
+    let checkout_verified = checkout.as_deref() == Some(REVIEWED_PR341_SHA);
 
     Ok(json!({
         "schemaVersion": SCHEMA,
         "event": env_claim("GITHUB_EVENT_NAME"),
         "repository": env_claim("GITHUB_REPOSITORY"),
-        "headSha": env_claim("GITHUB_SHA"),
+        "headSha": checkout.map(Value::String).unwrap_or(Value::Null),
+        "candidateHead": REVIEWED_PR341_SHA,
+        "workflowSha": env_claim("GITHUB_SHA"),
+        "checkoutVerified": checkout_verified,
         "workflowPath": APPROVED_WORKFLOW,
         "workflowSha256": REVIEWED_WORKFLOW_SHA256,
         "workflowRevision": REVIEWED_MAIN_SHA,
@@ -566,9 +703,10 @@ fn collect_nonprivileged_windows_facts() -> Result<Value, String> {
             "prometheosPathAbsentBeforeRun": registry_absent
         },
         "hostMounts": {
-            "enumerated": true,
-            "remoteCount": unc_mounts,
-            "protectedMountCount": unc_mounts
+            "coverage": PARTIAL_UNC_COVERAGE,
+            "inventoryComplete": false,
+            "uncMappingsObserved": unc_mounts,
+            "protectedMountCount": Value::Null
         },
         "selfAssertedOnly": false,
         "stage2AttestationSha256": ZEROED_STAGE2_ATTESTATION,
@@ -587,6 +725,7 @@ fn collect_nonprivileged_windows_facts() -> Result<Value, String> {
     }))
 }
 
+#[cfg(windows)]
 #[test]
 fn test_collector_collects_real_nonprivileged_facts() {
     let doc = collect_nonprivileged_windows_facts().expect("collector must run read-only");
@@ -605,7 +744,19 @@ fn test_collector_collects_real_nonprivileged_facts() {
             .is_some_and(|v| v > 0),
         "real kernel volume identity must be collected"
     );
-    assert_eq!(doc["hostMounts"]["enumerated"], serde_json::json!(true));
+    assert_eq!(doc["candidateHead"], REVIEWED_PR341_SHA);
+    assert_eq!(doc["hostMounts"]["coverage"], PARTIAL_UNC_COVERAGE);
+    assert_eq!(
+        doc["hostMounts"]["inventoryComplete"],
+        serde_json::json!(false)
+    );
+    assert!(
+        doc["hostMounts"]["protectedMountCount"].is_null(),
+        "unmeasured protected mounts must remain unknown"
+    );
+    if let Some(sha) = doc["headSha"].as_str() {
+        assert_eq!(sha.len(), 40, "checkout SHA must be a full git commit id");
+    }
 
     let result = validate_structure_only(&doc);
     let on_runner = std::env::var_os("GITHUB_ACTIONS").is_some();
