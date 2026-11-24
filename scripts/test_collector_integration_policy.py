@@ -33,8 +33,8 @@ COLLECTOR_CONTRACT_BLOB = "41d06dda3ce49eb8fc7d5378ef35b604e869a568"
 RESOLVER_SOURCE_BLOB = "6f9a8254c19aaf67aae487ee9f2ee53fbb1e546a"
 RESOLVER_EMBEDDED_SHA256 = "fa3a0b71bd623f8e1a5d3078f0cb845a0df93a7974fac5cdd755cc2a9247aaa4"
 HISTORICAL_WORKFLOW_DIGEST = "b45b5ed1c912cef4d14251563fe2366f76c1d28287ce2e2291ef84f55d01b84c"
-PREVIOUS_APPROVED_DIGEST = "53984301f49022049859218efb2ee2b44dd0e10902542f583ac7e19967cb30fe"
-EXPECTED_CURRENT_DIGEST = "65dcce0bf11b3791b2dc180bfbd9d010fed97fb6682862d6a559895edf63db1a"
+PREVIOUS_APPROVED_DIGEST = "65dcce0bf11b3791b2dc180bfbd9d010fed97fb6682862d6a559895edf63db1a"
+EXPECTED_CURRENT_DIGEST = "824793f326c4136696eab0b62c9c3a740a558167038edcb1720e6d2c90d2af13"
 APPROVED_CHECKOUT_ACTION = "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"
 EXPECTED_WORKFLOW_REF = (
     "prometheosai/prometheos-lite/.github/workflows/"
@@ -165,13 +165,13 @@ class CollectorIntegrationPolicy(unittest.TestCase):
 
     def test_embedded_resolver_and_least_privilege_traversal(self):
         # W1: the resolver is embedded in the workflow so the pinned PR #341
-        # checkout need not contain it.
-        opening = self.text.index("$resolverSource = @'")
-        closing = self.text.index("'@\n", opening)
-        embedded = self.text[opening + len("$resolverSource = @'\n"):closing]
-        embedded = embedded.replace("\r\n", "\n")
-        if not embedded.endswith("\n"):
-            embedded += "\n"
+        # checkout need not contain it. Extract it from the YAML-parsed
+        # effective PowerShell run scalar, not raw workflow text.
+        from scripts import workflow_yaml_contract as contract
+
+        embedded = contract.embedded_resolver_source(
+            contract.build_step_run(contract.parse_workflow())
+        )
         self.assertEqual(
             hashlib.sha256(embedded.encode("utf-8")).hexdigest(), RESOLVER_EMBEDDED_SHA256
         )
