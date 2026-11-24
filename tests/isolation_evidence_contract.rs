@@ -25,12 +25,19 @@
 //! checked-out PR #341 source; `workflowSha` is the observed `GITHUB_SHA` of
 //! the dispatch and is labelled `OBSERVED_CLAIM_UNVERIFIED`; `workflowRevision`
 //! is the historical revision where the reviewed workflow was introduced;
-//! `workflowSha256` is the pinned workflow CONTENT digest. A moving `main`
-//! therefore does not invalidate the pin. The merged workflow cannot invoke
-//! this collector because its checkout predates it; any integration requires
-//! a separate DRAFT workflow PR with exact reviewed source identity and a
-//! deliberate digest re-pin (see `validate_integration_plan`). No privileged
-//! acceptance is enabled by this target.
+//! `workflowIntroductionDigest` is that ORIGINAL workflow's content digest and
+//! is labelled `HISTORICAL_INTRODUCTION_ONLY`. It is NOT a verification of the
+//! workflow that may execute this collector: the active workflow identity is
+//! bound separately by the deterministic, Principal-reviewed repository policy
+//! digest (`activeWorkflowBinding`), never asserted by this unprivileged
+//! collector. A moving `main` therefore does not invalidate the historical pin,
+//! and this collector never embeds the digest of a new workflow (no circular
+//! collector/workflow digest dependency). The merged workflow cannot invoke
+//! this collector because its checkout predates it; the historical assertion
+//! is proven from an immutable fixture, not from the current checkout. Any
+//! integration requires a separate DRAFT workflow PR with exact reviewed source
+//! identity and a deliberate Principal digest re-pin (see
+//! `validate_integration_plan`). No privileged acceptance is enabled here.
 
 #[cfg(windows)]
 use std::fs;
@@ -67,8 +74,20 @@ use winapi::um::winnt::{
 const SCHEMA: &str = "prometheos.isolation-evidence.v1";
 const REPOSITORY: &str = "prometheosai/prometheos-lite";
 const APPROVED_WORKFLOW: &str = ".github/workflows/pr341-windows-acceptance.yml";
-const REVIEWED_WORKFLOW_SHA256: &str =
+/// Digest of the workflow CONTENT as introduced at the historical revision
+/// below (git blob `3ebbab5681def4b24e867df50a6f422d944b86be`). It is
+/// immutable historical provenance only — NOT verification of any workflow
+/// that executes this collector.
+const WORKFLOW_INTRODUCTION_SHA256: &str =
     "b45b5ed1c912cef4d14251563fe2366f76c1d28287ce2e2291ef84f55d01b84c";
+/// Marks the introduction digest as historical metadata, not an assertion
+/// about the currently executing workflow.
+const WORKFLOW_DIGEST_PROVENANCE: &str = "HISTORICAL_INTRODUCTION_ONLY";
+/// The active (executing) workflow is bound by the separately reviewed,
+/// deterministic repository policy digest pin. This collector neither knows
+/// nor asserts that digest; doing so would create a circular dependency
+/// between the collector commit and the workflow commit.
+const ACTIVE_WORKFLOW_BINDING: &str = "REVIEWED_POLICY_DIGEST_NOT_ASSERTED_HERE";
 /// The audited revision at which the reviewed workflow CONTENT was introduced.
 /// It is a historical binding, NOT the live `GITHUB_SHA` of a dispatch. `main`
 /// may advance without changing the workflow bytes; the content digest below
@@ -90,6 +109,26 @@ const EXPECTED_EVENT_REF: &str = "refs/heads/main";
 const PARTIAL_UNC_COVERAGE: &str = "PARTIAL_UNC_MAPPINGS_ONLY";
 const ZEROED_STAGE2_ATTESTATION: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
+
+/// Immutable historical fixture distilled from the reviewed workflow as
+/// introduced at main `981c3995` (git blob `3ebbab56…`, LF-normalized
+/// SHA-256 `b45b5ed1…`, both independently recomputed from the object store).
+/// The pinned PR #341 checkout PREDATES that workflow file, so the historical
+/// assertion must never read the current checkout's copy: doing so would both
+/// fail in the pinned checkout and use mutable content as proof of history.
+const HISTORICAL_WORKFLOW_EVIDENCE: &str = r#"{
+  "sourceRevision": "981c39955fb82b181202b932bfeaf2119b22e669",
+  "workflowBlob": "3ebbab5681def4b24e867df50a6f422d944b86be",
+  "contentSha256": "b45b5ed1c912cef4d14251563fe2366f76c1d28287ce2e2291ef84f55d01b84c",
+  "pinnedSource": "37a7ae33ca21fc25ad0f70f20022cd4a95634bce",
+  "focusedTestTarget": "work::owner_registry",
+  "invokesCollector": false
+}"#;
+
+fn historical_workflow_evidence() -> Value {
+    serde_json::from_str(HISTORICAL_WORKFLOW_EVIDENCE)
+        .expect("embedded immutable historical fixture must parse")
+}
 
 fn field<'a>(root: &'a Value, path: &[&str]) -> Option<&'a Value> {
     let mut current = root;
@@ -199,10 +238,24 @@ fn validate_structure_only(doc: &Value) -> StructuralOnlyResult {
     if req_str(doc, &["workflowPath"], &mut errors) != Some(APPROVED_WORKFLOW) {
         errors.push("workflow path binding mismatch".into());
     }
-    // The workflow CONTENT digest stays pinned; a moving event SHA must not
-    // loosen this check.
-    if req_str(doc, &["workflowSha256"], &mut errors) != Some(REVIEWED_WORKFLOW_SHA256) {
-        errors.push("reviewed workflow digest mismatch".into());
+    // Historical introduction digest: immutable provenance metadata, NOT a
+    // verification of the workflow that may actually execute this collector.
+    if req_str(doc, &["workflowIntroductionDigest"], &mut errors)
+        != Some(WORKFLOW_INTRODUCTION_SHA256)
+    {
+        errors.push("historical workflow introduction digest mismatch".into());
+    }
+    if req_str(doc, &["workflowDigestProvenance"], &mut errors) != Some(WORKFLOW_DIGEST_PROVENANCE)
+    {
+        errors.push("introduction digest must be labelled historical only".into());
+    }
+    // The active workflow identity is bound by the separately reviewed,
+    // deterministic repository policy digest. It is never asserted here.
+    if req_str(doc, &["activeWorkflowBinding"], &mut errors) != Some(ACTIVE_WORKFLOW_BINDING) {
+        errors.push("active workflow must be bound by a separately reviewed policy digest".into());
+    }
+    if field(doc, &["activeWorkflowDigest"]).is_some() {
+        errors.push("collector must not assert the executing workflow digest".into());
     }
     // Historical introduction revision, not the live event SHA.
     if req_str(doc, &["workflowRevision"], &mut errors) != Some(REVIEWED_MAIN_SHA) {
@@ -328,7 +381,9 @@ fn valid_document() -> Value {
         "workflowShaProvenance": WORKFLOW_SHA_PROVENANCE,
         "checkoutVerified": true,
         "workflowPath": APPROVED_WORKFLOW,
-        "workflowSha256": REVIEWED_WORKFLOW_SHA256,
+        "workflowIntroductionDigest": WORKFLOW_INTRODUCTION_SHA256,
+        "workflowDigestProvenance": WORKFLOW_DIGEST_PROVENANCE,
+        "activeWorkflowBinding": ACTIVE_WORKFLOW_BINDING,
         "workflowRevision": REVIEWED_MAIN_SHA,
         "runId": "123456789",
         "runAttempt": 1,
@@ -390,10 +445,34 @@ fn revision_and_workflow_binding_are_enforced() {
     );
 
     let mut doc = valid_document();
-    doc["workflowSha256"] = serde_json::json!("ffff");
+    doc["workflowIntroductionDigest"] = serde_json::json!("ffff");
     assert_eq!(
         validate_structure_only(&doc).structure,
         StructuralStatus::StructurallyInvalid
+    );
+
+    let mut doc = valid_document();
+    doc["workflowDigestProvenance"] = serde_json::json!("CURRENT_WORKFLOW_VERIFIED");
+    assert_eq!(
+        validate_structure_only(&doc).structure,
+        StructuralStatus::StructurallyInvalid,
+        "the historical digest must never be presented as current verification"
+    );
+
+    let mut doc = valid_document();
+    doc["activeWorkflowBinding"] = serde_json::json!("SELF_ASSERTED");
+    assert_eq!(
+        validate_structure_only(&doc).structure,
+        StructuralStatus::StructurallyInvalid
+    );
+
+    let mut doc = valid_document();
+    doc["activeWorkflowDigest"] =
+        serde_json::json!("2d4cdf4d4b62e9d6b2f881be64542fb89e36fe5ccf969b5ea13a320f21b098ee");
+    assert_eq!(
+        validate_structure_only(&doc).structure,
+        StructuralStatus::StructurallyInvalid,
+        "the collector must not embed the executing workflow digest"
     );
 
     let mut doc = valid_document();
@@ -717,7 +796,9 @@ fn collect_nonprivileged_windows_facts() -> Result<Value, String> {
         "workflowShaProvenance": WORKFLOW_SHA_PROVENANCE,
         "checkoutVerified": checkout_verified,
         "workflowPath": APPROVED_WORKFLOW,
-        "workflowSha256": REVIEWED_WORKFLOW_SHA256,
+        "workflowIntroductionDigest": WORKFLOW_INTRODUCTION_SHA256,
+        "workflowDigestProvenance": WORKFLOW_DIGEST_PROVENANCE,
+        "activeWorkflowBinding": ACTIVE_WORKFLOW_BINDING,
         "workflowRevision": REVIEWED_MAIN_SHA,
         "runId": env_claim("GITHUB_RUN_ID"),
         "runAttempt": std::env::var("GITHUB_RUN_ATTEMPT")
@@ -831,14 +912,14 @@ fn main_advances_without_workflow_content_change_remains_structurally_valid() {
     let mut doc = valid_document();
     doc["workflowSha"] = serde_json::json!(ADVANCED_MAIN_SHA);
     doc["workflowRevision"] = serde_json::json!(REVIEWED_MAIN_SHA);
-    doc["workflowSha256"] = serde_json::json!(REVIEWED_WORKFLOW_SHA256);
+    doc["workflowIntroductionDigest"] = serde_json::json!(WORKFLOW_INTRODUCTION_SHA256);
     assert_eq!(
         validate_structure_only(&doc).structure,
         StructuralStatus::StructurallyValid,
-        "a moving event SHA must not break an unchanged pinned workflow"
+        "a moving event SHA must not break an unchanged historical pin"
     );
-    // The content pin is NOT loosened by that allowance.
-    doc["workflowSha256"] = serde_json::json!("ffff");
+    // The historical content pin is NOT loosened by that allowance.
+    doc["workflowIntroductionDigest"] = serde_json::json!("ffff");
     assert_eq!(
         validate_structure_only(&doc).structure,
         StructuralStatus::StructurallyInvalid
@@ -886,8 +967,27 @@ fn workflow_sha_provenance_label_is_required() {
 /// acceptance.
 fn validate_integration_plan(plan: &Value) -> Vec<String> {
     let mut errors = Vec::new();
-    if plan.get("workflowContentDigest").and_then(Value::as_str) != Some(REVIEWED_WORKFLOW_SHA256) {
-        errors.push("workflow content digest must stay pinned".into());
+    if plan
+        .get("workflowIntroductionDigest")
+        .and_then(Value::as_str)
+        != Some(WORKFLOW_INTRODUCTION_SHA256)
+    {
+        errors.push("historical workflow introduction digest must stay pinned".into());
+    }
+    if plan
+        .get("workflowIntroductionRevision")
+        .and_then(Value::as_str)
+        != Some(REVIEWED_MAIN_SHA)
+    {
+        errors.push("historical workflow introduction revision must stay pinned".into());
+    }
+    // The active workflow is bound by the reviewed policy digest, never by a
+    // digest asserted in this collector or self-approved here.
+    if plan.get("activeWorkflowBinding").and_then(Value::as_str) != Some(ACTIVE_WORKFLOW_BINDING) {
+        errors.push("active workflow binding must be the reviewed policy digest".into());
+    }
+    if plan.get("selfApprovedDigest").and_then(Value::as_bool) != Some(false) {
+        errors.push("the executing workflow digest must not be self-approved".into());
     }
     if plan
         .get("currentWorkflowCanInvokeCollector")
@@ -921,7 +1021,9 @@ fn validate_integration_plan(plan: &Value) -> Vec<String> {
 
 fn valid_integration_plan() -> Value {
     serde_json::json!({
-        "workflowContentDigest": REVIEWED_WORKFLOW_SHA256,
+        "workflowIntroductionDigest": WORKFLOW_INTRODUCTION_SHA256,
+        "workflowDigestProvenance": WORKFLOW_DIGEST_PROVENANCE,
+        "activeWorkflowBinding": ACTIVE_WORKFLOW_BINDING,
         "workflowIntroductionRevision": REVIEWED_MAIN_SHA,
         "currentPinnedSource": REVIEWED_PR341_SHA,
         "collectorTest": COLLECTOR_TEST_NAME,
@@ -929,26 +1031,30 @@ fn valid_integration_plan() -> Value {
         "collectorSourceSha": ADVANCED_MAIN_SHA,
         "separateDraftWorkflowPr": true,
         "deliberateDigestRepin": true,
+        "selfApprovedDigest": false,
         "privilegedAcceptance": false
     })
 }
 
 #[test]
 fn current_workflow_cannot_invoke_collector_negative_control() {
-    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let workflow = std::fs::read_to_string(root.join(APPROVED_WORKFLOW))
-        .expect("reviewed workflow must be readable in this tree");
-    assert!(
-        !workflow.contains(COLLECTOR_TEST_NAME),
-        "the pinned manual workflow must not claim to invoke the collector"
+    // Historical assertion is proven from the immutable fixture captured at
+    // the reviewed introduction revision. It deliberately does NOT read the
+    // current checkout's workflow: PR #341 predates that file, and mutable
+    // current content is not evidence of historical behavior.
+    let historical = historical_workflow_evidence();
+    assert_eq!(historical["sourceRevision"], REVIEWED_MAIN_SHA);
+    assert_eq!(
+        historical["workflowBlob"],
+        "3ebbab5681def4b24e867df50a6f422d944b86be"
     );
+    assert_eq!(historical["contentSha256"], WORKFLOW_INTRODUCTION_SHA256);
+    assert_eq!(historical["pinnedSource"], REVIEWED_PR341_SHA);
+    assert_eq!(historical["focusedTestTarget"], "work::owner_registry");
+    assert_eq!(historical["invokesCollector"], false);
     assert!(
-        workflow.contains(REVIEWED_PR341_SHA),
-        "the workflow must remain bound to the exact PR 341 source"
-    );
-    assert!(
-        workflow.contains("work::owner_registry"),
-        "the workflow's focused test target must remain the owner registry"
+        !HISTORICAL_WORKFLOW_EVIDENCE.contains(COLLECTOR_TEST_NAME),
+        "the historical reviewed workflow must not claim to invoke the collector"
     );
     assert!(
         validate_integration_plan(&valid_integration_plan()).is_empty(),
@@ -978,7 +1084,18 @@ fn collector_integration_plan_refuses_unsafe_shortcuts() {
     assert!(!validate_integration_plan(&plan).is_empty());
 
     let mut plan = valid_integration_plan();
-    plan["workflowContentDigest"] = serde_json::json!("ffff");
+    plan["workflowIntroductionDigest"] = serde_json::json!("ffff");
+    assert!(!validate_integration_plan(&plan).is_empty());
+
+    let mut plan = valid_integration_plan();
+    plan["selfApprovedDigest"] = serde_json::json!(true);
+    assert!(
+        !validate_integration_plan(&plan).is_empty(),
+        "self-approving the new workflow digest is refused"
+    );
+
+    let mut plan = valid_integration_plan();
+    plan["activeWorkflowBinding"] = serde_json::json!("COLLECTOR_ASSERTED");
     assert!(!validate_integration_plan(&plan).is_empty());
 
     let mut plan = valid_integration_plan();
