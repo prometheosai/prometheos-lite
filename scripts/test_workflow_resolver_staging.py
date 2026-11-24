@@ -40,10 +40,11 @@ def git(*args, cwd=ROOT, check=False):
 
 
 def embedded_resolver_source(text):
-    opening = text.index("$resolverSource = @'")
-    closing = text.index("'@\n", opening)
-    source = text[opening + len("$resolverSource = @'\n"):closing].replace("\r\n", "\n")
-    return source if source.endswith("\n") else source + "\n"
+    # Delegate to the YAML-aware helper: raw text indexing would make these
+    # tests pass on a workflow that GitHub cannot parse.
+    from scripts import workflow_yaml_contract as contract
+
+    return contract.embedded_resolver_source(contract.build_step_run(contract.parse_workflow()))
 
 
 class WorkflowResolverStaging(unittest.TestCase):
