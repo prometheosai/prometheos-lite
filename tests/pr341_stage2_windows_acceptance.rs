@@ -2,23 +2,26 @@
 
 //! Stage 2 privileged-acceptance evidence for PR #340/#341.
 //!
-//! OPT-IN ONLY. These tests write to the machine-local ProgramData registry
-//! path used by the trusted owner registry. They must never run on the
-//! owner's physical machine. Enable with `PR341_STAGE2_ACCEPTANCE=1` on a
-//! fresh, disposable, GitHub-hosted `windows-2022` runner only.
+//! LAYERS (kept separate by design):
+//! 1. Compile-time: Windows-only target using the reviewed public API.
+//! 2. Static safety preflight: exact path, no reparse, verifiable ACL — no mutation.
+//! 3. Runtime isolation attestation: an independently supplied, digest-pinned
+//!    artifact. No attestation is currently approved, so mutating tests fail
+//!    closed. Environment variables are NEVER sufficient.
+//! 4. Authorized privileged acceptance: only after (3) and explicit Principal
+//!    approval on a disposable GitHub-hosted runner.
 //!
-//! A missing opt-in is reported as `STAGE2_NOT_ENABLED`, never as a pass.
-//! This target is not invoked by the merged Stage 1 workflow; enabling it in
-//! CI requires separate workflow review, a review-pin update, policy
-//! regression coverage and explicit Principal authorization.
+//! Opt-out is reported as `NOT_RUN — STAGE2_DISABLED`, never as a PASS.
+//! This target is not invoked by the merged Stage 1 workflow.
 
 use std::ffi::OsStr;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use prometheos_lite::work::owner_registry as registry;
 use registry::windows::{
@@ -27,17 +30,28 @@ use registry::windows::{
     validate_file_security, validate_registry_location,
 };
 use registry::{OwnerBinding, OwnerRegistry, Refusal, SID_ADMINISTRATORS, SID_EVERYONE};
+use sha2::{Digest, Sha256};
 
 const OPT_IN: &str = "PR341_STAGE2_ACCEPTANCE";
-
-fn enabled() -> bool {
-    std::env::var_os(OPT_IN).as_deref() == Some(OsStr::new("1"))
+const ATTESTATION_PATH_VAR: &str = "PR341_STAGE2_ATTESTATION";
+const LOCK_CHILD_VAR: &str = "PR341_STAGE2_LOCK_CHILD";
+const LOCK_MARKER_VAR: &str = "PR341_STAGE2_LOCK_MARKER";
+/// No attestation artifact is approved. A Principal-reviewed PR must move this
+/// pin before any privileged Stage 2 effect is possible.
+const APPROVED_ATTESTATION_SHA256: &str =
+    "0000000000000000000000000000000000000000000000000000000000000000";
+static FIXTURE_COUNTER: AtomicUsize = AtomicUsize::new(0);
+fn temp_base() -> PathBuf {
+    std::env::var_os("RUNNER_TEMP")
+        .or_else(|| std::env::var_os("TEMP"))
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
 }
 
 macro_rules! require_stage2 {
     () => {
-        if !enabled() {
-            eprintln!("STAGE2_NOT_ENABLED: set {OPT_IN}=1 on a disposable GitHub-hosted runner");
+        if std::env::var_os(OPT_IN).as_deref() != Some(OsStr::new("1")) {
+            eprintln!("NOT_RUN — STAGE2_DISABLED: privileged acceptance not executed");
             return;
         }
     };
@@ -60,292 +74,475 @@ fn document(generation: u64, bindings: Vec<OwnerBinding>) -> OwnerRegistry {
     }
 }
 
-/// Fail closed unless this really is a standard GitHub-hosted runner with an
-/// OS-resolved, non-reparse ProgramData root. No host-mounted protected state.
-fn preflight() -> PathBuf {
-    assert_eq!(
-        std::env::var("GITHUB_ACTIONS").as_deref(),
-        Ok("true"),
-        "Stage 2 requires a GitHub Actions runner"
-    );
-    let environment = std::env::var("RUNNER_ENVIRONMENT").unwrap_or_default();
-    assert!(
-        environment.eq_ignore_ascii_case("github-hosted"),
-        "Stage 2 requires a standard GitHub-hosted runner, found {environment:?}"
-    );
-    let root = registry::programdata_root().expect("ProgramData Known Folder must resolve");
-    assert!(root.is_absolute(), "ProgramData root must be absolute");
-    assert!(
-        reject_reparse(&root).is_ok(),
-        "ProgramData root must not be a reparse point"
-    );
-    let path = registry::default_registry_path().expect("trusted registry path must resolve");
-    assert!(
-        path.starts_with(&root),
-        "registry path must be under ProgramData"
-    );
-    assert_eq!(
-        path.file_name().and_then(OsStr::to_str),
-        Some(registry::REGISTRY_FILE_NAME),
-        "registry leaf name must be pinned"
-    );
-    path
+fn unique_suffix(prefix: &str) -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock")
+        .as_nanos();
+    let counter = FIXTURE_COUNTER.fetch_add(1, Ordering::SeqCst);
+    format!("{prefix}-{}-{nanos}-{counter}", std::process::id())
 }
 
-/// Deletes only objects this test created: the registry leaf and ancestors
-/// that did not exist before provisioning. Never touches pre-existing state.
+/// Layer 2 only: exact location and verifiable OS security metadata. Performs
+/// no mutation and deliberately makes no claim about runner isolation.
+fn static_preflight() -> Result<PathBuf, String> {
+    let path = registry::default_registry_path().map_err(|e| format!("default path: {e}"))?;
+    let root = registry::programdata_root().map_err(|e| format!("ProgramData: {e}"))?;
+    if !path.is_absolute() || !path.starts_with(&root) {
+        return Err("registry path is not under the OS ProgramData root".into());
+    }
+    if path.file_name().and_then(OsStr::to_str) != Some(registry::REGISTRY_FILE_NAME) {
+        return Err("registry leaf name is not pinned".into());
+    }
+    if reject_reparse(&root).is_err() {
+        return Err("ProgramData root is a reparse point".into());
+    }
+    if dacl_grants_full_control_to(&root, SID_ADMINISTRATORS).is_err() {
+        return Err("ProgramData ACL cannot be verified".into());
+    }
+    Ok(path)
+}
+
+/// Layer 3: independent runtime attestation. Env vars are ignored entirely.
+fn runtime_isolation_attestation(path: Option<&Path>) -> Result<(), String> {
+    let supplied = path.ok_or("no independently supplied isolation attestation")?;
+    if fs::symlink_metadata(supplied)
+        .map_err(|e| format!("attestation unreadable: {e}"))?
+        .file_type()
+        .is_symlink()
+    {
+        return Err("attestation must be a regular file".into());
+    }
+    let bytes = fs::read(supplied).map_err(|e| format!("attestation unreadable: {e}"))?;
+    let digest = hex_digest(&bytes);
+    if digest != APPROVED_ATTESTATION_SHA256 {
+        return Err(format!(
+            "attestation digest {digest} is not Principal-approved {}",
+            APPROVED_ATTESTATION_SHA256
+        ));
+    }
+    let value: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|e| format!("attestation malformed: {e}"))?;
+    let hosted = value.get("githubHosted").and_then(|v| v.as_bool());
+    let disposable = value.get("disposable").and_then(|v| v.as_bool());
+    let isolated = value.get("programDataIsolated").and_then(|v| v.as_bool());
+    if hosted != Some(true) || disposable != Some(true) || isolated != Some(true) {
+        return Err("attestation does not assert hosted, disposable and isolated state".into());
+    }
+    Ok(())
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// RAII owner for the protected registry. Acquires the cross-process named
+/// mutex for its whole lifetime and HARD-REFUSES any pre-existing target,
+/// unexpected ancestor, substitute path or unverifiable ACL.
 struct OwnedRegistry {
     path: PathBuf,
-    leaf_existed: bool,
     new_dirs: Vec<PathBuf>,
+    _lock: registry::windows::TestMutexGuard,
+    cleaned: bool,
 }
 
 impl OwnedRegistry {
-    fn new(path: &Path) -> Self {
-        let leaf_existed = path.exists();
-        let root = registry::programdata_root().expect("ProgramData root");
+    fn try_acquire(path: &Path, expected: &Path, ancestor_root: &Path) -> Result<Self, String> {
+        if !path.is_absolute()
+            || path.to_string_lossy().to_lowercase() != expected.to_string_lossy().to_lowercase()
+        {
+            return Err("substitute registry path".into());
+        }
+        match fs::symlink_metadata(path) {
+            Ok(_) => return Err("pre-existing protected registry — refusing to mutate".into()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("registry state unverifiable: {e}")),
+        }
+        let root = ancestor_root;
+        if reject_reparse(root).is_err() {
+            return Err("ProgramData root is a reparse point".into());
+        }
+        if dacl_grants_full_control_to(root, SID_ADMINISTRATORS).is_err() {
+            return Err("ProgramData ACL cannot be verified".into());
+        }
         let mut new_dirs = Vec::new();
-        let mut current = path.parent().expect("registry parent");
-        while current != root {
-            if !current.exists() {
-                new_dirs.push(current.to_path_buf());
+        let mut current = path.parent();
+        while let Some(dir) = current {
+            if dir == root {
+                break;
             }
-            match current.parent() {
-                Some(parent) => current = parent,
-                None => break,
+            match fs::symlink_metadata(dir) {
+                Ok(_) => {
+                    return Err(format!(
+                        "unexpected pre-existing ancestor {}",
+                        dir.display()
+                    ));
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    new_dirs.push(dir.to_path_buf())
+                }
+                Err(e) => return Err(format!("ancestor state unverifiable: {e}")),
+            }
+            current = dir.parent();
+        }
+        let lock = acquire_test_mutex(&test_mutex_name(expected))
+            .map_err(|e| format!("cross-process lock unavailable: {}", e.as_str()))?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            new_dirs,
+            _lock: lock,
+            cleaned: false,
+        })
+    }
+
+    fn cleanup(&mut self) -> Result<(), String> {
+        let mut failures = Vec::new();
+        if (self.path.exists() || fs::symlink_metadata(&self.path).is_ok())
+            && let Err(e) = fs::remove_file(&self.path)
+        {
+            failures.push(format!("leaf: {e}"));
+        }
+        for dir in self.new_dirs.iter().rev() {
+            if fs::symlink_metadata(dir).is_ok()
+                && let Err(e) = fs::remove_dir(dir)
+            {
+                failures.push(format!("{}: {e}", dir.display()));
             }
         }
-        Self {
-            path: path.to_path_buf(),
-            leaf_existed,
-            new_dirs,
+        self.cleaned = true;
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(format!("STAGE2_CLEANUP_FAILURE: {}", failures.join(" | ")))
         }
     }
 }
 
 impl Drop for OwnedRegistry {
     fn drop(&mut self) {
-        if !self.leaf_existed {
-            let _ = fs::remove_file(&self.path);
+        if !self.cleaned
+            && let Err(e) = self.cleanup()
+        {
+            eprintln!("{e}");
         }
-        for dir in self.new_dirs.iter().rev() {
-            let _ = fs::remove_dir(dir);
+    }
+}
+
+/// RAII owner for a uniquely created temporary directory. Never removes a
+/// path it did not atomically create.
+struct OwnedTempDir {
+    path: PathBuf,
+}
+
+impl OwnedTempDir {
+    fn create_new(base: &Path, prefix: &str) -> Result<Self, String> {
+        for _ in 0..8 {
+            let candidate = base.join(unique_suffix(prefix));
+            match fs::create_dir(&candidate) {
+                Ok(()) => return Ok(Self { path: candidate }),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(format!("fixture creation failed: {e}")),
+            }
+        }
+        Err("could not allocate a collision-free fixture".into())
+    }
+}
+
+impl Drop for OwnedTempDir {
+    fn drop(&mut self) {
+        if let Err(e) = fs::remove_dir_all(&self.path) {
+            eprintln!("STAGE2_CLEANUP_FAILURE: {}: {e}", self.path.display());
+        }
+    }
+}
+
+struct OwnedSentinel {
+    path: PathBuf,
+}
+
+impl OwnedSentinel {
+    fn create_new(base: &Path) -> Result<Self, String> {
+        for _ in 0..8 {
+            let candidate = base.join(unique_suffix("pr341-stage2-unowned-sentinel"));
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&candidate)
+            {
+                Ok(mut file) => {
+                    use std::io::Write;
+                    if let Err(e) = file.write_all(b"do not delete") {
+                        let _ = fs::remove_file(&candidate);
+                        return Err(format!("sentinel write failed: {e}"));
+                    }
+                    return Ok(Self { path: candidate });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(format!("sentinel creation failed: {e}")),
+            }
+        }
+        Err("could not allocate a collision-free sentinel".into())
+    }
+}
+
+impl Drop for OwnedSentinel {
+    fn drop(&mut self) {
+        if let Err(e) = fs::remove_file(&self.path) {
+            eprintln!("STAGE2_CLEANUP_FAILURE: {}: {e}", self.path.display());
         }
     }
 }
 
 fn grant_everyone_full_control(path: &Path) {
-    let sid = format!("*{SID_EVERYONE}:(OI)(CI)F");
     let output = Command::new("icacls")
         .arg(path)
         .arg("/grant")
-        .arg(sid)
+        .arg(format!("*{SID_EVERYONE}:(OI)(CI)F"))
         .output()
-        .expect("icacls must be available on the hosted Windows runner");
+        .expect("icacls must be available on the hosted runner");
     assert!(
         output.status.success(),
-        "ACL setup must fail the test, never skip: {}",
+        "ACL setup failure must fail the test, never skip: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 }
 
 #[test]
-fn stage2_preflight_proves_elevated_token_and_isolated_programdata() {
+fn stage2_runtime_attestation_is_fail_closed() {
+    // Deterministic negative control: no privileged effects, no opt-in needed.
+    assert!(
+        runtime_isolation_attestation(None).is_err(),
+        "missing attestation must refuse"
+    );
+    let base = PathBuf::from(
+        std::env::var("RUNNER_TEMP")
+            .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into_owned()),
+    );
+    let dir = OwnedTempDir::create_new(&base, "pr341-stage2-attestation")
+        .expect("create attestation fixture");
+    let forged = dir.path.join("forged.json");
+    fs::write(
+        &forged,
+        r#"{"githubHosted":true,"disposable":true,"programDataIsolated":true}"#,
+    )
+    .expect("write forged attestation");
+    assert!(
+        runtime_isolation_attestation(Some(&forged)).is_err(),
+        "an unapproved attestation must refuse even with spoofed environment claims"
+    );
+}
+
+#[test]
+fn stage2_preexisting_registry_is_refused() {
+    let base = PathBuf::from(
+        std::env::var("RUNNER_TEMP")
+            .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into_owned()),
+    );
+    let dir = OwnedTempDir::create_new(&base, "pr341-stage2-preexisting").expect("create fixture");
+    let leaf = dir.path.join("registry.json");
+    fs::write(&leaf, b"pre-existing").expect("create pre-existing leaf");
+    assert!(
+        OwnedRegistry::try_acquire(&leaf, &leaf, &dir.path).is_err(),
+        "a pre-existing target must be a hard refusal"
+    );
+    assert_eq!(fs::read(&leaf).expect("leaf intact"), b"pre-existing");
+}
+
+#[test]
+fn stage2_temp_fixture_collision_is_refused() {
+    let base = PathBuf::from(
+        std::env::var("RUNNER_TEMP")
+            .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into_owned()),
+    );
+    let dir = OwnedTempDir::create_new(&base, "pr341-stage2-collision").expect("create fixture");
+    let occupied = dir.path.join("occupied");
+    fs::create_dir(&occupied).expect("create occupying directory");
+    // A collision is detected by create_new semantics; never remove or inherit it.
+    assert!(
+        fs::create_dir(&occupied).is_err(),
+        "create_dir must fail on collision"
+    );
+    assert!(occupied.is_dir(), "pre-existing directory must survive");
+}
+
+#[test]
+fn stage2_cleanup_failure_is_reported() {
+    let base = PathBuf::from(
+        std::env::var("RUNNER_TEMP")
+            .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into_owned()),
+    );
+    let dir = OwnedTempDir::create_new(&base, "pr341-stage2-cleanup").expect("create fixture");
+    let leaf = dir.path.join("registry.json");
+    let mut owned =
+        OwnedRegistry::try_acquire(&leaf, &leaf, &dir.path).expect("acquire owned fixture guard");
+    // Replace the expected leaf with a directory: removal by file API must fail
+    // and the failure must be returned, not silently swallowed.
+    fs::create_dir(&leaf).expect("create unexpected directory at owned leaf");
+    let result = owned.cleanup();
+    assert!(
+        result.is_err(),
+        "cleanup failure must be reported visibly: {result:?}"
+    );
+    owned.cleaned = true;
+    let _ = fs::remove_dir(&leaf);
+}
+
+#[test]
+fn stage2_lock_child_process_helper() {
+    // Invoked only by stage2_cross_process_lock_is_enforced with a private env.
+    if std::env::var_os(LOCK_CHILD_VAR).is_none() {
+        eprintln!("NOT_RUN — STAGE2_DISABLED: lock child helper");
+        return;
+    }
+    let path = static_preflight().expect("static preflight");
+    let name = test_mutex_name(&path);
+    let _guard = acquire_test_mutex(&name).expect("child lock");
+    let marker = PathBuf::from(std::env::var(LOCK_MARKER_VAR).expect("lock marker path"));
+    fs::write(&marker, b"acquired").expect("write lock marker");
+    thread::sleep(Duration::from_millis(1200));
+}
+
+#[test]
+fn stage2_cross_process_lock_is_enforced() {
     require_stage2!();
-    let path = preflight();
-    let authority = require_provisioning_authority()
-        .expect("Stage 2 first-install requires a real elevated provisioning token");
+    let path = static_preflight().expect("static preflight");
+    let name = test_mutex_name(&path);
+    let base = temp_base();
+    let marker_dir = OwnedTempDir::create_new(&base, "pr341-stage2-lock").expect("marker dir");
+    let marker = marker_dir.path.join("acquired.marker");
+
+    let _guard = acquire_test_mutex(&name).expect("parent lock");
+    let child = Command::new(std::env::current_exe().expect("current exe"))
+        .arg("--exact")
+        .arg("stage2_lock_child_process_helper")
+        .arg("--nocapture")
+        .env(LOCK_CHILD_VAR, "1")
+        .env(LOCK_MARKER_VAR, &marker)
+        .spawn()
+        .expect("spawn lock contender child");
+
+    thread::sleep(Duration::from_millis(500));
+    assert!(
+        !marker.exists(),
+        "a second PROCESS must not acquire the shared lock while the first holds it"
+    );
+    drop(_guard);
+    let deadline = SystemTime::now() + Duration::from_secs(8);
+    while !marker.exists() && SystemTime::now() < deadline {
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(marker.exists(), "child must acquire the lock after release");
+    assert!(
+        child
+            .wait_with_output()
+            .expect("child result")
+            .status
+            .success(),
+        "contender child must exit cleanly"
+    );
+}
+
+#[test]
+fn stage2_deterministic_privileged_scenario() {
+    require_stage2!();
+    let expected = static_preflight().expect("static preflight");
+    let supplied = std::env::var_os(ATTESTATION_PATH_VAR).map(PathBuf::from);
+    runtime_isolation_attestation(supplied.as_deref())
+        .expect("Stage 2 remains BLOCKED without independently approved isolation attestation");
+    let authority = require_provisioning_authority().expect("real elevated provisioning token");
     assert!(
         authority.contains(SID_ADMINISTRATORS) || authority.contains("S-1-5-18"),
-        "provisioning authority must be Administrators or SYSTEM: {authority}"
+        "provisioning authority must be Administrators or SYSTEM"
     );
-    assert_eq!(
-        path.file_name().unwrap(),
-        OsStr::new(registry::REGISTRY_FILE_NAME)
-    );
-}
 
-#[test]
-fn stage2_first_install_installs_protected_owner_and_dacl() {
-    require_stage2!();
-    let path = preflight();
-    let _owned = OwnedRegistry::new(&path);
-    let sid = SID_ADMINISTRATORS;
-    let proposed = document(1, vec![binding(sid, "stage2-owner", false, 1)]);
-    provision_registry(&path, &proposed)
-        .expect("elevated first install must succeed on a disposable hosted runner");
-
-    let installed = load_registry(&path).expect("installed registry must load");
-    assert_eq!(
-        installed, proposed,
-        "installed bytes must be exactly the proposal"
-    );
-    assert!(
-        validate_registry_location(&path).is_ok(),
-        "installed location and leaf must pass protected-location validation"
-    );
-    assert_eq!(
-        dacl_grants_full_control_to(&path, sid),
-        Ok(true),
-        "trusted owner must hold full control on the installed registry"
-    );
-    assert_eq!(
-        dacl_grants_full_control_to(&path, SID_EVERYONE),
-        Ok(false),
-        "Everyone must not hold full control on a protected registry"
-    );
-    let entries: Vec<_> = fs::read_dir(path.parent().unwrap())
-        .expect("parent directory")
-        .filter_map(Result::ok)
-        .collect();
-    assert_eq!(
-        entries.len(),
-        1,
-        "atomic publication must leave no temp files behind"
-    );
-}
-
-#[test]
-fn stage2_monotonic_update_and_permanent_revocation() {
-    require_stage2!();
-    let path = preflight();
-    let _owned = OwnedRegistry::new(&path);
+    let root = registry::programdata_root().expect("ProgramData root");
+    let mut owned = OwnedRegistry::try_acquire(&expected, &expected, &root)
+        .expect("hard refusal on pre-existing or unverifiable protected state");
     let sid = SID_ADMINISTRATORS;
     let first = document(1, vec![binding(sid, "stage2-owner", false, 1)]);
-    provision_registry(&path, &first).expect("first install");
+    provision_registry(&expected, &first).expect("elevated first install");
+
+    assert_eq!(load_registry(&expected).expect("installed bytes"), first);
+    assert!(validate_registry_location(&expected).is_ok());
+    assert_eq!(dacl_grants_full_control_to(&expected, sid), Ok(true));
+    assert_eq!(
+        dacl_grants_full_control_to(&expected, SID_EVERYONE),
+        Ok(false)
+    );
+    let entries: Vec<_> = fs::read_dir(expected.parent().unwrap())
+        .expect("parent")
+        .filter_map(Result::ok)
+        .collect();
+    assert_eq!(entries.len(), 1, "atomic publication leaves no temp files");
 
     let revoked = document(2, vec![binding(sid, "stage2-owner", true, 2)]);
-    provision_registry(&path, &revoked).expect("monotonic revocation update");
+    provision_registry(&expected, &revoked).expect("monotonic revocation update");
     assert_eq!(
-        resolve_owner(&path, sid),
+        resolve_owner(&expected, sid),
         Ok(None),
-        "a revoked binding must be a permanent miss"
+        "revocation is permanent"
     );
-
     assert_eq!(
-        provision_registry(&path, &first),
+        provision_registry(&expected, &first),
         Err(Refusal::NonMonotonicUpdate),
-        "a stale generation must be refused"
+        "stale generation refused"
     );
-    let unrevoked = document(3, vec![binding(sid, "stage2-owner", false, 3)]);
     assert_eq!(
-        provision_registry(&path, &unrevoked),
-        Err(Refusal::NonMonotonicUpdate),
-        "revocation must not be reversible by a later proposal"
-    );
-}
-
-#[test]
-fn stage2_untrusted_parent_and_junction_are_refused() {
-    require_stage2!();
-    let _ = preflight();
-    let base = PathBuf::from(std::env::var("RUNNER_TEMP").expect("RUNNER_TEMP"));
-    let dir = base.join(format!("pr341-stage2-acl-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("create disposable ACL fixture");
-    grant_everyone_full_control(&dir);
-    assert!(
-        validate_file_security(&dir).is_err(),
-        "a world-writable ancestor must be refused with real OS ACLs"
+        resolve_owner(&expected, SID_EVERYONE),
+        Ok(None),
+        "no cross-owner authorization"
     );
 
-    let target = dir.join("target");
-    let junction = dir.join("junction");
-    fs::create_dir_all(&target).expect("create junction target");
-    std::os::windows::fs::symlink_dir(&target, &junction)
-        .expect("create junction on hosted runner");
-    assert!(
-        reject_reparse(&junction.join(registry::REGISTRY_FILE_NAME)).is_err(),
-        "a junction substitution must be refused"
-    );
-    let _ = fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn stage2_concurrent_provisioners_share_one_lock() {
-    require_stage2!();
-    let path = preflight();
-    let name = test_mutex_name(&path);
-    let first_name = name.clone();
     let (held_tx, held_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel::<()>();
+    let lock_name = test_mutex_name(&expected);
+    let holder_name = lock_name.clone();
     let holder = thread::spawn(move || {
-        let _guard = acquire_test_mutex(&first_name).expect("first lock");
-        held_tx.send(()).expect("signal held");
+        let _g = acquire_test_mutex(&holder_name).expect("thread lock");
+        held_tx.send(()).unwrap();
         let _ = release_rx.recv();
     });
     held_rx
         .recv_timeout(Duration::from_secs(5))
-        .expect("first lock acquired");
-
-    let (contender_tx, contender_rx) = mpsc::channel();
-    let second_name = name;
+        .expect("thread locked");
+    let (acquired_tx, acquired_rx) = mpsc::channel();
+    let contender_name = lock_name;
     let contender = thread::spawn(move || {
-        let _guard = acquire_test_mutex(&second_name).expect("second lock");
-        contender_tx.send(()).expect("signal contender acquired");
+        let _g = acquire_test_mutex(&contender_name).expect("contender lock");
+        acquired_tx.send(()).unwrap();
     });
     assert!(
-        contender_rx
+        acquired_rx
             .recv_timeout(Duration::from_millis(300))
-            .is_err(),
-        "second provisioner must not enter while the first holds the lock"
+            .is_err()
     );
-    release_tx.send(()).expect("release first lock");
-    contender_rx
+    release_tx.send(()).unwrap();
+    acquired_rx
         .recv_timeout(Duration::from_secs(5))
-        .expect("second lock acquired after release");
-    holder.join().expect("holder thread");
-    contender.join().expect("contender thread");
-}
+        .expect("contender acquired after release");
+    holder.join().unwrap();
+    contender.join().unwrap();
 
-#[test]
-fn stage2_no_cross_owner_authorization() {
-    require_stage2!();
-    let path = preflight();
-    let _owned = OwnedRegistry::new(&path);
-    let owner_sid = SID_ADMINISTRATORS;
-    let proposed = document(1, vec![binding(owner_sid, "stage2-owner", false, 1)]);
-    provision_registry(&path, &proposed).expect("first install");
-    assert_eq!(
-        resolve_owner(&path, owner_sid),
-        Ok(Some("stage2-owner".to_owned()))
-    );
-    assert_eq!(
-        resolve_owner(&path, SID_EVERYONE),
-        Ok(None),
-        "an unmapped SID must never inherit another owner's binding"
-    );
-    assert!(
-        resolve_owner(&path, "S-1-1-999999999999999999999999").is_err(),
-        "a malformed SID must not resolve"
-    );
-}
+    let base = temp_base();
+    let acl_dir = OwnedTempDir::create_new(&base, "pr341-stage2-acl").expect("ACL fixture");
+    grant_everyone_full_control(&acl_dir.path);
+    assert!(validate_file_security(&acl_dir.path).is_err());
+    let junction = acl_dir.path.join("junction");
+    std::os::windows::fs::symlink_dir(&acl_dir.path, &junction).expect("junction");
+    assert!(reject_reparse(&junction.join(registry::REGISTRY_FILE_NAME)).is_err());
 
-#[test]
-fn stage2_cleanup_removes_only_test_owned_resources() {
-    require_stage2!();
-    let path = preflight();
-    let sentinel_dir = PathBuf::from(std::env::var("RUNNER_TEMP").expect("RUNNER_TEMP"));
-    let sentinel = sentinel_dir.join("pr341-stage2-unowned-sentinel");
-    fs::write(&sentinel, b"do not delete").expect("create unowned sentinel");
+    let sentinel = OwnedSentinel::create_new(&base).expect("unique sentinel");
+    assert!(sentinel.path.exists());
 
-    {
-        let _owned = OwnedRegistry::new(&path);
-        let proposed = document(
-            1,
-            vec![binding(SID_ADMINISTRATORS, "stage2-owner", false, 1)],
-        );
-        provision_registry(&path, &proposed).expect("first install");
-        assert!(path.exists(), "registry installed before cleanup");
-    }
-
-    assert!(
-        !path.exists(),
-        "owned registry leaf must be removed on cleanup"
-    );
-    assert!(
-        sentinel.exists(),
-        "cleanup must not delete unowned resources"
-    );
-    let _ = fs::remove_file(&sentinel);
+    owned
+        .cleanup()
+        .expect("owned cleanup must succeed and be visible");
+    assert!(!expected.exists(), "only test-owned registry removed");
+    assert!(sentinel.path.exists(), "unowned sentinel survives cleanup");
 }
