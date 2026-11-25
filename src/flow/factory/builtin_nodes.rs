@@ -1191,15 +1191,15 @@ impl FileWriterNode {
     }
 }
 
-/// Resolve completion across both idempotency-key versions.
+/// Resolve prior outbox state across both idempotency-key versions.
 ///
-/// A canonical PENDING row must not hide a legacy COMPLETED row: that would
-/// re-execute an effect whose receipt was already recorded before the key
-/// format migration. Pending/uncertain rows are deliberately ignored; only a
-/// completed row can authorize cached-result reuse. Two completed rows with
-/// different receipts are a conflict, not a random selection, and fail closed.
-/// Database errors are propagated rather than treated as "no prior effect".
-fn find_completed_outbox_entry(
+/// Only a COMPLETED receipt authorizes cached reuse. A PENDING row is an
+/// unresolved prior attempt (for example, a crash after the filesystem effect
+/// but before acknowledgement) and must never authorize re-execution. Multiple
+/// completed receipts with different outputs fail closed rather than selecting
+/// one arbitrarily. All rows for each key are inspected, so duplicate claims
+/// cannot hide behind `query_row` returning only the first match.
+fn resolve_outbox_claim(
     db: &crate::db::repository::Db,
     run_id: &str,
     node_id: &str,
@@ -1207,11 +1207,16 @@ fn find_completed_outbox_entry(
     legacy_key: &str,
 ) -> anyhow::Result<Option<crate::db::repository::OutboxEntry>> {
     let mut completed = Vec::new();
+    let mut pending = 0usize;
     for key in [canonical_key, legacy_key] {
-        if let Some(entry) = OutboxOperations::get_outbox_entry_by_hash(db, run_id, node_id, key)?
-            && entry.status == "completed"
-        {
-            completed.push(entry);
+        for entry in OutboxOperations::list_outbox_entries_by_hash(db, run_id, node_id, key)? {
+            match entry.status.as_str() {
+                "completed" => completed.push(entry),
+                "pending" => pending += 1,
+                other => {
+                    anyhow::bail!("unknown outbox status {other} for run {run_id} node {node_id}")
+                }
+            }
         }
     }
     if completed.len() > 1 {
@@ -1226,7 +1231,15 @@ fn find_completed_outbox_entry(
             );
         }
     }
-    Ok(completed.into_iter().next())
+    if let Some(entry) = completed.into_iter().next() {
+        return Ok(Some(entry));
+    }
+    if pending > 0 {
+        anyhow::bail!(
+            "unresolved prior outbox claim ({pending}) for run {run_id} node {node_id}; refusing to re-execute an uncertain effect"
+        );
+    }
+    Ok(None)
 }
 
 #[async_trait::async_trait]
@@ -1345,7 +1358,7 @@ impl Node for FileWriterNode {
         }
         let db_path = db_path.to_string_lossy().into_owned();
         let db = crate::db::repository::Db::new(&db_path)?;
-        if let Some(entry) = find_completed_outbox_entry(
+        if let Some(entry) = resolve_outbox_claim(
             &db,
             &context.run_id,
             &context.node_id,
@@ -1363,9 +1376,9 @@ impl Node for FileWriterNode {
             }));
         }
 
-        // Create outbox entry for this operation. A failure here must not be
-        // followed by an unrecorded side effect.
-        OutboxOperations::create_outbox_entry(
+        // Atomically create the single pending admission record. A competing or
+        // duplicate claim fails before any side effect.
+        let claim = OutboxOperations::claim_outbox_entry(
             &db,
             &context.run_id,
             &context.trace_id,
@@ -1378,26 +1391,19 @@ impl Node for FileWriterNode {
         std::fs::write(file_path, content)
             .with_context(|| format!("Failed to write file: {}", file_path))?;
 
-        // Mark outbox entry as completed. Errors here leave the effect uncertain
-        // and must be surfaced rather than silently reported as a clean write.
+        // Mark the exact claimed row as completed. A zero-row update is an
+        // error: the effect happened but is not durably acknowledged.
         let db = crate::db::repository::Db::new(&db_path)?;
-        if let Some(entry) = OutboxOperations::get_outbox_entry_by_hash(
+        OutboxOperations::mark_outbox_completed_checked(
             &db,
-            &context.run_id,
-            &context.node_id,
-            &idempotency_key.key,
-        )? {
-            OutboxOperations::mark_outbox_completed(
-                &db,
-                &entry.id,
-                &serde_json::json!({
-                    "success": true,
-                    "file_path": file_path,
-                    "bytes_written": content.len()
-                })
-                .to_string(),
-            )?;
-        }
+            &claim.id,
+            &serde_json::json!({
+                "success": true,
+                "file_path": file_path,
+                "bytes_written": content.len()
+            })
+            .to_string(),
+        )?;
 
         Ok(serde_json::json!({
             "success": true,

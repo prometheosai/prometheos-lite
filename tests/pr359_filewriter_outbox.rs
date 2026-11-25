@@ -170,18 +170,16 @@ async fn dual_version_outbox_lookup_cases() -> Result<()> {
     );
     assert!(!e.written(), "conflict must not execute the effect");
 
-    // 7. neither version completed -> real execution, canonical-only new write.
+    // 7. neither version completed but a pending claim exists: an unresolved
+    //    prior attempt must block re-execution (crash-after-effect boundary).
     let e = env("neither-completed")?;
     let db = e.db()?;
     e.pending(&db, &e.legacy)?;
-    let out = e.exec().await?;
-    assert_eq!(out["from_cache"], json!(false));
-    assert!(e.written(), "pending is not completion");
-    let entry = e
-        .db()?
-        .get_outbox_entry_by_hash(&e.run_id, &e.node_id, &e.canonical)?
-        .expect("canonical outbox entry created");
-    assert_eq!(entry.status, "completed", "new writes must be canonical");
+    assert!(
+        e.exec().await.is_err(),
+        "a pending claim must not be treated as completion"
+    );
+    assert!(!e.written(), "uncertain effect must not be re-executed");
 
     // 8. database lookup errors fail closed (unusable database file).
     let e = env("db-lookup-error")?;
