@@ -1261,23 +1261,46 @@ impl Node for FileWriterNode {
             "file_writer",
             &serde_json::json!({"path": file_path, "content": content}),
         );
+        #[allow(deprecated)]
+        let legacy_key = crate::flow::IdempotencyKey::compute_legacy_key(
+            &context.run_id,
+            &context.node_id,
+            &operation_hash,
+        );
         let idempotency_key = crate::flow::IdempotencyKey::new(
             context.run_id.clone(),
             context.node_id.clone(),
             operation_hash,
         );
 
-        // Check outbox for duplicate operation
+        // Check outbox for duplicate operation. Canonical keys are used for all
+        // new entries; the legacy key is still consulted so a completed entry
+        // written before the v2 encoding remains readable instead of causing a
+        // duplicate file write after upgrade.
         let db_path = ".prometheos/runs.db";
         if std::path::Path::new(db_path).exists()
             && let Ok(db) = crate::db::repository::Db::new(db_path)
         {
-            if let Ok(existing) = OutboxOperations::get_outbox_entry_by_hash(
+            let existing = OutboxOperations::get_outbox_entry_by_hash(
                 &db,
                 &context.run_id,
                 &context.node_id,
                 &idempotency_key.key,
-            ) && let Some(entry) = existing
+            )
+            .ok()
+            .flatten()
+            .or_else(|| {
+                OutboxOperations::get_outbox_entry_by_hash(
+                    &db,
+                    &context.run_id,
+                    &context.node_id,
+                    &legacy_key,
+                )
+                .ok()
+                .flatten()
+            });
+
+            if let Some(entry) = existing
                 && entry.status == "completed"
             {
                 // Return cached result instead of re-executing
