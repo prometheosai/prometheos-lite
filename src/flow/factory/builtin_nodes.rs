@@ -1174,6 +1174,44 @@ impl FileWriterNode {
     }
 }
 
+/// Resolve completion across both idempotency-key versions.
+///
+/// A canonical PENDING row must not hide a legacy COMPLETED row: that would
+/// re-execute an effect whose receipt was already recorded before the key
+/// format migration. Pending/uncertain rows are deliberately ignored; only a
+/// completed row can authorize cached-result reuse. Two completed rows with
+/// different receipts are a conflict, not a random selection, and fail closed.
+/// Database errors are propagated rather than treated as "no prior effect".
+fn find_completed_outbox_entry(
+    db: &crate::db::repository::Db,
+    run_id: &str,
+    node_id: &str,
+    canonical_key: &str,
+    legacy_key: &str,
+) -> anyhow::Result<Option<crate::db::repository::OutboxEntry>> {
+    let mut completed = Vec::new();
+    for key in [canonical_key, legacy_key] {
+        if let Some(entry) = OutboxOperations::get_outbox_entry_by_hash(db, run_id, node_id, key)?
+            && entry.status == "completed"
+        {
+            completed.push(entry);
+        }
+    }
+    if completed.len() > 1 {
+        let first = completed[0].output.as_deref();
+        if completed
+            .iter()
+            .skip(1)
+            .any(|entry| entry.output.as_deref() != first)
+        {
+            anyhow::bail!(
+                "conflicting completed outbox receipts for run {run_id} node {node_id}; refusing to choose one"
+            );
+        }
+    }
+    Ok(completed.into_iter().next())
+}
+
 #[async_trait::async_trait]
 impl Node for FileWriterNode {
     fn id(&self) -> String {
@@ -1273,36 +1311,21 @@ impl Node for FileWriterNode {
             operation_hash,
         );
 
-        // Check outbox for duplicate operation. Canonical keys are used for all
-        // new entries; the legacy key is still consulted so a completed entry
-        // written before the v2 encoding remains readable instead of causing a
-        // duplicate file write after upgrade.
+        // Check outbox for a completed receipt under either key format. Canonical
+        // keys are used for all new entries; the legacy key is consulted only to
+        // find a receipt written before the v2 encoding. A pending row under one
+        // key never suppresses a completed row under the other, and a database
+        // error is never treated as absence.
         let db_path = ".prometheos/runs.db";
-        if std::path::Path::new(db_path).exists()
-            && let Ok(db) = crate::db::repository::Db::new(db_path)
-        {
-            let existing = OutboxOperations::get_outbox_entry_by_hash(
+        if std::path::Path::new(db_path).exists() {
+            let db = crate::db::repository::Db::new(db_path)?;
+            if let Some(entry) = find_completed_outbox_entry(
                 &db,
                 &context.run_id,
                 &context.node_id,
                 &idempotency_key.key,
-            )
-            .ok()
-            .flatten()
-            .or_else(|| {
-                OutboxOperations::get_outbox_entry_by_hash(
-                    &db,
-                    &context.run_id,
-                    &context.node_id,
-                    &legacy_key,
-                )
-                .ok()
-                .flatten()
-            });
-
-            if let Some(entry) = existing
-                && entry.status == "completed"
-            {
+                &legacy_key,
+            )? {
                 // Return cached result instead of re-executing
                 return Ok(serde_json::json!({
                     "success": true,
@@ -1314,42 +1337,43 @@ impl Node for FileWriterNode {
                 }));
             }
 
-            // Create outbox entry for this operation
-            let _ = OutboxOperations::create_outbox_entry(
+            // Create outbox entry for this operation. A failure here must not
+            // be followed by an unrecorded side effect.
+            OutboxOperations::create_outbox_entry(
                 &db,
                 &context.run_id,
                 &context.trace_id,
                 &context.node_id,
                 "file_writer",
                 &idempotency_key.key,
-            );
+            )?;
         }
 
         // Proceed with write
         std::fs::write(file_path, content)
             .with_context(|| format!("Failed to write file: {}", file_path))?;
 
-        // Mark outbox entry as completed
-        if std::path::Path::new(db_path).exists()
-            && let Ok(db) = crate::db::repository::Db::new(db_path)
-            && let Ok(entry) = OutboxOperations::get_outbox_entry_by_hash(
+        // Mark outbox entry as completed. Errors here leave the effect uncertain
+        // and must be surfaced rather than silently reported as a clean write.
+        if std::path::Path::new(db_path).exists() {
+            let db = crate::db::repository::Db::new(db_path)?;
+            if let Some(entry) = OutboxOperations::get_outbox_entry_by_hash(
                 &db,
                 &context.run_id,
                 &context.node_id,
                 &idempotency_key.key,
-            )
-            && let Some(ref entry) = entry
-        {
-            let _ = OutboxOperations::mark_outbox_completed(
-                &db,
-                &entry.id,
-                &serde_json::json!({
-                    "success": true,
-                    "file_path": file_path,
-                    "bytes_written": content.len()
-                })
-                .to_string(),
-            );
+            )? {
+                OutboxOperations::mark_outbox_completed(
+                    &db,
+                    &entry.id,
+                    &serde_json::json!({
+                        "success": true,
+                        "file_path": file_path,
+                        "bytes_written": content.len()
+                    })
+                    .to_string(),
+                )?;
+            }
         }
 
         Ok(serde_json::json!({
