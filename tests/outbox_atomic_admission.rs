@@ -180,3 +180,191 @@ async fn admission_regressions() -> Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn concurrent_canonical_claims_admit_one_effect() -> Result<()> {
+    use std::sync::{Arc, Barrier};
+
+    let e = env("concurrent-canonical")?;
+    let _ = e.db()?;
+    let barrier = Arc::new(Barrier::new(2));
+    let db_path = Arc::new(e.db_path.clone());
+    let canonical = Arc::new(e.canonical.clone());
+    let run_id = Arc::new(e.run_id.clone());
+    let node_id = Arc::new(e.node_id.clone());
+
+    let outcomes: Vec<anyhow::Result<String>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let barrier = barrier.clone();
+                let db_path = db_path.clone();
+                let canonical = canonical.clone();
+                let run_id = run_id.clone();
+                let node_id = node_id.clone();
+                let input = e.input.clone();
+                scope.spawn(move || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .build()
+                        .expect("test runtime");
+                    barrier.wait();
+                    runtime.block_on(async {
+                        let out = FileWriterNode::with_outbox_db_path(
+                            NodeConfig::default(),
+                            PathBuf::from(db_path.as_ref()),
+                        )
+                        .exec(input)
+                        .await?;
+                        let _ = (&*canonical, &*run_id, &*node_id);
+                        Ok(format!("from_cache={}", out["from_cache"]))
+                    })
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("contender thread panicked"))
+            .collect()
+    });
+
+    let admitted = outcomes
+        .iter()
+        .filter(|result| matches!(result, Ok(value) if value == "from_cache=false"))
+        .count();
+    let cached = outcomes
+        .iter()
+        .filter(|result| matches!(result, Ok(value) if value == "from_cache=true"))
+        .count();
+    assert_eq!(
+        admitted, 1,
+        "exactly one effect must be admitted: {outcomes:?}"
+    );
+    assert_eq!(
+        cached, 1,
+        "the loser must reuse the winner's receipt: {outcomes:?}"
+    );
+
+    let fresh = e.db()?;
+    let claims = fresh.list_outbox_entries_by_hash(&e.run_id, &e.node_id, &e.canonical)?;
+    assert_eq!(claims.len(), 1, "only one durable claim may exist");
+    assert_eq!(claims[0].status, "completed");
+    Ok(())
+}
+
+#[test]
+fn canonical_versus_legacy_claim_race_admits_one_claim() -> Result<()> {
+    use std::sync::{Arc, Barrier};
+
+    let e = env("canonical-vs-legacy-race")?;
+    let _ = e.db()?;
+    let barrier = Arc::new(Barrier::new(2));
+    let db_path = Arc::new(e.db_path.clone());
+    let legacy = Arc::new(e.legacy.clone());
+    let run_id = Arc::new(e.run_id.clone());
+    let node_id = Arc::new(e.node_id.clone());
+    let input = e.input.clone();
+
+    let outcomes: Vec<anyhow::Result<String>> = std::thread::scope(|scope| {
+        let file_handle = {
+            let barrier = barrier.clone();
+            let db_path = db_path.clone();
+            let input = input.clone();
+            scope.spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .expect("test runtime");
+                barrier.wait();
+                runtime.block_on(async {
+                    let out = FileWriterNode::with_outbox_db_path(
+                        NodeConfig::default(),
+                        PathBuf::from(db_path.as_ref()),
+                    )
+                    .exec(input)
+                    .await?;
+                    Ok(format!("file:{}", out["from_cache"]))
+                })
+            })
+        };
+        let legacy_handle = {
+            let barrier = barrier.clone();
+            let db_path = db_path.clone();
+            let legacy = legacy.clone();
+            let run_id = run_id.clone();
+            let node_id = node_id.clone();
+            scope.spawn(move || {
+                let db = Db::new(db_path.to_str().context("non-UTF8 path")?)?;
+                barrier.wait();
+                match OutboxOperations::claim_outbox_entry(
+                    &db,
+                    &run_id,
+                    "legacy-trace",
+                    &node_id,
+                    "file_writer",
+                    &legacy,
+                ) {
+                    Ok(_) => Ok("legacy-claimed".to_string()),
+                    Err(error) => Ok(format!("legacy-refused:{error}")),
+                }
+            })
+        };
+        vec![file_handle, legacy_handle]
+            .into_iter()
+            .map(|handle| handle.join().expect("contender thread panicked"))
+            .collect()
+    });
+
+    let fresh = e.db()?;
+    let canonical_claims =
+        fresh.list_outbox_entries_by_hash(&e.run_id, &e.node_id, &e.canonical)?;
+    let legacy_claims = fresh.list_outbox_entries_by_hash(&e.run_id, &e.node_id, &e.legacy)?;
+    assert_eq!(
+        canonical_claims.len() + legacy_claims.len(),
+        1,
+        "one claim total across both key versions: {outcomes:?}"
+    );
+    let winners = outcomes
+        .iter()
+        .filter(|result| matches!(result, Ok(value) if value == "file:false" || value == "legacy-claimed"))
+        .count();
+    assert_eq!(winners, 1, "exactly one contender wins: {outcomes:?}");
+    Ok(())
+}
+
+#[test]
+fn completed_receipt_cannot_be_overwritten() -> Result<()> {
+    let e = env("overwrite-completed")?;
+    let db = e.db()?;
+    let original = json!({"result": "original"}).to_string();
+    e.completed(&db, &e.canonical, &original)?;
+    let entry = e
+        .db()?
+        .get_outbox_entry_by_hash(&e.run_id, &e.node_id, &e.canonical)?
+        .context("completed entry missing")?;
+    let replacement = json!({"result": "overwrite"}).to_string();
+    assert!(
+        e.db()?
+            .mark_outbox_completed_checked(&entry.id, &replacement)
+            .is_err(),
+        "a completed receipt must not be overwritten"
+    );
+    let after = e
+        .db()?
+        .get_outbox_entry_by_hash(&e.run_id, &e.node_id, &e.canonical)?
+        .context("completed entry disappeared")?;
+    assert_eq!(after.output.as_deref(), Some(original.as_str()));
+    Ok(())
+}
+
+#[test]
+fn malformed_persisted_timestamp_fails_closed() -> Result<()> {
+    let e = env("malformed-timestamp")?;
+    let db = e.db()?;
+    db.conn().execute(
+        "INSERT INTO tool_outbox (id, run_id, trace_id, node_id, tool_name, input_hash, status, created_at) VALUES ('bad-time', ?1, 'trace', ?2, 'file_writer', ?3, 'pending', 'not-a-timestamp')",
+        rusqlite::params![&e.run_id, &e.node_id, &e.canonical],
+    )?;
+    let runtime = tokio::runtime::Builder::new_current_thread().build()?;
+    let result = runtime.block_on(e.exec());
+    assert!(result.is_err(), "malformed persisted data must fail closed");
+    assert!(!e.written());
+    Ok(())
+}

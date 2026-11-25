@@ -1191,57 +1191,6 @@ impl FileWriterNode {
     }
 }
 
-/// Resolve prior outbox state across both idempotency-key versions.
-///
-/// Only a COMPLETED receipt authorizes cached reuse. A PENDING row is an
-/// unresolved prior attempt (for example, a crash after the filesystem effect
-/// but before acknowledgement) and must never authorize re-execution. Multiple
-/// completed receipts with different outputs fail closed rather than selecting
-/// one arbitrarily. All rows for each key are inspected, so duplicate claims
-/// cannot hide behind `query_row` returning only the first match.
-fn resolve_outbox_claim(
-    db: &crate::db::repository::Db,
-    run_id: &str,
-    node_id: &str,
-    canonical_key: &str,
-    legacy_key: &str,
-) -> anyhow::Result<Option<crate::db::repository::OutboxEntry>> {
-    let mut completed = Vec::new();
-    let mut pending = 0usize;
-    for key in [canonical_key, legacy_key] {
-        for entry in OutboxOperations::list_outbox_entries_by_hash(db, run_id, node_id, key)? {
-            match entry.status.as_str() {
-                "completed" => completed.push(entry),
-                "pending" => pending += 1,
-                other => {
-                    anyhow::bail!("unknown outbox status {other} for run {run_id} node {node_id}")
-                }
-            }
-        }
-    }
-    if completed.len() > 1 {
-        let first = completed[0].output.as_deref();
-        if completed
-            .iter()
-            .skip(1)
-            .any(|entry| entry.output.as_deref() != first)
-        {
-            anyhow::bail!(
-                "conflicting completed outbox receipts for run {run_id} node {node_id}; refusing to choose one"
-            );
-        }
-    }
-    if let Some(entry) = completed.into_iter().next() {
-        return Ok(Some(entry));
-    }
-    if pending > 0 {
-        anyhow::bail!(
-            "unresolved prior outbox claim ({pending}) for run {run_id} node {node_id}; refusing to re-execute an uncertain effect"
-        );
-    }
-    Ok(None)
-}
-
 #[async_trait::async_trait]
 impl Node for FileWriterNode {
     fn id(&self) -> String {
@@ -1358,34 +1307,30 @@ impl Node for FileWriterNode {
         }
         let db_path = db_path.to_string_lossy().into_owned();
         let db = crate::db::repository::Db::new(&db_path)?;
-        if let Some(entry) = resolve_outbox_claim(
-            &db,
-            &context.run_id,
-            &context.node_id,
-            &idempotency_key.key,
-            &legacy_key,
-        )? {
-            // Return cached result instead of re-executing
-            return Ok(serde_json::json!({
-                "success": true,
-                "file_path": file_path,
-                "bytes_written": content.len(),
-                "idempotency_key": idempotency_key.key,
-                "from_cache": true,
-                "cached_output": entry.output
-            }));
-        }
-
-        // Atomically create the single pending admission record. A competing or
-        // duplicate claim fails before any side effect.
-        let claim = OutboxOperations::claim_outbox_entry(
+        // Dual-version inspection and canonical admission happen inside one
+        // SQLite IMMEDIATE transaction: competing writers cannot both observe an
+        // empty state and both admit an effect.
+        let claim = match OutboxOperations::admit_outbox_operation(
             &db,
             &context.run_id,
             &context.trace_id,
             &context.node_id,
             "file_writer",
             &idempotency_key.key,
-        )?;
+            &legacy_key,
+        )? {
+            crate::db::repository::OutboxAdmission::Completed(entry) => {
+                return Ok(serde_json::json!({
+                    "success": true,
+                    "file_path": file_path,
+                    "bytes_written": content.len(),
+                    "idempotency_key": idempotency_key.key,
+                    "from_cache": true,
+                    "cached_output": entry.output
+                }));
+            }
+            crate::db::repository::OutboxAdmission::Admitted(entry) => entry,
+        };
 
         // Proceed with write
         std::fs::write(file_path, content)
