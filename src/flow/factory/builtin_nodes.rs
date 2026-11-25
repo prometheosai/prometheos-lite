@@ -855,6 +855,9 @@ impl Node for ToolNode {
 /// FileWriter Node - writes files to disk
 pub struct FileWriterNode {
     config: NodeConfig,
+    /// Optional outbox database override for isolated tests. Production uses
+    /// the documented `.prometheos/runs.db` default via `new()`.
+    db_path: Option<std::path::PathBuf>,
 }
 
 pub struct HarnessRepoMapNode {
@@ -1170,7 +1173,21 @@ impl Node for HarnessContextDistillNode {
 
 impl FileWriterNode {
     pub fn new(config: NodeConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            db_path: None,
+        }
+    }
+
+    /// Construct a node whose durable admission record lives at `path`.
+    /// This only changes the database location for isolated testing; the
+    /// production default and all security behavior remain identical.
+    #[doc(hidden)]
+    pub fn with_outbox_db_path(config: NodeConfig, path: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            config,
+            db_path: Some(path.into()),
+        }
     }
 }
 
@@ -1316,38 +1333,46 @@ impl Node for FileWriterNode {
         // find a receipt written before the v2 encoding. A pending row under one
         // key never suppresses a completed row under the other, and a database
         // error is never treated as absence.
-        let db_path = ".prometheos/runs.db";
-        if std::path::Path::new(db_path).exists() {
-            let db = crate::db::repository::Db::new(db_path)?;
-            if let Some(entry) = find_completed_outbox_entry(
-                &db,
-                &context.run_id,
-                &context.node_id,
-                &idempotency_key.key,
-                &legacy_key,
-            )? {
-                // Return cached result instead of re-executing
-                return Ok(serde_json::json!({
-                    "success": true,
-                    "file_path": file_path,
-                    "bytes_written": content.len(),
-                    "idempotency_key": idempotency_key.key,
-                    "from_cache": true,
-                    "cached_output": entry.output
-                }));
-            }
-
-            // Create outbox entry for this operation. A failure here must not
-            // be followed by an unrecorded side effect.
-            OutboxOperations::create_outbox_entry(
-                &db,
-                &context.run_id,
-                &context.trace_id,
-                &context.node_id,
-                "file_writer",
-                &idempotency_key.key,
-            )?;
+        let db_path = self
+            .db_path
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from(".prometheos/runs.db"));
+        if !db_path.exists() {
+            anyhow::bail!(
+                "outbox database {} is absent; governed durable execution requires durable admission before side effects",
+                db_path.display()
+            );
         }
+        let db_path = db_path.to_string_lossy().into_owned();
+        let db = crate::db::repository::Db::new(&db_path)?;
+        if let Some(entry) = find_completed_outbox_entry(
+            &db,
+            &context.run_id,
+            &context.node_id,
+            &idempotency_key.key,
+            &legacy_key,
+        )? {
+            // Return cached result instead of re-executing
+            return Ok(serde_json::json!({
+                "success": true,
+                "file_path": file_path,
+                "bytes_written": content.len(),
+                "idempotency_key": idempotency_key.key,
+                "from_cache": true,
+                "cached_output": entry.output
+            }));
+        }
+
+        // Create outbox entry for this operation. A failure here must not be
+        // followed by an unrecorded side effect.
+        OutboxOperations::create_outbox_entry(
+            &db,
+            &context.run_id,
+            &context.trace_id,
+            &context.node_id,
+            "file_writer",
+            &idempotency_key.key,
+        )?;
 
         // Proceed with write
         std::fs::write(file_path, content)
@@ -1355,25 +1380,23 @@ impl Node for FileWriterNode {
 
         // Mark outbox entry as completed. Errors here leave the effect uncertain
         // and must be surfaced rather than silently reported as a clean write.
-        if std::path::Path::new(db_path).exists() {
-            let db = crate::db::repository::Db::new(db_path)?;
-            if let Some(entry) = OutboxOperations::get_outbox_entry_by_hash(
+        let db = crate::db::repository::Db::new(&db_path)?;
+        if let Some(entry) = OutboxOperations::get_outbox_entry_by_hash(
+            &db,
+            &context.run_id,
+            &context.node_id,
+            &idempotency_key.key,
+        )? {
+            OutboxOperations::mark_outbox_completed(
                 &db,
-                &context.run_id,
-                &context.node_id,
-                &idempotency_key.key,
-            )? {
-                OutboxOperations::mark_outbox_completed(
-                    &db,
-                    &entry.id,
-                    &serde_json::json!({
-                        "success": true,
-                        "file_path": file_path,
-                        "bytes_written": content.len()
-                    })
-                    .to_string(),
-                )?;
-            }
+                &entry.id,
+                &serde_json::json!({
+                    "success": true,
+                    "file_path": file_path,
+                    "bytes_written": content.len()
+                })
+                .to_string(),
+            )?;
         }
 
         Ok(serde_json::json!({
