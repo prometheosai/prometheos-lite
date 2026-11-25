@@ -124,7 +124,7 @@ hosted_ci_markers: dict[str, Path] = {
 # Never accept an extra workflow, a replaced file, a symlink, or silent re-pinning.
 # local_ci.py remains the authoritative verification system.
 APPROVED_WORKFLOW = ".github/workflows/pr341-windows-acceptance.yml"
-APPROVED_WORKFLOW_SHA256 = "824793f326c4136696eab0b62c9c3a740a558167038edcb1720e6d2c90d2af13"
+APPROVED_WORKFLOW_SHA256 = "c84ce508f34ab61c1fd385dff88c4f02a59f0962630e3b31b2d7603c2371a983"
 REVIEWED_PR341_SHA = "37a7ae33ca21fc25ad0f70f20022cd4a95634bce"
 APPROVED_WORKFLOW_ACTION = "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"
 

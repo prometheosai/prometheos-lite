@@ -58,13 +58,72 @@ jobs:
           $id = [Security.Principal.WindowsIdentity]::GetCurrent()
           $principal = [Security.Principal.WindowsPrincipal]::new($id)
           $isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-          if (-not $isAdmin) { throw 'Runner is not elevated; elevated validation path cannot run' }
           $sid = $id.User.Value
-          if ([string]::IsNullOrWhiteSpace($sid)) { throw 'Elevated token has no SID' }
+          if ([string]::IsNullOrWhiteSpace($sid)) { throw 'Token elevation inspection failed: process token has no SID' }
+
+          # One classification model for the hosted authority context. The
+          # TokenElevation value is read from the actual process token with the
+          # same kernel primitive used by production's
+          # require_provisioning_authority(). Group membership is recorded
+          # separately and is NEVER treated as proof of elevation. A missing
+          # or malformed token observation is INVALID and fails closed.
+          function Get-AuthorityClass {
+            param([int]$TokenIsElevated, [bool]$AdministratorGroupMember, [string]$Sid)
+            if ([string]::IsNullOrWhiteSpace($Sid) -or $TokenIsElevated -lt 0) { return 'INVALID' }
+            if ($TokenIsElevated -eq 1) {
+              if ($AdministratorGroupMember -or $Sid -eq 'S-1-5-18') { return 'ELEVATED' }
+              return 'ELEVATED_NON_ADMIN_MEMBER'
+            }
+            if ($AdministratorGroupMember) { return 'ADMIN_MEMBER_NON_ELEVATED' }
+            return 'UNPRIVILEGED'
+          }
+
+          $nativeSource = @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class Pr341TokenNative {
+          [StructLayout(LayoutKind.Sequential)] public struct TOKEN_ELEVATION { public uint TokenIsElevated; }
+          [DllImport("advapi32.dll", SetLastError=true)] public static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+          [DllImport("advapi32.dll", SetLastError=true)] public static extern bool GetTokenInformation(IntPtr token, int infoClass, out TOKEN_ELEVATION info, int size, out int returned);
+          [DllImport("kernel32.dll")] public static extern IntPtr GetCurrentProcess();
+          [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr handle);
+          }
+          '@
+          if (-not ('Pr341TokenNative' -as [type])) { Add-Type -TypeDefinition $nativeSource -ErrorAction Stop }
+          $tokenHandle = [IntPtr]::Zero
+          if (-not [Pr341TokenNative]::OpenProcessToken([Pr341TokenNative]::GetCurrentProcess(), 0x0008, [ref]$tokenHandle) -or $tokenHandle -eq [IntPtr]::Zero) {
+            throw 'Token elevation inspection failed: OpenProcessToken did not return a process token'
+          }
+          try {
+            $elevation = New-Object Pr341TokenNative+TOKEN_ELEVATION
+            $returned = 0
+            if (-not [Pr341TokenNative]::GetTokenInformation($tokenHandle, 20, [ref]$elevation, 4, [ref]$returned) -or $returned -ne 4) {
+              throw 'Token elevation inspection failed: GetTokenInformation(TokenElevation) was incomplete'
+            }
+            $tokenIsElevated = [int]$elevation.TokenIsElevated
+          } finally { [void][Pr341TokenNative]::CloseHandle($tokenHandle) }
+          if ($tokenIsElevated -ne 0 -and $tokenIsElevated -ne 1) {
+            throw "Token elevation inspection failed: unexpected TokenIsElevated=$tokenIsElevated"
+          }
+          $authority = Get-AuthorityClass -TokenIsElevated $tokenIsElevated -AdministratorGroupMember $isAdmin -Sid $sid
+          if ($authority -eq 'INVALID') { throw 'Token elevation inspection failed: authority classification is INVALID' }
+          # Effective authority mirrors production: elevation AND membership in
+          # Administrators/SYSTEM. An administrator-group member with a
+          # non-elevated token is DENIED and is never labelled elevated.
+          $effective = if ($authority -eq 'ELEVATED') { 'GRANTED' } else { 'DENIED' }
           $record = Join-Path $env:RUNNER_TEMP 'pr341-elevated-identity.txt'
-          "NAME=$($id.Name)`nSID=$sid`nIS_ADMIN=$isAdmin" | Set-Content -Path $record -Encoding ascii
+          "NAME=$($id.Name)`nSID=$sid`nIS_ADMIN=$isAdmin`nTOKEN_IS_ELEVATED=$tokenIsElevated`nAUTHORITY_CLASS=$authority`nEFFECTIVE_PROVISIONING_AUTHORITY=$effective" | Set-Content -Path $record -Encoding ascii
           "ELEVATED_IDENTITY=$($id.Name)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
           "ELEVATED_IS_ADMIN=$isAdmin" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "TOKEN_IS_ELEVATED=$tokenIsElevated" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "AUTHORITY_CLASS=$authority" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "EFFECTIVE_PROVISIONING_AUTHORITY=$effective" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          if ($effective -ne 'GRANTED') {
+            # Do not throw here: the restricted real-token path must still run
+            # and record its own evidence. The final authority gate fails with
+            # the precise environmental blocker after that path completes.
+            "ELEVATED_PATH_BLOCKER=hosted token has no elevated provisioning authority (TokenIsElevated=$tokenIsElevated, class=$authority)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          }
           whoami /groups
 
       - name: Build focused Windows owner-registry test binary
@@ -176,6 +235,24 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          $identityRecord = Join-Path $env:RUNNER_TEMP 'pr341-elevated-identity.txt'
+          $identity = Get-Content $identityRecord -Raw
+          $effective = (($identity -split "`n" | Where-Object { $_ -like 'EFFECTIVE_PROVISIONING_AUTHORITY=*' }) -replace '^EFFECTIVE_PROVISIONING_AUTHORITY=', '').Trim()
+          $authorityClass = (($identity -split "`n" | Where-Object { $_ -like 'AUTHORITY_CLASS=*' }) -replace '^AUTHORITY_CLASS=', '').Trim()
+          $tokenElevated = (($identity -split "`n" | Where-Object { $_ -like 'TOKEN_IS_ELEVATED=*' }) -replace '^TOKEN_IS_ELEVATED=', '').Trim()
+          if ([string]::IsNullOrWhiteSpace($effective)) { throw 'Elevated authority record is missing; elevated path cannot be classified' }
+          $resultFile = Join-Path $env:RUNNER_TEMP 'pr341-elevated-path-result.txt'
+          if ($effective -ne 'GRANTED') {
+            # The elevated SKIP marker is only expected in a genuinely elevated
+            # authority context. Running these tests under a non-elevated token
+            # executes the unprivileged refusal assertion and correctly emits
+            # no SKIP; treating that as a guard failure is the defect being
+            # repaired. Record a specific blocker, keep the guards intact below,
+            # and let the final gate fail after the restricted path has run.
+            "ELEVATED_PATH=NOT_RUN`nBLOCKER=no elevated provisioning authority (TokenIsElevated=$tokenElevated, class=$authorityClass)" | Set-Content -Path $resultFile -Encoding ascii
+            'ELEVATED_PATH=NOT_RUN_ENVIRONMENTAL_BLOCKER' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            return
+          }
           $exe = [IO.File]::ReadAllText((Join-Path $env:RUNNER_TEMP 'pr341-test-exe.txt'))
           $log = Join-Path $env:RUNNER_TEMP 'pr341-elevated-tests.log'
           & $exe --nocapture work::owner_registry 2>&1 | Tee-Object -FilePath $log
@@ -203,6 +280,7 @@ jobs:
               throw "Required elevated test did not run and pass: $name"
             }
           }
+          "ELEVATED_PATH=UNIT_CONTROLS_EXECUTED`nBLOCKER=NONE" | Set-Content -Path $resultFile -Encoding ascii
           'ELEVATED_PATH=UNIT_CONTROLS_EXECUTED' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
 
       - name: Restricted-user path - real token proves unprivileged refusal
@@ -304,7 +382,28 @@ jobs:
           $id = [Security.Principal.WindowsIdentity]::GetCurrent()
           $principal = [Security.Principal.WindowsPrincipal]::new($id)
           $admin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-          "NAME=$($id.Name)`nSID=$($id.User.Value)`nIDENTITY_IS_ADMIN=$admin" | Set-Content -Path '__IDENTITY_LOG__' -Encoding ascii
+          # The genuine restricted token must also be proven non-elevated by
+          # reading TokenElevation from its own process token, not inferred
+          # from the account name or group membership. Fail closed.
+          $nativeSource = 'using System;
+          using System.Runtime.InteropServices;
+          public static class Pr341RestrictedTokenNative {
+          [StructLayout(LayoutKind.Sequential)] public struct TOKEN_ELEVATION { public uint TokenIsElevated; }
+          [DllImport("advapi32.dll", SetLastError=true)] public static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+          [DllImport("advapi32.dll", SetLastError=true)] public static extern bool GetTokenInformation(IntPtr token, int infoClass, out TOKEN_ELEVATION info, int size, out int returned);
+          [DllImport("kernel32.dll")] public static extern IntPtr GetCurrentProcess();
+          [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr handle);
+          }'
+          Add-Type -TypeDefinition $nativeSource -ErrorAction Stop
+          $tokenHandle = [IntPtr]::Zero
+          if (-not [Pr341RestrictedTokenNative]::OpenProcessToken([Pr341RestrictedTokenNative]::GetCurrentProcess(), 0x0008, [ref]$tokenHandle) -or $tokenHandle -eq [IntPtr]::Zero) { throw 'Restricted token elevation inspection failed: OpenProcessToken' }
+          try {
+            $elevation = New-Object Pr341RestrictedTokenNative+TOKEN_ELEVATION
+            $returned = 0
+            if (-not [Pr341RestrictedTokenNative]::GetTokenInformation($tokenHandle, 20, [ref]$elevation, 4, [ref]$returned) -or $returned -ne 4) { throw 'Restricted token elevation inspection failed: GetTokenInformation(TokenElevation)' }
+            $tokenIsElevated = [int]$elevation.TokenIsElevated
+          } finally { [void][Pr341RestrictedTokenNative]::CloseHandle($tokenHandle) }
+          "NAME=$($id.Name)`nSID=$($id.User.Value)`nIDENTITY_IS_ADMIN=$admin`nTOKEN_IS_ELEVATED=$tokenIsElevated" | Set-Content -Path '__IDENTITY_LOG__' -Encoding ascii
           '@
             $probe = Join-Path $evidence 'probe.ps1'
             $probeTemplate.Replace('__IDENTITY_LOG__', $identityLog) | Set-Content -Path $probe -Encoding ascii
@@ -323,6 +422,10 @@ jobs:
             $identity = Get-Content $identityLog -Raw
             if ($identity -notmatch 'IDENTITY_IS_ADMIN=False') {
               throw 'Restricted token is elevated/administrator; identity separation NOT proven'
+            }
+            $restrictedElevated = (($identity -split "`n" | Where-Object { $_ -like 'TOKEN_IS_ELEVATED=*' }) -replace '^TOKEN_IS_ELEVATED=', '').Trim()
+            if ($restrictedElevated -ne '0') {
+              throw 'Restricted token unexpectedly elevated; genuine unprivileged token NOT proven'
             }
             $restrictedSid = (($identity -split "`n" | Where-Object { $_ -like 'SID=*' }) -replace '^SID=', '').Trim()
             if ([string]::IsNullOrWhiteSpace($restrictedSid)) { throw 'Restricted token SID was not captured' }
@@ -382,6 +485,23 @@ jobs:
           PR #341 merge remains WITHHELD. Repository-native `local_ci` remains
           authoritative. No merge, deployment or named-pipe authority is granted.
           '@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+      - name: Final authority gate - fail closed on missing elevated token
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $resultFile = Join-Path $env:RUNNER_TEMP 'pr341-elevated-path-result.txt'
+          if (-not (Test-Path -LiteralPath $resultFile)) {
+            throw 'ELEVATED_PATH=NOT_RUN; blocker=token authority could not be evaluated before the elevated path'
+          }
+          $result = Get-Content $resultFile -Raw
+          if ($result -notmatch 'ELEVATED_PATH=UNIT_CONTROLS_EXECUTED') {
+            $blocker = (($result -split "`n" | Where-Object { $_ -like 'BLOCKER=*' }) -replace '^BLOCKER=', '').Trim()
+            if ([string]::IsNullOrWhiteSpace($blocker)) { $blocker = 'unknown token authority blocker' }
+            throw "ELEVATED_PATH=NOT_RUN; blocker=$blocker; elevated acceptance evidence NOT_RUN"
+          }
+          'FINAL_AUTHORITY_GATE=ELEVATED_CONTEXT_PROVEN' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
 
   collector-facts:
     # Supplemental, read-only execution of the nonprivileged collector. The
