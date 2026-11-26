@@ -128,17 +128,6 @@ pub trait OutboxOperations {
         legacy_hash: &str,
     ) -> anyhow::Result<OutboxAdmission>;
 
-    /// Atomically create the single pending claim for an operation. Refuses if
-    /// any row already exists, so competing writers cannot duplicate admission.
-    fn claim_outbox_entry(
-        &self,
-        run_id: &str,
-        trace_id: &str,
-        node_id: &str,
-        tool_name: &str,
-        input_hash: &str,
-    ) -> anyhow::Result<OutboxEntry>;
-
     fn mark_outbox_completed(&self, id: &str, output: &str) -> anyhow::Result<()>;
 
     /// Mark completion and verify that exactly one row was updated.
@@ -277,62 +266,6 @@ impl<T: AsDb> OutboxOperations for T {
                 conn.execute_batch("COMMIT")
                     .context("Failed to commit atomic outbox admission")?;
                 Ok(value)
-            }
-            Err(error) => {
-                let _ = conn.execute_batch("ROLLBACK");
-                Err(error)
-            }
-        }
-    }
-
-    fn claim_outbox_entry(
-        &self,
-        run_id: &str,
-        trace_id: &str,
-        node_id: &str,
-        tool_name: &str,
-        input_hash: &str,
-    ) -> anyhow::Result<OutboxEntry> {
-        let conn = self.as_db().conn();
-        conn.execute_batch("BEGIN IMMEDIATE")
-            .context("Failed to begin exclusive outbox claim")?;
-        let result = (|| -> anyhow::Result<OutboxEntry> {
-            let existing: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM tool_outbox WHERE run_id = ?1 AND node_id = ?2 AND input_hash = ?3",
-                    params![run_id, node_id, input_hash],
-                    |row| row.get(0),
-                )
-                .context("Failed to inspect existing outbox claims")?;
-            if existing != 0 {
-                anyhow::bail!(
-                    "competing or duplicate outbox claim for run {run_id} node {node_id}"
-                );
-            }
-            let id = uuid::Uuid::new_v4().to_string();
-            let now = Utc::now();
-            conn.execute(
-                "INSERT INTO tool_outbox (id, run_id, trace_id, node_id, tool_name, input_hash, status, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![&id, run_id, trace_id, node_id, tool_name, input_hash, "pending", &now.to_rfc3339()],
-            ).context("Failed to insert atomic outbox claim")?;
-            Ok(OutboxEntry {
-                id,
-                run_id: run_id.to_string(),
-                trace_id: trace_id.to_string(),
-                node_id: node_id.to_string(),
-                tool_name: tool_name.to_string(),
-                input_hash: input_hash.to_string(),
-                status: "pending".to_string(),
-                created_at: now,
-                completed_at: None,
-                output: None,
-            })
-        })();
-        match result {
-            Ok(entry) => {
-                conn.execute_batch("COMMIT")
-                    .context("Failed to commit outbox claim")?;
-                Ok(entry)
             }
             Err(error) => {
                 let _ = conn.execute_batch("ROLLBACK");

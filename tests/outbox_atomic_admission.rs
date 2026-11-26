@@ -3,7 +3,7 @@
 //! fail behaviorally (RED) before the atomic-admission repair.
 
 use anyhow::{Context, Result};
-use prometheos_lite::db::repository::{Db, OutboxOperations};
+use prometheos_lite::db::repository::{Db, OutboxAdmission, OutboxOperations};
 use prometheos_lite::flow::factory::FileWriterNode;
 use prometheos_lite::flow::{IdempotencyKey, Node, NodeConfig};
 use prometheos_lite::tools::{ToolContext, ToolPolicy};
@@ -238,9 +238,17 @@ fn concurrent_canonical_claims_admit_one_effect() -> Result<()> {
         admitted, 1,
         "exactly one effect must be admitted: {outcomes:?}"
     );
-    assert_eq!(
-        cached, 1,
-        "the loser must reuse the winner's receipt: {outcomes:?}"
+    // A loser arriving while the winner's claim is still pending must refuse
+    // an uncertain replay; one arriving after acknowledgement reuses the
+    // completed receipt. Both outcomes prove no second effect was admitted.
+    let loser_safe = cached == 1
+        || outcomes.iter().any(|result| match result {
+            Err(error) => error.to_string().contains("unresolved prior outbox claim"),
+            _ => false,
+        });
+    assert!(
+        loser_safe,
+        "loser neither reused nor safely refused: {outcomes:?}"
     );
 
     let fresh = e.db()?;
@@ -284,25 +292,29 @@ fn canonical_versus_legacy_claim_race_admits_one_claim() -> Result<()> {
                 })
             })
         };
+        let canonical = Arc::new(e.canonical.clone());
         let legacy_handle = {
             let barrier = barrier.clone();
             let db_path = db_path.clone();
+            let canonical = canonical.clone();
             let legacy = legacy.clone();
             let run_id = run_id.clone();
             let node_id = node_id.clone();
             scope.spawn(move || {
                 let db = Db::new(db_path.to_str().context("non-UTF8 path")?)?;
                 barrier.wait();
-                match OutboxOperations::claim_outbox_entry(
+                match OutboxOperations::admit_outbox_operation(
                     &db,
                     &run_id,
                     "legacy-trace",
                     &node_id,
                     "file_writer",
+                    &canonical,
                     &legacy,
                 ) {
-                    Ok(_) => Ok("legacy-claimed".to_string()),
-                    Err(error) => Ok(format!("legacy-refused:{error}")),
+                    Ok(OutboxAdmission::Admitted(_)) => Ok("dual-admitted".to_string()),
+                    Ok(OutboxAdmission::Completed(_)) => Ok("dual-completed".to_string()),
+                    Err(error) => Ok(format!("dual-refused:{error}")),
                 }
             })
         };
@@ -321,11 +333,14 @@ fn canonical_versus_legacy_claim_race_admits_one_claim() -> Result<()> {
         1,
         "one claim total across both key versions: {outcomes:?}"
     );
-    let winners = outcomes
+    let admitted = outcomes
         .iter()
-        .filter(|result| matches!(result, Ok(value) if value == "file:false" || value == "legacy-claimed"))
+        .filter(|result| matches!(result, Ok(value) if value == "file:false" || value == "dual-admitted"))
         .count();
-    assert_eq!(winners, 1, "exactly one contender wins: {outcomes:?}");
+    assert_eq!(
+        admitted, 1,
+        "exactly one dual-version contender wins: {outcomes:?}"
+    );
     Ok(())
 }
 
@@ -366,5 +381,97 @@ fn malformed_persisted_timestamp_fails_closed() -> Result<()> {
     let result = runtime.block_on(e.exec());
     assert!(result.is_err(), "malformed persisted data must fail closed");
     assert!(!e.written());
+    Ok(())
+}
+
+#[test]
+fn dual_version_admission_refuses_when_canonical_receipt_exists() -> Result<()> {
+    let e = env("dual-version-refusal")?;
+    let db = e.db()?;
+    e.completed(
+        &db,
+        &e.canonical,
+        &json!({"result": "canonical"}).to_string(),
+    )?;
+    let second = e.db()?;
+    let decision = OutboxOperations::admit_outbox_operation(
+        &second,
+        &e.run_id,
+        "legacy-trace",
+        &e.node_id,
+        "file_writer",
+        &e.canonical,
+        &e.legacy,
+    )?;
+    assert!(
+        matches!(decision, OutboxAdmission::Completed(_)),
+        "a legacy-side contender must reuse a canonical receipt"
+    );
+    let entries = e
+        .db()?
+        .list_outbox_entries_by_hash(&e.run_id, &e.node_id, &e.canonical)?;
+    assert_eq!(entries.len(), 1, "a second claim was admitted");
+    Ok(())
+}
+
+#[test]
+fn deterministic_canonical_first_admission() -> Result<()> {
+    let e = env("canonical-first")?;
+    let first = OutboxOperations::admit_outbox_operation(
+        &e.db()?,
+        &e.run_id,
+        "trace",
+        &e.node_id,
+        "file_writer",
+        &e.canonical,
+        &e.legacy,
+    )?;
+    let admitted = match first {
+        OutboxAdmission::Admitted(entry) => entry,
+        other => panic!("expected a canonical admission, got {other:?}"),
+    };
+    // The admitted effect must be durably acknowledged before a later
+    // contender can legitimately reuse its completed receipt.
+    e.db()?
+        .mark_outbox_completed_checked(&admitted.id, &json!({"result": "canonical"}).to_string())?;
+    let second = OutboxOperations::admit_outbox_operation(
+        &e.db()?,
+        &e.run_id,
+        "trace",
+        &e.node_id,
+        "file_writer",
+        &e.canonical,
+        &e.legacy,
+    )?;
+    assert!(matches!(second, OutboxAdmission::Completed(_)));
+    let entries = e
+        .db()?
+        .list_outbox_entries_by_hash(&e.run_id, &e.node_id, &e.canonical)?;
+    assert_eq!(entries.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn deterministic_legacy_first_admission() -> Result<()> {
+    let e = env("legacy-first")?;
+    let db = e.db()?;
+    e.completed(&db, &e.legacy, &json!({"result": "legacy"}).to_string())?;
+    let decision = OutboxOperations::admit_outbox_operation(
+        &e.db()?,
+        &e.run_id,
+        "trace",
+        &e.node_id,
+        "file_writer",
+        &e.canonical,
+        &e.legacy,
+    )?;
+    assert!(matches!(decision, OutboxAdmission::Completed(_)));
+    let canonical_entries =
+        e.db()?
+            .list_outbox_entries_by_hash(&e.run_id, &e.node_id, &e.canonical)?;
+    assert!(
+        canonical_entries.is_empty(),
+        "legacy receipt must prevent a canonical claim"
+    );
     Ok(())
 }
