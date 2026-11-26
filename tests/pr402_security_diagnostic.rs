@@ -14,7 +14,8 @@ use winapi::shared::sddl::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
 use winapi::shared::winerror::{
-    ERROR_ACCESS_DENIED, ERROR_INVALID_DATATYPE, ERROR_INVALID_OWNER, ERROR_SUCCESS,
+    ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_INVALID_DATATYPE, ERROR_INVALID_OWNER,
+    ERROR_SUCCESS,
 };
 use winapi::um::accctrl::SE_KERNEL_OBJECT;
 use winapi::um::aclapi::GetSecurityInfo;
@@ -23,11 +24,11 @@ use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
 use winapi::um::securitybaseapi::{
     GetAce, GetAclInformation, IsValidAcl, IsValidSecurityDescriptor,
 };
-use winapi::um::synchapi::{CreateMutexW, OpenMutexW, WaitForSingleObject};
+use winapi::um::synchapi::{CreateMutexW, ReleaseMutex, WaitForSingleObject};
 use winapi::um::winbase::{LocalFree, WAIT_OBJECT_0};
 use winapi::um::winnt::{
     ACCESS_ALLOWED_ACE, ACCESS_ALLOWED_ACE_TYPE, ACE_HEADER, ACL_SIZE_INFORMATION,
-    DACL_SECURITY_INFORMATION, HANDLE, OWNER_SECURITY_INFORMATION, PACL, PSID, SYNCHRONIZE,
+    DACL_SECURITY_INFORMATION, HANDLE, OWNER_SECURITY_INFORMATION, PACL, PSID,
 };
 
 const STRICT_MODE_VAR: &str = "PR402_STRICT_DIAGNOSTIC";
@@ -66,13 +67,16 @@ fn win32_error_name(code: DWORD) -> &'static str {
         ERROR_INVALID_DATATYPE => "ERROR_INVALID_DATATYPE",
         ERROR_INVALID_OWNER => "ERROR_INVALID_OWNER",
         ERROR_ACCESS_DENIED => "ERROR_ACCESS_DENIED",
+        ERROR_ALREADY_EXISTS => "ERROR_ALREADY_EXISTS",
         ERROR_SUCCESS => "ERROR_SUCCESS",
         _ => "UNKNOWN_WIN32_ERROR",
     }
 }
 
-fn classify_creation_failure(strict: bool, error: DWORD, collision: bool) -> Verdict {
-    if collision {
+fn classify_creation_failure(strict: bool, error: DWORD) -> Verdict {
+    // ERROR_ALREADY_EXISTS is authoritative: the name belongs to an object we
+    // did not create. Never inspect or acquire that object as our own.
+    if error == ERROR_ALREADY_EXISTS {
         return Verdict::Fail;
     }
     if !strict && error == ERROR_INVALID_OWNER {
@@ -150,10 +154,12 @@ fn convert_sddl(label: &str, sddl: &str) -> bool {
     let valid = !guard.0.is_null() && unsafe { IsValidSecurityDescriptor(guard.0) } == TRUE;
     let ok = converted == TRUE && valid;
     if ok {
-        println!("{label}_CONVERT ok=true");
+        println!("{label}_CONVERT ok=true converted=TRUE valid=TRUE");
     } else {
         println!(
-            "{label}_CONVERT ok=false error={error} name={}",
+            "{label}_CONVERT ok=false converted={} valid={} error={error} name={}",
+            converted == TRUE,
+            valid,
             win32_error_name(error)
         );
     }
@@ -177,17 +183,9 @@ fn diagnose_native_security_stages() {
     let name = format!("Local\\PR341-DIAGNOSTIC-{}-{nonce}", std::process::id());
     let name_wide = wide(&name);
 
-    // Reuse of an existing name is never inspected as a newly created object.
-    let preexisting = unsafe { OpenMutexW(SYNCHRONIZE, FALSE, name_wide.as_ptr()) };
-    let collision = !preexisting.is_null() && preexisting != INVALID_HANDLE_VALUE;
-    if collision {
-        drop(HandleGuard(preexisting));
-    }
-    if collision {
-        println!("MUTEX_COLLISION name={name}; refusing to inspect an unintended object");
-        drop(HandleGuard(preexisting));
-        panic!("diagnostic mutex name already exists");
-    }
+    // No racy pre-check: the authoritative CreateMutexW status decides whether
+    // this process created the object. ERROR_ALREADY_EXISTS means the name was
+    // collided and must be refused before any security inspection or acquisition.
 
     let mut descriptor: *mut winapi::ctypes::c_void = std::ptr::null_mut();
     let converted = unsafe {
@@ -213,8 +211,17 @@ fn diagnose_native_security_stages() {
     };
     let mutex = unsafe { CreateMutexW(&mut attributes, FALSE, name_wide.as_ptr()) };
     let create_error = unsafe { GetLastError() };
+    if create_error == ERROR_ALREADY_EXISTS {
+        // CreateMutexW returns a handle to the EXISTING object. Close only
+        // that unowned handle; never inspect or acquire the collided object.
+        if !mutex.is_null() && mutex != INVALID_HANDLE_VALUE {
+            drop(HandleGuard(mutex));
+        }
+        println!("MUTEX_COLLISION name={name}; existing object preserved");
+        panic!("diagnostic mutex name collision; refusing to inspect unintended object");
+    }
     if mutex.is_null() || mutex == INVALID_HANDLE_VALUE {
-        let verdict = classify_creation_failure(strict, create_error, false);
+        let verdict = classify_creation_failure(strict, create_error);
         println!(
             "MUTEX_CREATE_FAILED error={create_error} name={} verdict={verdict:?}",
             win32_error_name(create_error)
@@ -245,21 +252,23 @@ fn diagnose_native_security_stages() {
             &mut security_descriptor,
         )
     };
-    let status_error = unsafe { GetLastError() };
-    let descriptor_guard = LocalGuard(security_descriptor);
+    // GetSecurityInfo returns an authoritative DWORD status. Never substitute a
+    // stale GetLastError value for that status.
+    let _descriptor_guard = LocalGuard(security_descriptor);
     if status != ERROR_SUCCESS {
-        let verdict = classify_verification_failure(strict, status_error);
+        let verdict = classify_verification_failure(strict, status);
         println!(
-            "MUTEX_GET_SECURITY_INFO_FAILED status={status} error={status_error} verdict={verdict:?}"
+            "MUTEX_GET_SECURITY_INFO_FAILED status={status} ({}) verdict={verdict:?}",
+            win32_error_name(status)
         );
         if verdict == Verdict::Skip {
             println!("DIAGNOSTIC_SKIP kernel_security_query_unavailable_off_guest");
             return;
         }
-        panic!("GetSecurityInfo failed in strict mode: status={status} error={status_error}");
+        panic!("GetSecurityInfo failed in strict mode: status={status}");
     }
     println!(
-        "MUTEX_GET_SECURITY_INFO ok status={status} error={status_error} dacl_null={}",
+        "MUTEX_GET_SECURITY_INFO ok status={status} dacl_null={}",
         dacl.is_null()
     );
 
@@ -307,31 +316,43 @@ fn diagnose_native_security_stages() {
         "trusted mutex DACL was refused: {verdict:?}"
     );
 
-    // Prove the created object is a usable mutex, then let RAII close both handles.
+    // Prove acquisition, then explicitly release it and verify success. The
+    // single HandleGuard closes the handle exactly once at scope exit.
     assert_eq!(
         unsafe { WaitForSingleObject(mutex, 0) },
         WAIT_OBJECT_0,
         "created mutex could not be acquired"
     );
+    assert_ne!(
+        unsafe { ReleaseMutex(mutex) },
+        0,
+        "ReleaseMutex failed for the diagnostic-owned mutex"
+    );
     drop(mutex_guard);
-    drop(descriptor_guard);
 }
 
 #[test]
 fn strict_mode_fails_on_owner_assignment_error() {
     assert_eq!(
-        classify_creation_failure(true, ERROR_INVALID_OWNER, false),
+        classify_creation_failure(true, ERROR_INVALID_OWNER),
         Verdict::Fail
     );
     assert_eq!(
-        classify_creation_failure(false, ERROR_INVALID_OWNER, false),
+        classify_creation_failure(false, ERROR_INVALID_OWNER),
         Verdict::Skip
     );
     assert_eq!(
-        classify_creation_failure(false, ERROR_ACCESS_DENIED, false),
+        classify_creation_failure(false, ERROR_ACCESS_DENIED),
         Verdict::Fail
     );
-    assert_eq!(classify_creation_failure(false, 0, true), Verdict::Fail);
+    assert_eq!(
+        classify_creation_failure(false, ERROR_ALREADY_EXISTS),
+        Verdict::Fail
+    );
+    assert_eq!(
+        classify_creation_failure(true, ERROR_ALREADY_EXISTS),
+        Verdict::Fail
+    );
 }
 
 #[test]
@@ -348,6 +369,35 @@ fn strict_mode_fails_on_security_verification_error() {
         classify_verification_failure(false, ERROR_INVALID_DATATYPE),
         Verdict::Fail
     );
+}
+
+#[test]
+fn existing_mutex_name_is_an_authoritative_collision_and_is_preserved() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("wall clock")
+        .as_nanos();
+    let name = format!("Local\\PR341-COLLISION-{}-{nonce}", std::process::id());
+    let name_wide = wide(&name);
+    let first = unsafe { CreateMutexW(std::ptr::null_mut(), FALSE, name_wide.as_ptr()) };
+    assert!(!first.is_null() && first != INVALID_HANDLE_VALUE);
+    let owner = HandleGuard(first);
+    let second = unsafe { CreateMutexW(std::ptr::null_mut(), FALSE, name_wide.as_ptr()) };
+    let error = unsafe { GetLastError() };
+    assert_eq!(error, ERROR_ALREADY_EXISTS);
+    // The extra handle refers to the pre-existing object; close it once and
+    // never use it for security inspection or acquisition.
+    if !second.is_null() && second != INVALID_HANDLE_VALUE {
+        drop(HandleGuard(second));
+    }
+    assert_eq!(classify_creation_failure(false, error), Verdict::Fail);
+    assert_eq!(
+        unsafe { WaitForSingleObject(first, 0) },
+        WAIT_OBJECT_0,
+        "pre-existing object must remain open and usable"
+    );
+    assert_ne!(unsafe { ReleaseMutex(first) }, 0);
+    drop(owner);
 }
 
 #[test]
