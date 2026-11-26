@@ -175,6 +175,12 @@ fn handle_final_path(handle: HANDLE) -> Result<PathBuf, String> {
 }
 
 fn expected_final_path(path: &Path) -> Result<PathBuf, String> {
+    // A drive root (C:\) has no parent or file name. Its kernel-resolved final
+    // path is simply its own canonical form; do not fabricate a parent.
+    if path.parent().is_none() || path.file_name().is_none() {
+        return std::fs::canonicalize(path)
+            .map_err(|error| format!("canonicalize drive root {path:?}: {error}"));
+    }
     let parent = path
         .parent()
         .ok_or_else(|| format!("no parent for {path:?}"))?;
@@ -245,10 +251,74 @@ fn delete_verified_path(
     Ok(())
 }
 
+/// Validate the OS-managed ProgramData boundary itself. This is the trusted
+/// root: it must be the Known Folder value, a plain non-reparse directory whose
+/// kernel-resolved final path is itself, and never the drive root.
+fn validate_programdata_boundary(root: &Path, errors: &mut Vec<String>) {
+    if !root
+        .to_string_lossy()
+        .eq_ignore_ascii_case("C:\\ProgramData")
+    {
+        errors.push(format!("untrusted ProgramData boundary: {root:?}"));
+        return;
+    }
+    if root.parent().is_none() || root.file_name().is_none() {
+        errors.push(format!("ProgramData boundary is a drive root: {root:?}"));
+        return;
+    }
+    match std::fs::canonicalize(root) {
+        Ok(canonical) if same_path(&canonical, root) => {}
+        Ok(canonical) => errors.push(format!(
+            "ProgramData boundary resolves elsewhere: {root:?} -> {canonical:?}"
+        )),
+        Err(error) => errors.push(format!("cannot canonicalize ProgramData {root:?}: {error}")),
+    }
+    match std::fs::symlink_metadata(root) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => errors.push(format!(
+            "ProgramData boundary is not a plain directory: {root:?}"
+        )),
+        Err(error) => errors.push(format!("cannot inspect ProgramData {root:?}: {error}")),
+    }
+    if let Err(error) = reject_reparse(root) {
+        errors.push(format!(
+            "ProgramData boundary reparse check failed: {error:?}"
+        ));
+    }
+    if let Err(error) = capture_identity(root, true, false) {
+        errors.push(format!(
+            "ProgramData boundary identity check failed: {error}"
+        ));
+    }
+}
+
+/// Walk only the protected ancestors beneath ProgramData. The OS-managed
+/// ProgramData root is validated separately and terminates traversal; the
+/// drive root is never visited by test-owned cleanup.
 fn ancestry_errors(path: &Path, allow_absent: bool) -> Vec<String> {
     let mut errors = Vec::new();
+    let root = match programdata_root() {
+        Ok(root) => root,
+        Err(error) => {
+            errors.push(format!("ProgramData root unavailable: {error}"));
+            return errors;
+        }
+    };
+    if !path.starts_with(&root) {
+        errors.push(format!(
+            "protected path escapes ProgramData boundary: {path:?}"
+        ));
+        return errors;
+    }
+    validate_programdata_boundary(&root, &mut errors);
+
+    let mut reached_boundary = false;
     let mut cursor = path.parent();
     while let Some(dir) = cursor {
+        if same_path(dir, &root) {
+            reached_boundary = true;
+            break;
+        }
         match std::fs::symlink_metadata(dir) {
             Ok(metadata) => {
                 if !metadata.is_dir() || metadata.file_type().is_symlink() {
@@ -268,6 +338,11 @@ fn ancestry_errors(path: &Path, allow_absent: bool) -> Vec<String> {
             )),
         }
         cursor = dir.parent();
+    }
+    if !reached_boundary {
+        errors.push(format!(
+            "ProgramData ancestry boundary was not reached from {path:?}"
+        ));
     }
     errors
 }
@@ -316,6 +391,9 @@ impl OwnedRegistry {
                     absent_dirs.push(dir.to_path_buf());
                 }
                 Err(error) => panic!("cannot inspect protected ancestor {dir:?}: {error}"),
+            }
+            if same_path(dir, &root) {
+                break;
             }
             cursor = dir.parent();
         }
