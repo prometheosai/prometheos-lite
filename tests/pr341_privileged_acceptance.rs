@@ -687,7 +687,7 @@ fn create_event(name: &str, manual_reset: bool) -> Result<EventHandle, String> {
             wide(OsStr::new(name)).as_ptr(),
         )
     };
-    if handle == INVALID_HANDLE_VALUE {
+    if handle.is_null() {
         return Err(format!("CreateEventW {name} failed: {}", unsafe {
             GetLastError()
         }));
