@@ -1191,44 +1191,6 @@ impl FileWriterNode {
     }
 }
 
-/// Resolve completion across both idempotency-key versions.
-///
-/// A canonical PENDING row must not hide a legacy COMPLETED row: that would
-/// re-execute an effect whose receipt was already recorded before the key
-/// format migration. Pending/uncertain rows are deliberately ignored; only a
-/// completed row can authorize cached-result reuse. Two completed rows with
-/// different receipts are a conflict, not a random selection, and fail closed.
-/// Database errors are propagated rather than treated as "no prior effect".
-fn find_completed_outbox_entry(
-    db: &crate::db::repository::Db,
-    run_id: &str,
-    node_id: &str,
-    canonical_key: &str,
-    legacy_key: &str,
-) -> anyhow::Result<Option<crate::db::repository::OutboxEntry>> {
-    let mut completed = Vec::new();
-    for key in [canonical_key, legacy_key] {
-        if let Some(entry) = OutboxOperations::get_outbox_entry_by_hash(db, run_id, node_id, key)?
-            && entry.status == "completed"
-        {
-            completed.push(entry);
-        }
-    }
-    if completed.len() > 1 {
-        let first = completed[0].output.as_deref();
-        if completed
-            .iter()
-            .skip(1)
-            .any(|entry| entry.output.as_deref() != first)
-        {
-            anyhow::bail!(
-                "conflicting completed outbox receipts for run {run_id} node {node_id}; refusing to choose one"
-            );
-        }
-    }
-    Ok(completed.into_iter().next())
-}
-
 #[async_trait::async_trait]
 impl Node for FileWriterNode {
     fn id(&self) -> String {
@@ -1345,59 +1307,48 @@ impl Node for FileWriterNode {
         }
         let db_path = db_path.to_string_lossy().into_owned();
         let db = crate::db::repository::Db::new(&db_path)?;
-        if let Some(entry) = find_completed_outbox_entry(
-            &db,
-            &context.run_id,
-            &context.node_id,
-            &idempotency_key.key,
-            &legacy_key,
-        )? {
-            // Return cached result instead of re-executing
-            return Ok(serde_json::json!({
-                "success": true,
-                "file_path": file_path,
-                "bytes_written": content.len(),
-                "idempotency_key": idempotency_key.key,
-                "from_cache": true,
-                "cached_output": entry.output
-            }));
-        }
-
-        // Create outbox entry for this operation. A failure here must not be
-        // followed by an unrecorded side effect.
-        OutboxOperations::create_outbox_entry(
+        // Dual-version inspection and canonical admission happen inside one
+        // SQLite IMMEDIATE transaction: competing writers cannot both observe an
+        // empty state and both admit an effect.
+        let claim = match OutboxOperations::admit_outbox_operation(
             &db,
             &context.run_id,
             &context.trace_id,
             &context.node_id,
             "file_writer",
             &idempotency_key.key,
-        )?;
+            &legacy_key,
+        )? {
+            crate::db::repository::OutboxAdmission::Completed(entry) => {
+                return Ok(serde_json::json!({
+                    "success": true,
+                    "file_path": file_path,
+                    "bytes_written": content.len(),
+                    "idempotency_key": idempotency_key.key,
+                    "from_cache": true,
+                    "cached_output": entry.output
+                }));
+            }
+            crate::db::repository::OutboxAdmission::Admitted(entry) => entry,
+        };
 
         // Proceed with write
         std::fs::write(file_path, content)
             .with_context(|| format!("Failed to write file: {}", file_path))?;
 
-        // Mark outbox entry as completed. Errors here leave the effect uncertain
-        // and must be surfaced rather than silently reported as a clean write.
+        // Mark the exact claimed row as completed. A zero-row update is an
+        // error: the effect happened but is not durably acknowledged.
         let db = crate::db::repository::Db::new(&db_path)?;
-        if let Some(entry) = OutboxOperations::get_outbox_entry_by_hash(
+        OutboxOperations::mark_outbox_completed_checked(
             &db,
-            &context.run_id,
-            &context.node_id,
-            &idempotency_key.key,
-        )? {
-            OutboxOperations::mark_outbox_completed(
-                &db,
-                &entry.id,
-                &serde_json::json!({
-                    "success": true,
-                    "file_path": file_path,
-                    "bytes_written": content.len()
-                })
-                .to_string(),
-            )?;
-        }
+            &claim.id,
+            &serde_json::json!({
+                "success": true,
+                "file_path": file_path,
+                "bytes_written": content.len()
+            })
+            .to_string(),
+        )?;
 
         Ok(serde_json::json!({
             "success": true,
