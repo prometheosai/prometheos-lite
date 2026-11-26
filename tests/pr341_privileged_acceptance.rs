@@ -1,6 +1,6 @@
 //! PR341 Stage 1 real privileged acceptance target.
-//! Windows guest only: executes genuine production owner_registry APIs against
-//! the guest's OS-managed ProgramData root. No simulated SIDs or JSON-only
+//! Windows guest only: genuine production owner_registry APIs against the
+//! guest's OS-managed ProgramData root. No simulated SIDs or JSON-only
 //! positive provisioning.
 
 #![cfg(windows)]
@@ -14,24 +14,27 @@ use prometheos_lite::work::owner_registry::{
     OWNER_REGISTRY_SCHEMA, OwnerBinding, OwnerRegistry, canonical_json, default_registry_path,
     enforce_monotonic_update, is_well_formed_sid, parse_registry_bytes, programdata_root,
 };
+use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::ffi::{OsStr, OsString};
-use std::io::{ErrorKind, Read};
+use std::io::ErrorKind;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, mpsc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use winapi::shared::minwindef::{DWORD, TRUE};
+use winapi::shared::minwindef::{DWORD, FALSE, TRUE};
 use winapi::um::errhandlingapi::GetLastError;
 use winapi::um::fileapi::{
     BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_DISPOSITION_INFO, GetFileInformationByHandle,
     GetFinalPathNameByHandleW, OPEN_EXISTING, SetFileInformationByHandle,
 };
-use winapi::um::handleapi::CloseHandle;
+use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
 use winapi::um::minwinbase::FileDispositionInfo;
+use winapi::um::synchapi::{CreateEventW, SetEvent, WaitForSingleObject};
 use winapi::um::winbase::{
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, VOLUME_NAME_DOS,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, VOLUME_NAME_DOS, WAIT_OBJECT_0,
 };
 use winapi::um::winnt::{
     DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_READ_ATTRIBUTES,
@@ -40,14 +43,43 @@ use winapi::um::winnt::{
 
 const SID_A: &str = "S-1-5-21-1111111111-2222222222-3333333333-1001";
 const SID_B: &str = "S-1-5-21-1111111111-2222222222-3333333333-1002";
+const WORKER_ACCEPTED: i32 = 0;
+const WORKER_REFUSED: i32 = 10;
+const WORKER_EXECUTION_FAILURE: i32 = 20;
 
 fn wide(value: &OsStr) -> Vec<u16> {
     value.encode_wide().chain(std::iter::once(0)).collect()
 }
 
+fn nonce() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("wall clock after epoch")
+        .as_nanos()
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn millis(deadline: Instant) -> DWORD {
+    deadline
+        .saturating_duration_since(Instant::now())
+        .as_millis()
+        .min(DWORD::MAX as u128) as DWORD
+}
+
 struct VerifiedHandle(HANDLE);
 
 impl Drop for VerifiedHandle {
+    fn drop(&mut self) {
+        unsafe { CloseHandle(self.0) };
+    }
+}
+
+struct EventHandle(HANDLE);
+
+impl Drop for EventHandle {
     fn drop(&mut self) {
         unsafe { CloseHandle(self.0) };
     }
@@ -101,7 +133,8 @@ fn open_object(path: &Path, directory: bool, for_delete: bool) -> Result<Verifie
             std::ptr::null_mut(),
         )
     };
-    if handle.is_null() {
+    // CreateFileW failure is INVALID_HANDLE_VALUE (-1), never null.
+    if handle == INVALID_HANDLE_VALUE {
         return Err(format!("CreateFileW {:?} failed: {}", path, unsafe {
             GetLastError()
         }));
@@ -121,8 +154,6 @@ fn inspect_object(handle: HANDLE) -> Result<(KernelIdentity, bool, bool), String
     Ok((KernelIdentity::from_info(&info), reparse, directory))
 }
 
-/// Final path resolved by the kernel for this handle, so an open handle cannot
-/// be silently redirected by a later namespace substitution.
 fn handle_final_path(handle: HANDLE) -> Result<PathBuf, String> {
     let mut buffer = vec![0u16; 4096];
     let length = unsafe {
@@ -144,7 +175,6 @@ fn handle_final_path(handle: HANDLE) -> Result<PathBuf, String> {
 }
 
 fn expected_final_path(path: &Path) -> Result<PathBuf, String> {
-    // Resolve the parent only: resolving the leaf would follow a reparse point.
     let parent = path
         .parent()
         .ok_or_else(|| format!("no parent for {path:?}"))?;
@@ -161,25 +191,38 @@ fn same_path(left: &Path, right: &Path) -> bool {
         .eq_ignore_ascii_case(&right.to_string_lossy())
 }
 
-/// Delete only through an already verified kernel handle. There is no second
-/// path lookup between verification and deletion, so substitution cannot change
-/// which object is removed.
+fn capture_identity(
+    path: &Path,
+    expect_directory: bool,
+    expect_reparse: bool,
+) -> Result<KernelIdentity, String> {
+    let handle = open_object(path, expect_directory, false)?;
+    let (identity, reparse, directory) = inspect_object(handle.0)?;
+    if reparse != expect_reparse || directory != expect_directory {
+        return Err(format!("unexpected object kind/reparse state for {path:?}"));
+    }
+    if !same_path(&handle_final_path(handle.0)?, &expected_final_path(path)?) {
+        return Err(format!("final path changed for {path:?}"));
+    }
+    Ok(identity)
+}
+
+/// Delete only through an already verified kernel handle, with an identity
+/// captured before any destructive operation. No path lookup is repeated
+/// between verification and deletion.
 fn delete_verified_path(
     path: &Path,
-    expected_identity: Option<&KernelIdentity>,
-    expected_reparse: Option<bool>,
+    expected_identity: &KernelIdentity,
+    expected_reparse: bool,
     expect_directory: bool,
 ) -> Result<(), String> {
     let handle = open_object(path, expect_directory, true)?;
     let (identity, reparse, directory) = inspect_object(handle.0)?;
-    if expected_identity.is_some_and(|expected| identity != *expected) {
+    if identity != *expected_identity {
         return Err(format!("kernel identity changed for {path:?}"));
     }
-    if expected_reparse.is_some_and(|expected| reparse != expected) {
-        return Err(format!("reparse state changed for {path:?}"));
-    }
-    if directory != expect_directory {
-        return Err(format!("object kind changed for {path:?}"));
+    if reparse != expected_reparse || directory != expect_directory {
+        return Err(format!("object kind/reparse state changed for {path:?}"));
     }
     if !same_path(&handle_final_path(handle.0)?, &expected_final_path(path)?) {
         return Err(format!("final path changed for {path:?}"));
@@ -214,18 +257,8 @@ fn ancestry_errors(path: &Path, allow_absent: bool) -> Vec<String> {
                 if let Err(error) = reject_reparse(dir) {
                     errors.push(format!("ancestor reparse check failed {dir:?}: {error:?}"));
                 }
-                match open_object(dir, true, false).and_then(|handle| {
-                    let (_, reparse, directory) = inspect_object(handle.0)?;
-                    if reparse || !directory {
-                        return Err(format!("handle describes a substituted ancestor {dir:?}"));
-                    }
-                    let final_path = handle_final_path(handle.0)?;
-                    if !same_path(&final_path, dir) {
-                        return Err(format!("ancestor final path changed {dir:?}"));
-                    }
-                    Ok(())
-                }) {
-                    Ok(()) => {}
+                match capture_identity(dir, true, false) {
+                    Ok(_) => {}
                     Err(error) => errors.push(error),
                 }
             }
@@ -239,8 +272,6 @@ fn ancestry_errors(path: &Path, allow_absent: bool) -> Vec<String> {
     errors
 }
 
-/// Identity of the exact leaf object this run created, plus its expected bytes
-/// as content evidence. Deletion uses the kernel identity, never the bytes.
 struct LeafIdentity {
     kernel: KernelIdentity,
     bytes: Vec<u8>,
@@ -276,7 +307,6 @@ impl OwnedRegistry {
             Err(error) if error.kind() == ErrorKind::NotFound => {}
             Err(error) => panic!("cannot inspect owner registry {path:?}: {error}"),
         }
-
         let mut absent_dirs = Vec::new();
         let mut cursor = path.parent();
         while let Some(dir) = cursor {
@@ -321,7 +351,6 @@ impl OwnedRegistry {
         }
     }
 
-    /// Capture verified kernel object identities after every provisioning step.
     fn observe(&mut self, expected: &OwnerRegistry) {
         let errors = ancestry_errors(&self.path, false);
         assert!(
@@ -330,20 +359,7 @@ impl OwnedRegistry {
         );
         reject_reparse(&self.path).expect("test-installed leaf must not be a reparse point");
         validate_registry_leaf(&self.path).expect("test-installed leaf must be trusted");
-        let handle = open_object(&self.path, false, true).expect("open installed leaf");
-        let (kernel, reparse, directory) = inspect_object(handle.0).expect("leaf kernel identity");
-        assert!(
-            !reparse && !directory,
-            "leaf is not the installed regular file"
-        );
-        let final_path = handle_final_path(handle.0).expect("leaf final path");
-        assert!(
-            same_path(
-                &final_path,
-                &expected_final_path(&self.path).expect("expected final path")
-            ),
-            "leaf handle resolves to an unexpected final path"
-        );
+        let kernel = capture_identity(&self.path, false, false).expect("leaf kernel identity");
         let bytes = std::fs::read(&self.path).expect("test-installed leaf bytes");
         assert_eq!(
             bytes,
@@ -354,19 +370,8 @@ impl OwnedRegistry {
 
         let mut dir_identities = Vec::new();
         for dir in &self.absent_dirs {
-            let handle = open_object(dir, true, true).expect("open test-created ancestor");
-            let (kernel, reparse, directory) =
-                inspect_object(handle.0).expect("ancestor kernel identity");
-            assert!(!reparse && directory, "ancestor is not a plain directory");
-            let final_path = handle_final_path(handle.0).expect("ancestor final path");
-            assert!(
-                same_path(
-                    &final_path,
-                    &expected_final_path(dir).expect("expected ancestor path")
-                ),
-                "ancestor handle resolves to an unexpected final path"
-            );
-            dir_identities.push((dir.clone(), kernel));
+            let identity = capture_identity(dir, true, false).expect("ancestor kernel identity");
+            dir_identities.push((dir.clone(), identity));
         }
         self.dir_identities = dir_identities;
     }
@@ -376,25 +381,20 @@ impl OwnedRegistry {
             return;
         }
         self.cleanup_attempted = true;
-
         let ancestry = ancestry_errors(&self.path, false);
         if !ancestry.is_empty() {
             self.cleanup_errors.extend(ancestry);
-            // Do not delete any object beneath an unverified ancestor tree.
             return;
         }
-
         match self.identity.take() {
             Some(identity) => {
-                if let Err(error) =
-                    delete_verified_path(&self.path, Some(&identity.kernel), Some(false), false)
+                if let Err(error) = delete_verified_path(&self.path, &identity.kernel, false, false)
                 {
                     self.cleanup_errors.push(format!(
                         "leaf deletion refused {:?}: {error}; object preserved",
                         self.path
                     ));
                 }
-                // Content is evidence only; a substituted file stays in place.
                 if std::fs::read(&self.path)
                     .map(|current| current != identity.bytes)
                     .unwrap_or(false)
@@ -410,9 +410,8 @@ impl OwnedRegistry {
                 self.path
             )),
         }
-
         for (dir, identity) in self.dir_identities.iter().rev() {
-            if let Err(error) = delete_verified_path(dir, Some(identity), Some(false), true) {
+            if let Err(error) = delete_verified_path(dir, identity, false, true) {
                 self.cleanup_errors
                     .push(format!("ancestor deletion refused {dir:?}: {error}"));
             }
@@ -427,8 +426,6 @@ impl OwnedRegistry {
             .collect()
     }
 
-    /// Explicit cleanup verification. Evidence is printed before failure so it
-    /// is captured in the guest log before any checkpoint recovery.
     fn finish(mut self) {
         self.cleanup();
         let residual = self.residual();
@@ -456,7 +453,7 @@ impl Drop for OwnedRegistry {
     }
 }
 
-/// Independent, cumulative-free measurements of the test-only Local mutex.
+/// Test-only Local mutex probe. NOT provisioning acceptance.
 #[derive(Default)]
 struct CriticalSectionProbe {
     active: AtomicUsize,
@@ -470,14 +467,13 @@ impl CriticalSectionProbe {
         self.maximum.fetch_max(active, Ordering::SeqCst);
         self.acquisitions.fetch_add(1, Ordering::SeqCst);
     }
-
     fn leave(&self) {
         self.active.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
-/// Process-level watchdog. A stuck worker cannot turn a bounded test into an
-/// infinite wait: on expiry an explicit FAIL is printed and the process exits.
+/// Process-level watchdog. On expiry it records that cleanup was not verified
+/// and requires controlled guest inspection before any checkpoint recovery.
 struct ProcessWatchdog {
     armed: Arc<AtomicBool>,
     deadline: Instant,
@@ -496,7 +492,7 @@ impl ProcessWatchdog {
                 }
                 if Instant::now() >= deadline {
                     eprintln!(
-                        "PR341_WATCHDOG_FAIL bounded process watchdog expired after {timeout:?}"
+                        "PR341_WATCHDOG_FAIL timeout={timeout:?} cleanup=NOT_VERIFIED checkpoint_recovery=REQUIRED_BEFORE_RETRY"
                     );
                     std::process::exit(101);
                 }
@@ -526,31 +522,137 @@ impl Drop for ProcessWatchdog {
     }
 }
 
-fn remove_negative_fixture(base: &Path, link: &Path, target: &Path) -> Vec<String> {
-    let mut errors = Vec::new();
-    if let Err(error) = delete_verified_path(link, None, Some(true), true) {
-        errors.push(format!("junction deletion refused {link:?}: {error}"));
-    }
-    for dir in [target, base] {
-        if let Err(error) = delete_verified_path(dir, None, Some(false), true) {
-            errors.push(format!(
-                "negative fixture dir deletion refused {dir:?}: {error}"
-            ));
-        }
-    }
-    for path in [link, target, base] {
-        match std::fs::symlink_metadata(path) {
-            Ok(_) => errors.push(format!("PR341_RESIDUAL_STATE negative object {path:?}")),
+/// Negative fixture with an identity captured for every object before any
+/// deletion is authorized. No destructive call receives an unbound identity.
+struct NegativeFixture {
+    base: PathBuf,
+    link: PathBuf,
+    target: PathBuf,
+    base_identity: Option<KernelIdentity>,
+    link_identity: Option<KernelIdentity>,
+    target_identity: Option<KernelIdentity>,
+    errors: Vec<String>,
+}
+
+impl NegativeFixture {
+    fn new() -> Self {
+        let root = programdata_root().expect("ProgramData root");
+        let base = root.join(format!("PrometheOS-Lite-PR341-Negative-{}", nonce()));
+        match std::fs::symlink_metadata(&base) {
+            Ok(_) => panic!("pre-existing negative fixture is not test-owned: {base:?}"),
             Err(error) if error.kind() == ErrorKind::NotFound => {}
-            Err(error) => errors.push(format!(
-                "PR341_CLEANUP_FAIL negative metadata {path:?}: {error}"
-            )),
+            Err(error) => panic!("cannot inspect negative fixture {base:?}: {error}"),
         }
+        std::fs::create_dir(&base).expect("exclusive negative fixture creation");
+        let target = base.join("target");
+        let link = base.join("junction");
+        let mut fixture = Self {
+            base: base.clone(),
+            link,
+            target,
+            base_identity: None,
+            link_identity: None,
+            target_identity: None,
+            errors: Vec::new(),
+        };
+        fixture.base_identity = match capture_identity(&base, true, false) {
+            Ok(identity) => Some(identity),
+            Err(error) => {
+                fixture
+                    .errors
+                    .push(format!("base identity capture failed: {error}"));
+                None
+            }
+        };
+        for child in [&fixture.target, &fixture.link] {
+            match std::fs::symlink_metadata(child) {
+                Ok(_) => panic!("pre-existing negative child is not test-owned: {child:?}"),
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => panic!("cannot inspect negative child {child:?}: {error}"),
+            }
+        }
+        std::fs::create_dir(&fixture.target).expect("test-owned target directory");
+        fixture.target_identity = match capture_identity(&fixture.target, true, false) {
+            Ok(identity) => Some(identity),
+            Err(error) => {
+                fixture
+                    .errors
+                    .push(format!("target identity capture failed: {error}"));
+                None
+            }
+        };
+        std::os::windows::fs::symlink_dir(&fixture.target, &fixture.link)
+            .expect("test-owned junction");
+        fixture.link_identity = match capture_identity(&fixture.link, true, true) {
+            Ok(identity) => Some(identity),
+            Err(error) => {
+                fixture
+                    .errors
+                    .push(format!("junction identity capture failed: {error}"));
+                None
+            }
+        };
+        fixture
     }
-    for error in &errors {
-        eprintln!("{error}");
+
+    fn finish(mut self) {
+        for (path, identity, reparse) in [
+            (&self.link, self.link_identity, true),
+            (&self.target, self.target_identity, false),
+            (&self.base, self.base_identity, false),
+        ] {
+            match identity {
+                Some(identity) => {
+                    if let Err(error) = delete_verified_path(path, &identity, reparse, true) {
+                        self.errors
+                            .push(format!("deletion refused {path:?}: {error}"));
+                    }
+                }
+                None => self.errors.push(format!(
+                    "no captured kernel identity for {path:?}; object preserved"
+                )),
+            }
+        }
+        for path in [&self.link, &self.target, &self.base] {
+            match std::fs::symlink_metadata(path) {
+                Ok(_) => self.errors.push(format!("PR341_RESIDUAL_STATE {path:?}")),
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => self
+                    .errors
+                    .push(format!("PR341_CLEANUP_FAIL metadata {path:?}: {error}")),
+            }
+        }
+        for error in &self.errors {
+            eprintln!("{error}");
+        }
+        assert!(
+            self.errors.is_empty(),
+            "negative fixture cleanup failed closed: {:?}",
+            self.errors
+        );
     }
-    errors
+}
+
+#[derive(Clone)]
+struct WorkerPlan {
+    label: String,
+    generation: u64,
+    owner: String,
+}
+
+#[derive(Debug)]
+enum WorkerOutcome {
+    Accepted { owner: String, digest: String },
+    Refused { owner: String, refusal: String },
+    ExecutionFailure(String),
+    Crash(String),
+    Timeout,
+}
+
+#[derive(Debug)]
+struct WorkerResult {
+    label: String,
+    outcome: WorkerOutcome,
 }
 
 fn provision_worker_executable() -> PathBuf {
@@ -571,41 +673,278 @@ fn provision_worker_executable() -> PathBuf {
     assert_eq!(
         found.len(),
         1,
-        "expected exactly one distinct provision worker process: {found:?}"
+        "exactly one provision worker binary: {found:?}"
     );
     found.remove(0)
 }
 
-/// Spawn a separate guest process and bound it with try_wait/kill. No blocking
-/// wait after the deadline, and each child's stdout is independent evidence.
-fn run_provision_worker(worker: &Path, registry: &Path, generation: u64) -> (bool, String) {
-    let mut child = Command::new(worker)
-        .env("PR341_WORKER_REGISTRY", registry)
-        .env("PR341_WORKER_GENERATION", generation.to_string())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn distinct provision worker process");
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        if let Some(status) = child.try_wait().expect("poll provision worker") {
-            let mut output = String::new();
-            if let Some(mut stdout) = child.stdout.take() {
-                let _ = stdout.read_to_string(&mut output);
+fn create_event(name: &str, manual_reset: bool) -> Result<EventHandle, String> {
+    let handle = unsafe {
+        CreateEventW(
+            std::ptr::null_mut(),
+            if manual_reset { TRUE } else { FALSE },
+            FALSE,
+            wide(OsStr::new(name)).as_ptr(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(format!("CreateEventW {name} failed: {}", unsafe {
+            GetLastError()
+        }));
+    }
+    Ok(EventHandle(handle))
+}
+
+fn classify_worker(
+    label: &str,
+    status: Option<ExitStatus>,
+    timed_out: bool,
+    outcome_path: &Path,
+) -> WorkerResult {
+    let outcome = if timed_out {
+        WorkerOutcome::Timeout
+    } else {
+        let code = status.and_then(|status| status.code());
+        let parsed: Value = match std::fs::metadata(outcome_path) {
+            Ok(metadata) if metadata.len() <= 16 * 1024 => std::fs::read_to_string(outcome_path)
+                .ok()
+                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                .unwrap_or(Value::Null),
+            _ => Value::Null,
+        };
+        let kind = parsed.get("kind").and_then(Value::as_str).unwrap_or("");
+        let owner = parsed
+            .get("owner")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        match (code, kind) {
+            (Some(WORKER_ACCEPTED), "accepted") => WorkerOutcome::Accepted {
+                owner,
+                digest: parsed
+                    .get("registry_sha256")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+            },
+            (Some(WORKER_REFUSED), "refused") => WorkerOutcome::Refused {
+                owner,
+                refusal: parsed
+                    .get("refusal")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+            },
+            (Some(WORKER_EXECUTION_FAILURE), "execution_failure") => {
+                WorkerOutcome::ExecutionFailure(format!("{parsed}"))
             }
-            if let Some(mut stderr) = child.stderr.take() {
-                let _ = stderr.read_to_string(&mut output);
-            }
-            println!("PR341_PROVISION_WORKER gen={generation} exit={status}: {output}");
-            return (status.success(), output);
+            _ => WorkerOutcome::Crash(format!("exit={code:?} outcome={parsed}")),
         }
-        if Instant::now() >= deadline {
+    };
+    WorkerResult {
+        label: label.to_string(),
+        outcome,
+    }
+}
+
+/// Spawn both child processes before waiting for either, synchronize their
+/// start with named Win32 events, and monitor them with bounded polling.
+/// Child stdout/stderr are null so no inherited pipe can block output reads.
+fn run_worker_pair(registry: &Path, plans: &[WorkerPlan]) -> Vec<WorkerResult> {
+    assert_eq!(plans.len(), 2, "a competing pair is required");
+    let worker = provision_worker_executable();
+    let run_nonce = nonce();
+    let sync_dir = std::env::temp_dir().join(format!("pr341-sync-{run_nonce}"));
+    std::fs::create_dir(&sync_dir).expect("exclusive sync directory");
+    let go_name = format!("Local\\PR341-SYNC-{run_nonce}-go");
+    let ready_names: Vec<String> = (0..2)
+        .map(|index| format!("Local\\PR341-SYNC-{run_nonce}-ready-{index}"))
+        .collect();
+    let go = create_event(&go_name, true).expect("go event");
+    let ready_events: Vec<EventHandle> = ready_names
+        .iter()
+        .map(|name| create_event(name, false).expect("ready event"))
+        .collect();
+
+    let mut children = Vec::new();
+    let mut outcome_paths = Vec::new();
+    for (index, plan) in plans.iter().enumerate() {
+        let outcome_path = sync_dir.join(format!("outcome-{index}.json"));
+        outcome_paths.push(outcome_path.clone());
+        let child = Command::new(&worker)
+            .env("PR341_WORKER_REGISTRY", registry)
+            .env("PR341_WORKER_GENERATION", plan.generation.to_string())
+            .env("PR341_WORKER_OWNER", &plan.owner)
+            .env("PR341_WORKER_OUTCOME", &outcome_path)
+            .env("PR341_WORKER_READY_EVENT", &ready_names[index])
+            .env("PR341_WORKER_GO_EVENT", &go_name)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn distinct provision worker process");
+        children.push(child);
+    }
+
+    let ready_deadline = Instant::now() + Duration::from_secs(10);
+    let mut ready_ok = true;
+    for event in &ready_events {
+        let wait = unsafe { WaitForSingleObject(event.0, millis(ready_deadline)) };
+        if wait != WAIT_OBJECT_0 {
+            eprintln!("PR341_WORKER_FAIL ready synchronization wait={wait}");
+            ready_ok = false;
+            break;
+        }
+    }
+    if ready_ok {
+        assert_ne!(unsafe { SetEvent(go.0) }, 0, "release both contenders");
+    } else {
+        for child in children.iter_mut() {
             let _ = child.kill();
             let _ = child.wait();
-            panic!("provision worker watchdog expired for generation {generation}");
         }
-        std::thread::sleep(Duration::from_millis(50));
     }
+
+    let collect_deadline = Instant::now() + Duration::from_secs(20);
+    let mut statuses: Vec<Option<ExitStatus>> = vec![None; children.len()];
+    let mut timed_out = vec![!ready_ok; children.len()];
+    loop {
+        let mut complete = true;
+        for (index, child) in children.iter_mut().enumerate() {
+            if statuses[index].is_none() && !timed_out[index] {
+                match child.try_wait().expect("poll provision worker") {
+                    Some(status) => statuses[index] = Some(status),
+                    None => complete = false,
+                }
+            }
+        }
+        if complete {
+            break;
+        }
+        if Instant::now() >= collect_deadline {
+            for (index, child) in children.iter_mut().enumerate() {
+                if statuses[index].is_none() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    timed_out[index] = true;
+                }
+            }
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    let results: Vec<WorkerResult> = plans
+        .iter()
+        .enumerate()
+        .map(|(index, plan)| {
+            let result = classify_worker(
+                &plan.label,
+                statuses[index],
+                timed_out[index],
+                &outcome_paths[index],
+            );
+            println!("PR341_WORKER_RESULT {}: {:?}", plan.label, result.outcome);
+            result
+        })
+        .collect();
+
+    for path in &outcome_paths {
+        if std::fs::symlink_metadata(path).is_ok() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+    let _ = std::fs::remove_dir(&sync_dir);
+    assert!(
+        std::fs::symlink_metadata(&sync_dir).is_err(),
+        "temporary worker synchronization state remains: {sync_dir:?}"
+    );
+    results
+}
+
+fn describe_results(results: &[WorkerResult]) -> String {
+    results
+        .iter()
+        .map(|result| match &result.outcome {
+            WorkerOutcome::Accepted { owner, digest } => {
+                format!("{}:accepted(owner={owner},digest={digest})", result.label)
+            }
+            WorkerOutcome::Refused { owner, refusal } => {
+                format!("{}:refused(owner={owner},refusal={refusal})", result.label)
+            }
+            WorkerOutcome::ExecutionFailure(detail) => {
+                format!("{}:execution_failure({detail})", result.label)
+            }
+            WorkerOutcome::Crash(detail) => format!("{}:crash({detail})", result.label),
+            WorkerOutcome::Timeout => format!("{}:timeout", result.label),
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn assert_competing_pair(
+    results: &[WorkerResult],
+    generation: u64,
+    compatible_owner: Option<&str>,
+) -> (String, String) {
+    let accepted: Vec<&WorkerResult> = results
+        .iter()
+        .filter(|result| matches!(result.outcome, WorkerOutcome::Accepted { .. }))
+        .collect();
+    let refused: Vec<&WorkerResult> = results
+        .iter()
+        .filter(|result| matches!(result.outcome, WorkerOutcome::Refused { .. }))
+        .collect();
+    assert_eq!(
+        accepted.len(),
+        1,
+        "exactly one competing generation {generation} proposal must be accepted: {}",
+        describe_results(results)
+    );
+    assert_eq!(
+        refused.len(),
+        1,
+        "exactly one competing generation {generation} proposal must be refused: {}",
+        describe_results(results)
+    );
+    let refusal = match &refused[0].outcome {
+        WorkerOutcome::Refused { refusal, .. } => refusal,
+        other => unreachable!("classified refusal: {other:?}"),
+    };
+    assert!(
+        refusal.contains("NonMonotonicUpdate") || refusal.contains("ConcurrentUpdate"),
+        "unexpected refusal must be a monotonic/concurrency conflict: {refusal}"
+    );
+    let (owner, digest) = match &accepted[0].outcome {
+        WorkerOutcome::Accepted { owner, digest } => (owner.clone(), digest.clone()),
+        other => unreachable!("classified acceptance: {other:?}"),
+    };
+    if let Some(expected) = compatible_owner {
+        assert_eq!(
+            owner, expected,
+            "accepted owner must match the prior document; substitution is refused"
+        );
+    }
+    (owner, digest)
+}
+
+fn verify_final_document(owned: &OwnedRegistry, generation: u64, owner: &str, digest: &str) {
+    let installed =
+        load_registry(&owned.path).expect("final registry must load via production API");
+    assert_eq!(
+        installed.generation, generation,
+        "final generation mismatch"
+    );
+    let expected = owned.registry(
+        generation,
+        vec![OwnedRegistry::binding(SID_A, owner, false, 1)],
+    );
+    let bytes = canonical_json(&expected).expect("expected canonical bytes");
+    assert_eq!(
+        canonical_json(&installed).expect("installed canonical bytes"),
+        bytes,
+        "final canonical bytes must equal the accepted proposal"
+    );
+    assert_eq!(hex(Sha256::digest(&bytes).as_slice()), digest);
 }
 
 #[test]
@@ -622,7 +961,6 @@ fn elevated_first_install_exact_bytes_and_trust() {
     );
     provision_registry(&owned.path, &expected).expect("elevated first install must succeed");
     owned.observe(&expected);
-
     let installed = load_registry(&owned.path).expect("installed registry must load");
     assert_eq!(installed, expected);
     assert_eq!(
@@ -630,13 +968,8 @@ fn elevated_first_install_exact_bytes_and_trust() {
         canonical_json(&expected).expect("canonical bytes")
     );
     validate_registry_location(&owned.path).expect("trusted owner and DACL");
-    validate_file_security(
-        owned
-            .path
-            .parent()
-            .expect("registry has a protected parent"),
-    )
-    .expect("trusted parent ACL");
+    validate_file_security(owned.path.parent().expect("protected parent"))
+        .expect("trusted parent ACL");
     reject_reparse(&owned.path).expect("no reparse substitution");
     assert_eq!(
         resolve_owner(&owned.path, SID_A).expect("owner lookup"),
@@ -657,7 +990,6 @@ fn monotonic_update_and_permanent_revocation() {
     );
     provision_registry(&owned.path, &first).unwrap();
     owned.observe(&first);
-
     let second = owned.registry(
         2,
         vec![
@@ -667,20 +999,12 @@ fn monotonic_update_and_permanent_revocation() {
     );
     provision_registry(&owned.path, &second).unwrap();
     owned.observe(&second);
-    assert_eq!(
-        resolve_owner(&owned.path, SID_B).unwrap(),
-        None,
-        "revoked SID must be a permanent miss"
-    );
+    assert_eq!(resolve_owner(&owned.path, SID_B).unwrap(), None);
     assert_eq!(
         resolve_owner(&owned.path, SID_A).unwrap(),
         Some("owner-a".into())
     );
-
-    assert!(
-        enforce_monotonic_update(Some(&second), &first).is_err(),
-        "generation rollback"
-    );
+    assert!(enforce_monotonic_update(Some(&second), &first).is_err());
     let reversal = owned.registry(
         3,
         vec![
@@ -688,10 +1012,7 @@ fn monotonic_update_and_permanent_revocation() {
             OwnedRegistry::binding(SID_B, "owner-b", false, 3),
         ],
     );
-    assert!(
-        enforce_monotonic_update(Some(&second), &reversal).is_err(),
-        "revocation reversal"
-    );
+    assert!(enforce_monotonic_update(Some(&second), &reversal).is_err());
     let substituted = owned.registry(
         3,
         vec![
@@ -699,75 +1020,27 @@ fn monotonic_update_and_permanent_revocation() {
             OwnedRegistry::binding(SID_B, "owner-b", true, 2),
         ],
     );
-    assert!(
-        enforce_monotonic_update(Some(&second), &substituted).is_err(),
-        "owner substitution"
-    );
+    assert!(enforce_monotonic_update(Some(&second), &substituted).is_err());
     let omitted_tombstone =
         owned.registry(3, vec![OwnedRegistry::binding(SID_A, "owner-a", false, 1)]);
-    assert!(
-        enforce_monotonic_update(Some(&second), &omitted_tombstone).is_err(),
-        "tombstone drop"
-    );
+    assert!(enforce_monotonic_update(Some(&second), &omitted_tombstone).is_err());
     owned.finish();
 }
 
 #[test]
 fn negative_controls_fail_closed() {
     let _authority = require_provisioning_authority().expect("elevated authority");
-
-    assert!(
-        provision_registry(Path::new("registry.json"), &OwnerRegistry::empty(1)).is_err(),
-        "relative registry path must be refused"
-    );
+    assert!(provision_registry(Path::new("registry.json"), &OwnerRegistry::empty(1)).is_err());
     assert!(parse_registry_bytes(b"not json").is_err());
     assert!(parse_registry_bytes(&vec![b'x'; 1_048_577]).is_err());
-    assert!(
-        !is_well_formed_sid("S-1-5-21-not-a-number"),
-        "non-numeric SID component must be refused"
-    );
-
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("wall clock after epoch")
-        .as_nanos();
-    let base = programdata_root().unwrap().join(format!(
-        "PrometheOS-Lite-PR341-Negative-{}-{nonce}",
-        std::process::id()
-    ));
-    match std::fs::symlink_metadata(&base) {
-        Ok(_) => panic!("pre-existing negative-control fixture is not test-owned: {base:?}"),
-        Err(error) if error.kind() == ErrorKind::NotFound => {}
-        Err(error) => panic!("cannot inspect negative-control fixture {base:?}: {error}"),
-    }
-    std::fs::create_dir(&base).expect("exclusive creation of unique negative fixture");
-    let link = base.join("junction");
-    let target = base.join("target");
-    assert!(
-        match std::fs::symlink_metadata(&link) {
-            Err(error) => error.kind() == ErrorKind::NotFound,
-            Ok(_) => false,
-        } && match std::fs::symlink_metadata(&target) {
-            Err(error) => error.kind() == ErrorKind::NotFound,
-            Ok(_) => false,
-        },
-        "pre-existing negative-control child is not test-owned"
-    );
-    std::fs::create_dir(&target).expect("test-owned target directory");
-    std::os::windows::fs::symlink_dir(&target, &link).expect("test-owned junction");
-    let reparse_refused = reject_reparse(&link).is_err();
-    let cleanup_errors = remove_negative_fixture(&base, &link, &target);
-
+    assert!(!is_well_formed_sid("S-1-5-21-not-a-number"));
+    let fixture = NegativeFixture::new();
+    let reparse_refused = reject_reparse(&fixture.link).is_err();
+    fixture.finish();
     assert!(reparse_refused, "junction must be refused");
-    assert!(
-        cleanup_errors.is_empty(),
-        "negative-control cleanup failed closed: {cleanup_errors:?}"
-    );
 }
 
-/// LIMITED SCOPE regression: this is the test-only Local mutex mechanism and
-/// is NOT concurrent provisioning acceptance. Production Global-mutex
-/// provisioning is verified by concurrent_provisioning_serializes_production_updates.
+/// LIMITED SCOPE: test-only Local mutex regression, not provisioning acceptance.
 #[test]
 fn test_mutex_local_regression_serializes_and_cleanup_is_verified() {
     let _watchdog = ProcessWatchdog::new(Duration::from_secs(20));
@@ -776,7 +1049,6 @@ fn test_mutex_local_regression_serializes_and_cleanup_is_verified() {
     let barrier = Arc::new(Barrier::new(2));
     let probe = Arc::new(CriticalSectionProbe::default());
     let (tx, rx) = mpsc::channel::<Result<(), String>>();
-
     let mut handles = Vec::new();
     for _ in 0..2 {
         let name = name.clone();
@@ -800,7 +1072,6 @@ fn test_mutex_local_regression_serializes_and_cleanup_is_verified() {
         }));
     }
     drop(tx);
-
     let mut failures = Vec::new();
     for index in 0..2 {
         match rx.recv_timeout(_watchdog.remaining()) {
@@ -810,11 +1081,10 @@ fn test_mutex_local_regression_serializes_and_cleanup_is_verified() {
                 failures.push(format!("contender {index}: watchdog timeout"))
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                failures.push(format!("contender {index}: no completion acknowledgment"))
+                failures.push(format!("contender {index}: no acknowledgment"))
             }
         }
     }
-    // Join only after complete success. A timeout is FAIL with no blocking join.
     if failures.is_empty() {
         for (index, handle) in handles.into_iter().enumerate() {
             if handle.join().is_err() {
@@ -824,8 +1094,7 @@ fn test_mutex_local_regression_serializes_and_cleanup_is_verified() {
     }
     assert!(
         failures.is_empty(),
-        "test-only Local mutex regression failed: {}",
-        failures.join("; ")
+        "Local mutex regression failed: {failures:?}"
     );
     assert_eq!(probe.acquisitions.load(Ordering::SeqCst), 2);
     assert_eq!(probe.maximum.load(Ordering::SeqCst), 1);
@@ -833,62 +1102,79 @@ fn test_mutex_local_regression_serializes_and_cleanup_is_verified() {
     owned.finish();
 }
 
-/// REAL acceptance: distinct guest processes contend through production
-/// provision_registry and its Global mutex. Version/conflict outcomes are
-/// checked after every round.
+#[test]
+fn sequential_generation_progression_control() {
+    let mut owned = OwnedRegistry::fresh();
+    for generation in 1..=3 {
+        let proposed = owned.registry(
+            generation,
+            vec![OwnedRegistry::binding(SID_A, "pr341-sequential", false, 1)],
+        );
+        provision_registry(&owned.path, &proposed)
+            .expect("legitimate 1->2->3 progression must succeed");
+        owned.observe(&proposed);
+    }
+    let final_registry = load_registry(&owned.path).expect("final registry");
+    assert_eq!(final_registry.generation, 3);
+    assert_eq!(
+        resolve_owner(&owned.path, SID_A).unwrap(),
+        Some("pr341-sequential".to_string())
+    );
+    owned.finish();
+}
+
 #[test]
 fn concurrent_provisioning_serializes_production_updates() {
-    let _watchdog = ProcessWatchdog::new(Duration::from_secs(45));
+    let _watchdog = ProcessWatchdog::new(Duration::from_secs(60));
     let mut owned = OwnedRegistry::fresh();
-    let worker = provision_worker_executable();
+    let round_one = run_worker_pair(
+        &owned.path,
+        &[
+            WorkerPlan {
+                label: "gen1-A".to_string(),
+                generation: 1,
+                owner: "pr341-worker-A".to_string(),
+            },
+            WorkerPlan {
+                label: "gen1-B".to_string(),
+                generation: 1,
+                owner: "pr341-worker-B".to_string(),
+            },
+        ],
+    );
+    let (accepted_owner, digest) = assert_competing_pair(&round_one, 1, None);
+    verify_final_document(&owned, 1, &accepted_owner, &digest);
 
-    // Two competing first installs at the same generation: serialization plus
-    // monotonic compare must yield exactly one winner and one refusal.
-    let first_round = [
-        run_provision_worker(&worker, &owned.path, 1),
-        run_provision_worker(&worker, &owned.path, 1),
-    ];
-    let successes = first_round.iter().filter(|result| result.0).count();
-    let refusals = first_round.iter().filter(|result| !result.0).count();
-    assert_eq!(
-        (successes, refusals),
-        (1, 1),
-        "competing first installs must serialize: {first_round:?}"
+    let other_owner = if accepted_owner == "pr341-worker-A" {
+        "pr341-worker-B"
+    } else {
+        "pr341-worker-A"
+    };
+    let round_two = run_worker_pair(
+        &owned.path,
+        &[
+            WorkerPlan {
+                label: "gen2-compatible".to_string(),
+                generation: 2,
+                owner: accepted_owner.clone(),
+            },
+            WorkerPlan {
+                label: "gen2-substitution".to_string(),
+                generation: 2,
+                owner: other_owner.to_string(),
+            },
+        ],
     );
-    let installed = load_registry(&owned.path).expect("installed registry must load");
+    let (final_owner, digest) = assert_competing_pair(&round_two, 2, Some(&accepted_owner));
     assert_eq!(
-        installed.generation, 1,
-        "winner generation must be installed"
+        final_owner, accepted_owner,
+        "untrusted owner substitution refused"
     );
+    verify_final_document(&owned, 2, &final_owner, &digest);
 
-    // Two competing updates at generations 2 and 3: the higher generation wins
-    // if it acquires the lock second; otherwise generation 2 wins and the
-    // stale generation 3 update is refused. Exactly one succeeds either way.
-    let second_round = [
-        run_provision_worker(&worker, &owned.path, 2),
-        run_provision_worker(&worker, &owned.path, 3),
-    ];
-    let successes = second_round.iter().filter(|result| result.0).count();
-    let refusals = second_round.iter().filter(|result| !result.0).count();
-    assert_eq!(
-        (successes, refusals),
-        (1, 1),
-        "competing updates must serialize: {second_round:?}"
-    );
-    let winner_generation = if second_round[0].0 { 2 } else { 3 };
-    let final_registry = load_registry(&owned.path).expect("final registry must load");
-    assert_eq!(
-        final_registry.generation, winner_generation,
-        "final version must equal the winning provisioner's generation"
-    );
     let expected = owned.registry(
-        winner_generation,
-        vec![OwnedRegistry::binding(SID_A, "pr341-worker", false, 1)],
-    );
-    assert_eq!(
-        canonical_json(&final_registry).expect("final bytes"),
-        canonical_json(&expected).expect("expected bytes"),
-        "final registry bytes must equal the winning provisioner's document"
+        2,
+        vec![OwnedRegistry::binding(SID_A, &final_owner, false, 1)],
     );
     owned.observe(&expected);
     owned.finish();
