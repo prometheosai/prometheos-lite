@@ -480,9 +480,32 @@ impl OwnedRegistry {
             return;
         }
         self.cleanup_attempted = true;
-        let ancestry = ancestry_errors(&self.path, false);
+
+        // State-aware cleanup: a refused provisioning leaves the initially
+        // absent protected directories absent. That is the expected no-op case,
+        // not a security failure. Any object that appears there is unexplained
+        // and must be preserved and reported.
+        let no_test_objects = self.identity.is_none() && self.dir_identities.is_empty();
+        let ancestry = ancestry_errors(&self.path, no_test_objects);
+        if no_test_objects {
+            for dir in &self.absent_dirs {
+                match std::fs::symlink_metadata(dir) {
+                    Err(error) if error.kind() == ErrorKind::NotFound => {}
+                    Ok(_) => self.cleanup_errors.push(format!(
+                        "unexplained object at initially absent {dir:?}; preserved"
+                    )),
+                    Err(error) => self.cleanup_errors.push(format!(
+                        "unexpected metadata at initially absent {dir:?}: {error}"
+                    )),
+                }
+            }
+        }
         if !ancestry.is_empty() {
             self.cleanup_errors.extend(ancestry);
+            return;
+        }
+        if no_test_objects {
+            // Nothing was created by this run: no deletion is authorized.
             return;
         }
         match self.identity.take() {

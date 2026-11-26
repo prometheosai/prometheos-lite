@@ -362,7 +362,7 @@ pub mod windows {
     /// Owner = Administrators, DACL = full control for Administrators/SYSTEM
     /// only, protected so no inherited personal-account ACE can slip in.
     const TRUSTED_FILE_SDDL: &str = "O:BAD:P(A;;GA;;;SY)(A;;GA;;;BA)";
-    const TRUSTED_DIR_SDDL: &str = "O:BAD:P(OI)(CI)(A;;GA;;;SY)(A;;GA;;;BA)";
+    const TRUSTED_DIR_SDDL: &str = "O:BAD:P(A;OICI;GA;;;SY)(A;OICI;GA;;;BA)";
 
     struct HandleGuard(HANDLE);
     impl Drop for HandleGuard {
