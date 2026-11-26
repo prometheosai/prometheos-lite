@@ -1,0 +1,581 @@
+name: PR341 Windows security acceptance (manual only)
+
+# Supplemental evidence only. Repository-native local_ci remains authoritative.
+# Approved as the single narrow policy exception enforced by
+# scripts/local_ci_policy.py. Any content change requires exact Principal review
+# and a deliberate re-pin of scripts/reviewed_config_digests.json.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr341-manual-windows-acceptance
+  cancel-in-progress: false
+
+jobs:
+  windows-owner-registry:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - name: Check out immutable reviewed PR 341 head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: 37a7ae33ca21fc25ad0f70f20022cd4a95634bce
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Verify exact source, trusted PostCSS blob and clean ancestry
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $expected = '37a7ae33ca21fc25ad0f70f20022cd4a95634bce'
+          $actual = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $actual -ne $expected) { throw "Unexpected source commit: $actual" }
+          $trusted = '33ad091d26d8a9dc95ebdf616e217d985ec215b8'
+          $postcss = (git rev-parse 'HEAD:frontend/postcss.config.js').Trim()
+          if ($LASTEXITCODE -ne 0 -or $postcss -ne $trusted) { throw 'Untrusted PostCSS configuration' }
+          $suspects = @(
+            '6d6fb679b1b383a1f34266ceada4d1cab381140c',
+            '14b83781405e1dccc737da74b2203bd00593ccb4',
+            '468017b4a78e5ed2aa988ed685de960d34ad24ac'
+          )
+          $ancestry = @(git rev-list HEAD)
+          if ($LASTEXITCODE -ne 0) { throw 'Ancestry enumeration failed' }
+          foreach ($suspect in $suspects) {
+            if ($ancestry -contains $suspect) { throw "Known suspect commit in ancestry: $suspect" }
+          }
+          "SOURCE_SHA=$actual" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "POSTCSS_BLOB=$postcss" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          'KNOWN_SUSPECT_ANCESTRY=NOT_PRESENT' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+      - name: Record elevated Windows identity and prove elevated authority
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+          $principal = [Security.Principal.WindowsPrincipal]::new($id)
+          $isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+          $sid = $id.User.Value
+          if ([string]::IsNullOrWhiteSpace($sid)) { throw 'Token elevation inspection failed: process token has no SID' }
+
+          # One classification model for the hosted authority context. The
+          # TokenElevation value is read from the actual process token with the
+          # same kernel primitive used by production's
+          # require_provisioning_authority(). Group membership is recorded
+          # separately and is NEVER treated as proof of elevation. A missing
+          # or malformed token observation is INVALID and fails closed.
+          function Get-AuthorityClass {
+            param([int]$TokenIsElevated, [bool]$AdministratorGroupMember, [string]$Sid)
+            if ([string]::IsNullOrWhiteSpace($Sid) -or $TokenIsElevated -lt 0) { return 'INVALID' }
+            if ($TokenIsElevated -eq 1) {
+              if ($AdministratorGroupMember -or $Sid -eq 'S-1-5-18') { return 'ELEVATED' }
+              return 'ELEVATED_NON_ADMIN_MEMBER'
+            }
+            if ($AdministratorGroupMember) { return 'ADMIN_MEMBER_NON_ELEVATED' }
+            return 'UNPRIVILEGED'
+          }
+
+          $nativeSource = @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class Pr341TokenNative {
+          [StructLayout(LayoutKind.Sequential)] public struct TOKEN_ELEVATION { public uint TokenIsElevated; }
+          [DllImport("advapi32.dll", SetLastError=true)] public static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+          [DllImport("advapi32.dll", SetLastError=true)] public static extern bool GetTokenInformation(IntPtr token, int infoClass, out TOKEN_ELEVATION info, int size, out int returned);
+          [DllImport("kernel32.dll")] public static extern IntPtr GetCurrentProcess();
+          [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr handle);
+          }
+          '@
+          if (-not ('Pr341TokenNative' -as [type])) { Add-Type -TypeDefinition $nativeSource -ErrorAction Stop }
+          $tokenHandle = [IntPtr]::Zero
+          if (-not [Pr341TokenNative]::OpenProcessToken([Pr341TokenNative]::GetCurrentProcess(), 0x0008, [ref]$tokenHandle) -or $tokenHandle -eq [IntPtr]::Zero) {
+            throw 'Token elevation inspection failed: OpenProcessToken did not return a process token'
+          }
+          try {
+            $elevation = New-Object Pr341TokenNative+TOKEN_ELEVATION
+            $returned = 0
+            if (-not [Pr341TokenNative]::GetTokenInformation($tokenHandle, 20, [ref]$elevation, 4, [ref]$returned) -or $returned -ne 4) {
+              throw 'Token elevation inspection failed: GetTokenInformation(TokenElevation) was incomplete'
+            }
+            $tokenIsElevated = [int]$elevation.TokenIsElevated
+          } finally { [void][Pr341TokenNative]::CloseHandle($tokenHandle) }
+          if ($tokenIsElevated -ne 0 -and $tokenIsElevated -ne 1) {
+            throw "Token elevation inspection failed: unexpected TokenIsElevated=$tokenIsElevated"
+          }
+          $authority = Get-AuthorityClass -TokenIsElevated $tokenIsElevated -AdministratorGroupMember $isAdmin -Sid $sid
+          if ($authority -eq 'INVALID') { throw 'Token elevation inspection failed: authority classification is INVALID' }
+          # Effective authority mirrors production: elevation AND membership in
+          # Administrators/SYSTEM. An administrator-group member with a
+          # non-elevated token is DENIED and is never labelled elevated.
+          $effective = if ($authority -eq 'ELEVATED') { 'GRANTED' } else { 'DENIED' }
+          $record = Join-Path $env:RUNNER_TEMP 'pr341-elevated-identity.txt'
+          "NAME=$($id.Name)`nSID=$sid`nIS_ADMIN=$isAdmin`nTOKEN_IS_ELEVATED=$tokenIsElevated`nAUTHORITY_CLASS=$authority`nEFFECTIVE_PROVISIONING_AUTHORITY=$effective" | Set-Content -Path $record -Encoding ascii
+          "ELEVATED_IDENTITY=$($id.Name)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "ELEVATED_IS_ADMIN=$isAdmin" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "TOKEN_IS_ELEVATED=$tokenIsElevated" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "AUTHORITY_CLASS=$authority" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "EFFECTIVE_PROVISIONING_AUTHORITY=$effective" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          if ($effective -ne 'GRANTED') {
+            # Do not throw here: the restricted real-token path must still run
+            # and record its own evidence. The final authority gate fails with
+            # the precise environmental blocker after that path completes.
+            "ELEVATED_PATH_BLOCKER=hosted token has no elevated provisioning authority (TokenIsElevated=$tokenIsElevated, class=$authority)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          }
+          whoami /groups
+
+      - name: Build focused Windows owner-registry test binary
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # The pinned PR #341 checkout predates the helper script, so the
+          # reviewed resolver is embedded here and materialized into this
+          # run's owned temp directory. Its exact bytes are hash-verified
+          # before execution. No mutable checkout is used for helper source.
+          $resolverSource = @'
+          """Resolve exactly one Cargo compiler-artifact for the focused lib test target.
+
+          Reads Cargo's `--message-format=json` output, selects the single expected
+          compiler-artifact by identity and test profile, verifies its executable is a
+          real file on disk, and prints its exact absolute path. Missing, ambiguous,
+          wrong-identity or malformed input fails closed.
+
+          This deliberately does NOT search the filesystem by name or modification time:
+          the hosted runner used a nonstandard Cargo output layout, so any hardcoded
+          `debug/deps` assumption is unsafe.
+          """
+
+          import argparse
+          import json
+          import os
+          import sys
+
+          EXPECTED_TARGET_NAME = "prometheos_lite"
+          EXPECTED_TARGET_KIND = "lib"
+
+
+          def resolve(input_path: str) -> str:
+              with open(input_path, encoding="utf-8-sig") as handle:
+                  raw_lines = handle.read().splitlines()
+
+              candidates = []
+              for line_number, line in enumerate(raw_lines, 1):
+                  if not line.strip():
+                      continue
+                  try:
+                      record = json.loads(line)
+                  except (ValueError, TypeError) as error:
+                      raise ValueError(f"malformed Cargo JSON on line {line_number}: {error}") from error
+                  if not isinstance(record, dict) or record.get("reason") != "compiler-artifact":
+                      continue
+                  target = record.get("target")
+                  profile = record.get("profile")
+                  if not isinstance(target, dict) or not isinstance(profile, dict):
+                      continue
+                  kinds = target.get("kind")
+                  if (
+                      target.get("name") == EXPECTED_TARGET_NAME
+                      and isinstance(kinds, list)
+                      and EXPECTED_TARGET_KIND in kinds
+                      and target.get("test") is True
+                      and profile.get("test") is True
+                  ):
+                      candidates.append(record)
+
+              if not candidates:
+                  raise ValueError("no matching compiler-artifact for the focused lib test target")
+              if len(candidates) != 1:
+                  raise ValueError(f"ambiguous compiler-artifact selection: {len(candidates)} candidates")
+
+              executable = candidates[0].get("executable")
+              if not isinstance(executable, str) or not executable:
+                  raise ValueError("compiler-artifact has no executable")
+              absolute = os.path.abspath(executable)
+              if not os.path.isfile(absolute):
+                  raise ValueError(f"compiler-artifact executable is not a real file: {absolute}")
+              return absolute
+
+
+          def main() -> int:
+              parser = argparse.ArgumentParser()
+              parser.add_argument("--input", required=True, help="path to Cargo --message-format=json output")
+              args = parser.parse_args()
+              try:
+                  print(resolve(args.input))
+              except (OSError, ValueError) as error:
+                  print(f"cargo artifact resolution failed: {error}", file=sys.stderr)
+                  return 1
+              return 0
+
+
+          if __name__ == "__main__":
+              raise SystemExit(main())
+          '@
+          $resolverSource = $resolverSource.Replace("`r`n", "`n")
+          # A PowerShell here-string omits the final newline; restore it so
+          # the materialized bytes exactly match the reviewed resolver source.
+          if (-not $resolverSource.EndsWith("`n")) { $resolverSource = $resolverSource + "`n" }
+          $resolver = Join-Path $env:RUNNER_TEMP 'resolve_cargo_test_artifact.py'
+          [IO.File]::WriteAllText($resolver, $resolverSource, (New-Object Text.UTF8Encoding($false)))
+          $actualResolverHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $resolver).Hash.ToLowerInvariant()
+          if ($actualResolverHash -ne 'fa3a0b71bd623f8e1a5d3078f0cb845a0df93a7974fac5cdd755cc2a9247aaa4') { throw 'Embedded resolver bytes do not match the reviewed pin' }
+          $cargoJson = Join-Path $env:RUNNER_TEMP 'pr341-cargo-artifacts.json'
+          cargo test --locked --lib work::owner_registry --no-run --message-format=json > $cargoJson
+          if ($LASTEXITCODE -ne 0) { throw "Focused test build failed: $LASTEXITCODE" }
+          $exe = & python $resolver --input $cargoJson
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($exe)) { throw 'Exact focused lib test executable could not be resolved' }
+          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw "Resolved test executable is not a file: $exe" }
+          [IO.File]::WriteAllText((Join-Path $env:RUNNER_TEMP 'pr341-test-exe.txt'), $exe)
+          "RESOLVER_SHA=$actualResolverHash" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "TEST_BINARY=$exe" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+      - name: Elevated path - owner-registry unit and negative controls
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $identityRecord = Join-Path $env:RUNNER_TEMP 'pr341-elevated-identity.txt'
+          $identity = Get-Content $identityRecord -Raw
+          $effective = (($identity -split "`n" | Where-Object { $_ -like 'EFFECTIVE_PROVISIONING_AUTHORITY=*' }) -replace '^EFFECTIVE_PROVISIONING_AUTHORITY=', '').Trim()
+          $authorityClass = (($identity -split "`n" | Where-Object { $_ -like 'AUTHORITY_CLASS=*' }) -replace '^AUTHORITY_CLASS=', '').Trim()
+          $tokenElevated = (($identity -split "`n" | Where-Object { $_ -like 'TOKEN_IS_ELEVATED=*' }) -replace '^TOKEN_IS_ELEVATED=', '').Trim()
+          if ([string]::IsNullOrWhiteSpace($effective)) { throw 'Elevated authority record is missing; elevated path cannot be classified' }
+          $resultFile = Join-Path $env:RUNNER_TEMP 'pr341-elevated-path-result.txt'
+          if ($effective -ne 'GRANTED') {
+            # The elevated SKIP marker is only expected in a genuinely elevated
+            # authority context. Running these tests under a non-elevated token
+            # executes the unprivileged refusal assertion and correctly emits
+            # no SKIP; treating that as a guard failure is the defect being
+            # repaired. Record a specific blocker, keep the guards intact below,
+            # and let the final gate fail after the restricted path has run.
+            "ELEVATED_PATH=NOT_RUN`nBLOCKER=no elevated provisioning authority (TokenIsElevated=$tokenElevated, class=$authorityClass)" | Set-Content -Path $resultFile -Encoding ascii
+            'ELEVATED_PATH=NOT_RUN_ENVIRONMENTAL_BLOCKER' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            return
+          }
+          $exe = [IO.File]::ReadAllText((Join-Path $env:RUNNER_TEMP 'pr341-test-exe.txt'))
+          $log = Join-Path $env:RUNNER_TEMP 'pr341-elevated-tests.log'
+          & $exe --nocapture work::owner_registry 2>&1 | Tee-Object -FilePath $log
+          if ($LASTEXITCODE -ne 0) { throw "Elevated registry tests failed: $LASTEXITCODE" }
+          $expectedSkip = 'SKIP: elevated host; privileged provisioning acceptance NOT RUN'
+          $skips = @(Select-String -Path $log -Pattern 'SKIP:')
+          $unexpected = @($skips | Where-Object { $_.Line -notlike "*$expectedSkip*" })
+          if ($unexpected.Count -gt 0) {
+            throw "Unexpected SKIP in elevated path: $(($unexpected | ForEach-Object { $_.Line }) -join ' | ')"
+          }
+          if (-not (Select-String -Path $log -Pattern $expectedSkip -SimpleMatch)) {
+            throw 'Expected elevated-host SKIP marker is absent; skip detection may have been weakened'
+          }
+          $required = @(
+            'reparse_point_or_junction_is_detected',
+            'world_writable_directory_is_refused',
+            'missing_file_security_cannot_be_verified',
+            'acl_setup_failure_is_detected_instead_of_skipped',
+            'concurrent_writers_share_one_mutex',
+            'monotonic_update_refuses_rollback_revocation_reversal_and_owner_change',
+            'revocation_tombstone_cannot_be_dropped_by_omission_then_readded'
+          )
+          foreach ($name in $required) {
+            if (-not (Select-String -Path $log -Pattern "$name \.\.\. ok")) {
+              throw "Required elevated test did not run and pass: $name"
+            }
+          }
+          "ELEVATED_PATH=UNIT_CONTROLS_EXECUTED`nBLOCKER=NONE" | Set-Content -Path $resultFile -Encoding ascii
+          'ELEVATED_PATH=UNIT_CONTROLS_EXECUTED' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+      - name: Restricted-user path - real token proves unprivileged refusal
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = [IO.File]::ReadAllText((Join-Path $env:RUNNER_TEMP 'pr341-test-exe.txt'))
+          $elevatedRecord = Join-Path $env:RUNNER_TEMP 'pr341-elevated-identity.txt'
+          $elevatedSid = ((Get-Content $elevatedRecord | Where-Object { $_ -like 'SID=*' }) -replace '^SID=', '').Trim()
+          if ([string]::IsNullOrWhiteSpace($elevatedSid)) { throw 'Elevated SID was not recorded' }
+          $evidence = Join-Path $env:RUNNER_TEMP 'pr341-restricted-evidence'
+          New-Item -ItemType Directory -Path $evidence -Force | Out-Null
+          $identityLog = Join-Path $evidence 'restricted-identity.log'
+          $testLog = Join-Path $evidence 'restricted-test.log'
+          $receipt = Join-Path $env:RUNNER_TEMP 'pr341-owned-account.txt'
+          $cleanupScript = Join-Path $env:RUNNER_TEMP 'pr341-cleanup.ps1'
+          $cleanupTemplate = @'
+          $ErrorActionPreference = 'Stop'
+          $receipt = '__RECEIPT__'
+          if (-not (Test-Path $receipt)) {
+            Write-Output 'CLEANUP_NO_RECEIPT=nothing owned by this run'
+            return
+          }
+          $record = Get-Content $receipt -Raw
+          if ($record -notmatch 'OWNED_BY_THIS_RUN=YES') {
+            Write-Output 'CLEANUP_NO_OWNERSHIP_RECEIPT=nothing owned by this run'
+            return
+          }
+          $name = (($record -split "`n" | Where-Object { $_ -like 'NAME=*' }) -replace '^NAME=', '').Trim()
+          if ($name -notmatch '^PR341R[0-9A-F]{8}$') {
+            throw "Refusing cleanup: unexpected owned account name '$name'"
+          }
+          if (-not (Get-LocalUser -Name $name -ErrorAction SilentlyContinue)) {
+            Write-Output "CLEANUP_ALREADY_ABSENT=$name"
+            Remove-Item -Path $receipt -Force -ErrorAction SilentlyContinue
+            return
+          }
+          Remove-LocalUser -Name $name -ErrorAction Stop
+          if (Get-LocalUser -Name $name -ErrorAction SilentlyContinue) {
+            throw "Failed to delete owned account: $name"
+          }
+          Remove-Item -Path $receipt -Force -ErrorAction SilentlyContinue
+          Write-Output "CLEANUP_DELETED_OWNED_ACCOUNT=$name"
+          '@
+          $cleanupTemplate.Replace('__RECEIPT__', $receipt) | Set-Content -Path $cleanupScript -Encoding ascii
+          $user = $null
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            $candidate = 'PR341R' + [guid]::NewGuid().ToString('N').Substring(0, 8).ToUpperInvariant()
+            if (Get-LocalUser -Name $candidate -ErrorAction SilentlyContinue) {
+              "ACCOUNT_NAME_COLLISION=$candidate (attempt $attempt)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+              continue
+            }
+            $user = $candidate
+            break
+          }
+          if (-not $user) { throw 'Could not allocate a unique bounded restricted account name after 3 attempts' }
+          $password = 'Pr341!' + [guid]::NewGuid().ToString('N')
+          $secure = ConvertTo-SecureString $password -AsPlainText -Force
+          try {
+            New-LocalUser -Name $user -Password $secure -PasswordNeverExpires -AccountNeverExpires -ErrorAction Stop | Out-Null
+            try {
+              $created = Get-LocalUser -Name $user -ErrorAction Stop
+              $receiptBody = "OWNED_BY_THIS_RUN=YES`nNAME=$user`nSID=$($created.SID.Value)`nCREATED_UTC=$((Get-Date).ToUniversalTime().ToString('o'))`nRUN_ID=$env:GITHUB_RUN_ID`n"
+              [IO.File]::WriteAllText($receipt, $receiptBody)
+            } catch {
+              Remove-LocalUser -Name $user -ErrorAction Stop
+              throw
+            }
+            icacls $evidence /grant "${user}:(OI)(CI)F" /inheritance:e | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to grant restricted identity access to the evidence directory' }
+            $workspace = (Get-Location).Path
+            icacls $workspace /grant "${user}:(RX)" /inheritance:e | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to grant restricted identity traverse on the workspace' }
+            # Resolve every intermediate directory between the workspace and
+            # the exact compiler-resolved executable and grant RX on each one
+            # individually. Never recursively widen the build tree, and never
+            # grant access outside the owned workspace.
+            $workspaceFull = [IO.Path]::GetFullPath($workspace)
+            $exeFull = [IO.Path]::GetFullPath($exe)
+            if (-not $exeFull.StartsWith($workspaceFull + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+              throw "Resolved test executable is outside the owned workspace: $exeFull"
+            }
+            $exeParent = Split-Path -Parent $exeFull
+            $relative = [IO.Path]::GetRelativePath($workspaceFull, $exeParent)
+            $cursor = $workspaceFull
+            foreach ($part in ($relative -split '[\\/]')) {
+              if ([string]::IsNullOrWhiteSpace($part)) { continue }
+              $cursor = Join-Path $cursor $part
+              if (-not (Test-Path -LiteralPath $cursor -PathType Container)) { throw "Missing intermediate test-binary directory: $cursor" }
+              icacls $cursor /grant "${user}:(RX)" /inheritance:e | Out-Null
+              if ($LASTEXITCODE -ne 0) { throw "Failed to grant restricted identity traverse on $cursor" }
+              "ACL_TRAVERSE=$cursor" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            }
+            icacls $exeFull /grant "${user}:(RX)" /inheritance:e | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "Failed to grant restricted identity execute on $exeFull" }
+            $credential = New-Object PSCredential($user, $secure)
+            $probeTemplate = @'
+          $ErrorActionPreference = 'Stop'
+          $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+          $principal = [Security.Principal.WindowsPrincipal]::new($id)
+          $admin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+          # The genuine restricted token must also be proven non-elevated by
+          # reading TokenElevation from its own process token, not inferred
+          # from the account name or group membership. Fail closed.
+          $nativeSource = 'using System;
+          using System.Runtime.InteropServices;
+          public static class Pr341RestrictedTokenNative {
+          [StructLayout(LayoutKind.Sequential)] public struct TOKEN_ELEVATION { public uint TokenIsElevated; }
+          [DllImport("advapi32.dll", SetLastError=true)] public static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+          [DllImport("advapi32.dll", SetLastError=true)] public static extern bool GetTokenInformation(IntPtr token, int infoClass, out TOKEN_ELEVATION info, int size, out int returned);
+          [DllImport("kernel32.dll")] public static extern IntPtr GetCurrentProcess();
+          [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr handle);
+          }'
+          Add-Type -TypeDefinition $nativeSource -ErrorAction Stop
+          $tokenHandle = [IntPtr]::Zero
+          if (-not [Pr341RestrictedTokenNative]::OpenProcessToken([Pr341RestrictedTokenNative]::GetCurrentProcess(), 0x0008, [ref]$tokenHandle) -or $tokenHandle -eq [IntPtr]::Zero) { throw 'Restricted token elevation inspection failed: OpenProcessToken' }
+          try {
+            $elevation = New-Object Pr341RestrictedTokenNative+TOKEN_ELEVATION
+            $returned = 0
+            if (-not [Pr341RestrictedTokenNative]::GetTokenInformation($tokenHandle, 20, [ref]$elevation, 4, [ref]$returned) -or $returned -ne 4) { throw 'Restricted token elevation inspection failed: GetTokenInformation(TokenElevation)' }
+            $tokenIsElevated = [int]$elevation.TokenIsElevated
+          } finally { [void][Pr341RestrictedTokenNative]::CloseHandle($tokenHandle) }
+          "NAME=$($id.Name)`nSID=$($id.User.Value)`nIDENTITY_IS_ADMIN=$admin`nTOKEN_IS_ELEVATED=$tokenIsElevated" | Set-Content -Path '__IDENTITY_LOG__' -Encoding ascii
+          '@
+            $probe = Join-Path $evidence 'probe.ps1'
+            $probeTemplate.Replace('__IDENTITY_LOG__', $identityLog) | Set-Content -Path $probe -Encoding ascii
+            $runnerTemplate = @'
+          @echo off
+          "__TEST_EXE__" --nocapture unprivileged_provisioning_is_denied_before_any_write > "__TEST_LOG__" 2>&1
+          exit /b %ERRORLEVEL%
+          '@
+            $runner = Join-Path $evidence 'run-test.cmd'
+            $runnerTemplate.Replace('__TEST_EXE__', $exe).Replace('__TEST_LOG__', $testLog) | Set-Content -Path $runner -Encoding ascii
+            $psExe = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+            $probeProc = Start-Process -FilePath $psExe -Credential $credential -ArgumentList "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$probe`"" -Wait -PassThru -WorkingDirectory $evidence
+            if ($probeProc.ExitCode -ne 0) { throw "Restricted identity probe failed: $($probeProc.ExitCode)" }
+            $testProc = Start-Process -FilePath $env:ComSpec -Credential $credential -ArgumentList "/c `"$runner`"" -Wait -PassThru -WorkingDirectory $evidence
+            if (-not (Test-Path $identityLog)) { throw 'Restricted identity probe produced no evidence' }
+            $identity = Get-Content $identityLog -Raw
+            if ($identity -notmatch 'IDENTITY_IS_ADMIN=False') {
+              throw 'Restricted token is elevated/administrator; identity separation NOT proven'
+            }
+            $restrictedElevated = (($identity -split "`n" | Where-Object { $_ -like 'TOKEN_IS_ELEVATED=*' }) -replace '^TOKEN_IS_ELEVATED=', '').Trim()
+            if ($restrictedElevated -ne '0') {
+              throw 'Restricted token unexpectedly elevated; genuine unprivileged token NOT proven'
+            }
+            $restrictedSid = (($identity -split "`n" | Where-Object { $_ -like 'SID=*' }) -replace '^SID=', '').Trim()
+            if ([string]::IsNullOrWhiteSpace($restrictedSid)) { throw 'Restricted token SID was not captured' }
+            if ($restrictedSid -eq $elevatedSid) {
+              throw 'Restricted token reuses the elevated SID; identity separation NOT proven'
+            }
+            if (-not (Test-Path $testLog)) { throw 'Restricted-token test produced no evidence log' }
+            $restrictedOutput = Get-Content $testLog -Raw
+            if ($restrictedOutput -match 'SKIP:') {
+              throw 'Restricted-token test SKIPPED; unprivileged refusal NOT verified'
+            }
+            if ($restrictedOutput -notmatch 'unprivileged_provisioning_is_denied_before_any_write \.\.\. ok') {
+              throw 'Restricted-token target test did not run and pass'
+            }
+            if ($testProc.ExitCode -ne 0) { throw "Restricted-token test failed: $($testProc.ExitCode)" }
+            "RESTRICTED_SID=$restrictedSid" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            'RESTRICTED_IS_ADMIN=False' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            'UNPRIVILEGED_REFUSAL=REAL_TOKEN_EXECUTED' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          } finally {
+            if (Test-Path $cleanupScript) { & $cleanupScript }
+          }
+
+      - name: Remove only the restricted identity owned by this run
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $cleanupScript = Join-Path $env:RUNNER_TEMP 'pr341-cleanup.ps1'
+          if (-not (Test-Path $cleanupScript)) {
+            'DISPOSABLE_IDENTITY_CLEANUP=NO_ACCOUNT_CREATED_BY_THIS_RUN' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            return
+          }
+          & $cleanupScript | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+      - name: Acceptance coverage ledger - executed versus pending
+        if: always()
+        shell: pwsh
+        run: |
+          @'
+          ## Issue #340 privileged acceptance coverage
+
+          | Criterion | Evidence in this run | Status |
+          |---|---|---|
+          | First-install provisioning (elevated, isolated ProgramData) | None | PENDING |
+          | Protected registry ownership and DACL | Elevated unit negatives (`world_writable_directory_is_refused`, `missing_file_security_cannot_be_verified`, `ordinary_user_file_is_not_a_trusted_registry`) | UNIT ONLY |
+          | Ancestor security | Elevated unit (`registry_leaf_is_never_a_parent_directory_component`) | UNIT ONLY |
+          | Untrusted writable-path refusal | Elevated unit (`world_writable_directory_is_refused`) | UNIT ONLY |
+          | Junction/reparse refusal | Elevated unit (`reparse_point_or_junction_is_detected`), required no SKIP | UNIT ONLY |
+          | Unprivileged write refusal | Restricted real-token run of `unprivileged_provisioning_is_denied_before_any_write`, required no SKIP | REAL TOKEN |
+          | Update monotonicity | Elevated unit (`monotonic_update_refuses_rollback_revocation_reversal_and_owner_change`) | UNIT ONLY |
+          | Revocation permanence | Elevated unit (`revocation_tombstone_cannot_be_dropped_by_omission_then_readded`) | UNIT ONLY |
+          | Concurrent provisioning | Elevated unit (`concurrent_writers_share_one_mutex`, `shared_lock_identity_is_stable_across_calls_and_processes`) | UNIT ONLY |
+          | Safe failure and cleanup | Elevated unit (`acl_setup_failure_is_detected_instead_of_skipped`) | UNIT ONLY |
+
+          This run does **not** satisfy Stage 2 privileged acceptance. A green
+          result here is supplemental identity-separation and unit evidence only.
+          PR #341 merge remains WITHHELD. Repository-native `local_ci` remains
+          authoritative. No merge, deployment or named-pipe authority is granted.
+          '@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+      - name: Final authority gate - fail closed on missing elevated token
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $resultFile = Join-Path $env:RUNNER_TEMP 'pr341-elevated-path-result.txt'
+          if (-not (Test-Path -LiteralPath $resultFile)) {
+            throw 'ELEVATED_PATH=NOT_RUN; blocker=token authority could not be evaluated before the elevated path'
+          }
+          $result = Get-Content $resultFile -Raw
+          if ($result -notmatch 'ELEVATED_PATH=UNIT_CONTROLS_EXECUTED') {
+            $blocker = (($result -split "`n" | Where-Object { $_ -like 'BLOCKER=*' }) -replace '^BLOCKER=', '').Trim()
+            if ([string]::IsNullOrWhiteSpace($blocker)) { $blocker = 'unknown token authority blocker' }
+            throw "ELEVATED_PATH=NOT_RUN; blocker=$blocker; elevated acceptance evidence NOT_RUN"
+          }
+          'FINAL_AUTHORITY_GATE=ELEVATED_CONTEXT_PROVEN' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+  collector-facts:
+    # Supplemental, read-only execution of the nonprivileged collector. The
+    # production source checkout stays pinned to PR #341 (37a7ae33); the
+    # collector contract is sourced only from a separately pinned reviewed
+    # commit and its exact bytes are verified before any collector code runs.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - name: Check out immutable reviewed PR 341 head (production source)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: 37a7ae33ca21fc25ad0f70f20022cd4a95634bce
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Check out separately pinned reviewed collector source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: debd59d5de62b7c4bb6e30d9d9c797d68a8e3b68
+          persist-credentials: false
+          fetch-depth: 0
+          path: collector-src
+
+      - name: Verify both pinned source identities before executing collector code
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sourceExpected = '37a7ae33ca21fc25ad0f70f20022cd4a95634bce'
+          $collectorExpected = 'debd59d5de62b7c4bb6e30d9d9c797d68a8e3b68'
+          $source = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $source -ne $sourceExpected) { throw "Unexpected production source commit: $source" }
+          $collector = (git -C collector-src rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $collector -ne $collectorExpected) { throw "Unexpected collector commit: $collector" }
+          $trusted = '33ad091d26d8a9dc95ebdf616e217d985ec215b8'
+          $postcss = (git rev-parse 'HEAD:frontend/postcss.config.js').Trim()
+          if ($LASTEXITCODE -ne 0 -or $postcss -ne $trusted) { throw 'Untrusted PostCSS configuration' }
+          "SOURCE_SHA=$source" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "COLLECTOR_SHA=$collector" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "POSTCSS_BLOB=$postcss" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+      - name: Bind active workflow identity (reviewed policy digest, no self-approval)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # The historical introduction digest (b45b5ed1...) is provenance only.
+          # The executing workflow's bytes are bound by the deterministic,
+          # Principal-reviewed repository policy digest pin, never by a digest
+          # asserted here and never by a digest embedded in the collector.
+          $expectedRef = 'prometheosai/prometheos-lite/.github/workflows/pr341-windows-acceptance.yml@refs/heads/main'
+          $actualRef = $env:GITHUB_WORKFLOW_REF
+          if (-not $actualRef -or $actualRef -ne $expectedRef) { throw "Unbound executing workflow identity: $actualRef" }
+          'ACTIVE_WORKFLOW_IDENTITY=REVIEWED_WORKFLOW_REF_BOUND' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          'ACTIVE_WORKFLOW_DIGEST=BOUND_BY_PRINCIPAL_POLICY_PIN_NOT_ASSERTED_HERE' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          'HISTORICAL_INTRODUCTION_DIGEST=PROVENANCE_ONLY_NOT_CURRENT_VERIFICATION' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+      - name: Stage pinned collector contract and verify its exact bytes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $expectedBlob = (git -C collector-src rev-parse 'HEAD:tests/isolation_evidence_contract.rs').Trim()
+          if ($LASTEXITCODE -ne 0 -or -not $expectedBlob) { throw 'Collector contract blob is absent from the pinned source' }
+          & git -C collector-src show 'HEAD:tests/isolation_evidence_contract.rs' > 'tests/isolation_evidence_contract.rs'
+          if ($LASTEXITCODE -ne 0) { throw 'Collector contract extraction failed' }
+          $actualBlob = (git hash-object 'tests/isolation_evidence_contract.rs').Trim()
+          if ($LASTEXITCODE -ne 0 -or $actualBlob -ne $expectedBlob) { throw 'Staged collector contract does not match the pinned source blob' }
+          "COLLECTOR_CONTRACT_BLOB=$actualBlob" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+      - name: Run pinned nonprivileged collector (read-only, claims only)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:PR341_EVIDENCE_OUT = Join-Path $env:RUNNER_TEMP 'pr341-collector-evidence.json'
+          & cargo test --locked --test isolation_evidence_contract test_collector_collects_real_nonprivileged_facts -- --exact --nocapture
+          if ($LASTEXITCODE -ne 0) { throw "Pinned collector failed: $LASTEXITCODE" }
+          'COLLECTOR_RESULT=NONPRIVILEGED_CLAIMS_ONLY_UNVERIFIED' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append

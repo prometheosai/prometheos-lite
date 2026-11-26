@@ -9,6 +9,7 @@ pub mod harness;
 pub mod intent;
 pub mod llm;
 pub mod logger;
+pub mod os_observation;
 pub mod personality;
 pub mod queue;
 pub mod repo_workbench;

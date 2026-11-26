@@ -855,6 +855,9 @@ impl Node for ToolNode {
 /// FileWriter Node - writes files to disk
 pub struct FileWriterNode {
     config: NodeConfig,
+    /// Optional outbox database override for isolated tests. Production uses
+    /// the documented `.prometheos/runs.db` default via `new()`.
+    db_path: Option<std::path::PathBuf>,
 }
 
 pub struct HarnessRepoMapNode {
@@ -1170,7 +1173,21 @@ impl Node for HarnessContextDistillNode {
 
 impl FileWriterNode {
     pub fn new(config: NodeConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            db_path: None,
+        }
+    }
+
+    /// Construct a node whose durable admission record lives at `path`.
+    /// This only changes the database location for isolated testing; the
+    /// production default and all security behavior remain identical.
+    #[doc(hidden)]
+    pub fn with_outbox_db_path(config: NodeConfig, path: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            config,
+            db_path: Some(path.into()),
+        }
     }
 }
 
@@ -1261,26 +1278,48 @@ impl Node for FileWriterNode {
             "file_writer",
             &serde_json::json!({"path": file_path, "content": content}),
         );
+        #[allow(deprecated)]
+        let legacy_key = crate::flow::IdempotencyKey::compute_legacy_key(
+            &context.run_id,
+            &context.node_id,
+            &operation_hash,
+        );
         let idempotency_key = crate::flow::IdempotencyKey::new(
             context.run_id.clone(),
             context.node_id.clone(),
             operation_hash,
         );
 
-        // Check outbox for duplicate operation
-        let db_path = ".prometheos/runs.db";
-        if std::path::Path::new(db_path).exists()
-            && let Ok(db) = crate::db::repository::Db::new(db_path)
-        {
-            if let Ok(existing) = OutboxOperations::get_outbox_entry_by_hash(
-                &db,
-                &context.run_id,
-                &context.node_id,
-                &idempotency_key.key,
-            ) && let Some(entry) = existing
-                && entry.status == "completed"
-            {
-                // Return cached result instead of re-executing
+        // Check outbox for a completed receipt under either key format. Canonical
+        // keys are used for all new entries; the legacy key is consulted only to
+        // find a receipt written before the v2 encoding. A pending row under one
+        // key never suppresses a completed row under the other, and a database
+        // error is never treated as absence.
+        let db_path = self
+            .db_path
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from(".prometheos/runs.db"));
+        if !db_path.exists() {
+            anyhow::bail!(
+                "outbox database {} is absent; governed durable execution requires durable admission before side effects",
+                db_path.display()
+            );
+        }
+        let db_path = db_path.to_string_lossy().into_owned();
+        let db = crate::db::repository::Db::new(&db_path)?;
+        // Dual-version inspection and canonical admission happen inside one
+        // SQLite IMMEDIATE transaction: competing writers cannot both observe an
+        // empty state and both admit an effect.
+        let claim = match OutboxOperations::admit_outbox_operation(
+            &db,
+            &context.run_id,
+            &context.trace_id,
+            &context.node_id,
+            "file_writer",
+            &idempotency_key.key,
+            &legacy_key,
+        )? {
+            crate::db::repository::OutboxAdmission::Completed(entry) => {
                 return Ok(serde_json::json!({
                     "success": true,
                     "file_path": file_path,
@@ -1290,44 +1329,26 @@ impl Node for FileWriterNode {
                     "cached_output": entry.output
                 }));
             }
-
-            // Create outbox entry for this operation
-            let _ = OutboxOperations::create_outbox_entry(
-                &db,
-                &context.run_id,
-                &context.trace_id,
-                &context.node_id,
-                "file_writer",
-                &idempotency_key.key,
-            );
-        }
+            crate::db::repository::OutboxAdmission::Admitted(entry) => entry,
+        };
 
         // Proceed with write
         std::fs::write(file_path, content)
             .with_context(|| format!("Failed to write file: {}", file_path))?;
 
-        // Mark outbox entry as completed
-        if std::path::Path::new(db_path).exists()
-            && let Ok(db) = crate::db::repository::Db::new(db_path)
-            && let Ok(entry) = OutboxOperations::get_outbox_entry_by_hash(
-                &db,
-                &context.run_id,
-                &context.node_id,
-                &idempotency_key.key,
-            )
-            && let Some(ref entry) = entry
-        {
-            let _ = OutboxOperations::mark_outbox_completed(
-                &db,
-                &entry.id,
-                &serde_json::json!({
-                    "success": true,
-                    "file_path": file_path,
-                    "bytes_written": content.len()
-                })
-                .to_string(),
-            );
-        }
+        // Mark the exact claimed row as completed. A zero-row update is an
+        // error: the effect happened but is not durably acknowledged.
+        let db = crate::db::repository::Db::new(&db_path)?;
+        OutboxOperations::mark_outbox_completed_checked(
+            &db,
+            &claim.id,
+            &serde_json::json!({
+                "success": true,
+                "file_path": file_path,
+                "bytes_written": content.len()
+            })
+            .to_string(),
+        )?;
 
         Ok(serde_json::json!({
             "success": true,
