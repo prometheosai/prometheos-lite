@@ -11,7 +11,9 @@ param(
   [Parameter(Mandatory=$true)][string]$ExpectedSourceSha,
   [Parameter(Mandatory=$true)][string]$ExpectedManifestSha256,
   [Parameter(Mandatory=$true)][string]$ExpectedPackageVersion,
-  [switch]$SelfTest
+  [switch]$SelfTest,
+  [string]$FixtureExecutable,
+  [string]$FixtureArgs = '--format pretty --show-output --test-threads 1'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -71,10 +73,31 @@ function Evaluate-Acceptance([string[]]$Lines, [int]$RawExit, [string[]]$Expecte
   $failed = @($results | Where-Object { $_.status -eq 'FAILED' }).Count
   $ignored = @($results | Where-Object { $_.status -eq 'ignored' }).Count
   $skipped = @($Lines | Select-String -SimpleMatch 'SKIP:').Count
-  $incomplete = -not (@($Lines | Select-String -SimpleMatch 'test result:').Count -gt 0)
+  # A single fully structured libtest summary is mandatory. A substring is not proof.
+  $summaryPattern = '^test result:\s*(ok|FAILED)\.\s+(\d+) passed;\s+(\d+) failed;\s+(\d+) ignored;\s+(\d+) measured;\s+(\d+) filtered out(;.*)?$'
+  $summaries = @($Lines | Where-Object { $_ -match '^test result:' })
+  $parsedSummaries = @()
+  foreach ($line in $summaries) {
+    if ($line -match $summaryPattern) {
+      $parsedSummaries += [PSCustomObject]@{
+        Verdict = $Matches[1]; Passed = [int]$Matches[2]; Failed = [int]$Matches[3]
+        Ignored = [int]$Matches[4]; Measured = [int]$Matches[5]; Filtered = [int]$Matches[6]
+      }
+    }
+  }
+  $summaryValid = ($summaries.Count -eq 1 -and $parsedSummaries.Count -eq 1)
+  $incomplete = -not $summaryValid
+  $summaryAgrees = $false
+  if ($summaryValid) {
+    $s = $parsedSummaries[0]
+    $summaryAgrees = ($s.Verdict -eq 'ok' -and $s.Passed -eq $Expected.Count -and $s.Failed -eq 0 -and
+                      $s.Ignored -eq 0 -and $s.Measured -eq 0 -and $s.Filtered -eq 0 -and
+                      $results.Count -eq $Expected.Count -and $failed -eq 0 -and $ignored -eq 0)
+  }
   $pass = ($RawExit -eq 0 -and $results.Count -eq $Expected.Count -and $missing.Count -eq 0 -and
            $duplicates.Count -eq 0 -and $unexpected.Count -eq 0 -and $failed -eq 0 -and
-           $ignored -eq 0 -and $skipped -eq 0 -and $malformed -eq 0 -and -not $incomplete)
+           $ignored -eq 0 -and $skipped -eq 0 -and $malformed -eq 0 -and
+           $summaryValid -and $summaryAgrees)
   [PSCustomObject]@{
     Semantic = $(if ($pass) { 'PASS' } else { 'FAIL' })
     RawExit = $RawExit
@@ -86,23 +109,49 @@ function Evaluate-Acceptance([string[]]$Lines, [int]$RawExit, [string[]]$Expecte
     Ignored = $ignored
     Skipped = $skipped
     Malformed = $malformed
+    SummaryCount = $summaries.Count
+    SummaryValid = $summaryValid
+    SummaryAgrees = $summaryAgrees
     Incomplete = $incomplete
   }
 }
 
 if ($SelfTest) {
+  $goodSummary = 'test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s'
   $good = @()
   foreach ($name in $expectedTests) { $good += "test $name ... ok" }
-  $good += 'test result: ok. 7 passed; 0 failed'
+  $good += $goodSummary
+  if (-not [string]::IsNullOrWhiteSpace($FixtureExecutable)) {
+    $env:RUST_TEST_NOCAPTURE = $null
+    $tag = '{0}-{1}' -f (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssfffZ'), $PID
+    $fixtureOut = Join-Path ([IO.Path]::GetTempPath()) "pr406-fixture-out-$tag.log"
+    $fixtureErr = Join-Path ([IO.Path]::GetTempPath()) "pr406-fixture-err-$tag.log"
+    $args = @($FixtureArgs -split '\s+' | Where-Object { $_ })
+    $fixture = Start-Process -FilePath $FixtureExecutable -ArgumentList $args -RedirectStandardOutput $fixtureOut -RedirectStandardError $fixtureErr -Wait -PassThru -NoNewWindow -ErrorAction Stop
+    $lines = @()
+    if (Test-Path -LiteralPath $fixtureOut) { $lines += Get-Content -LiteralPath $fixtureOut }
+    if (Test-Path -LiteralPath $fixtureErr) { $lines += Get-Content -LiteralPath $fixtureErr }
+    $verdict = Evaluate-Acceptance $lines $fixture.ExitCode $expectedTests
+    $stdoutPreserved = @($lines | Where-Object { $_ -match 'PR341_WORKER_STDOUT' }).Count
+    $stderrPreserved = @($lines | Where-Object { $_ -match 'PR341_WORKER_STDERR' }).Count
+    Write-Output "FIXTURE_VERDICT $($verdict.Semantic) raw_exit=$($fixture.ExitCode) summaries=$($verdict.SummaryCount) valid=$($verdict.SummaryValid) agrees=$($verdict.SummaryAgrees)"
+    Write-Output "FIXTURE_OUTPUT stdout_records=$stdoutPreserved stderr_records=$stderrPreserved"
+    if ($verdict.Semantic -eq 'PASS' -and $stdoutPreserved -gt 0 -and $stderrPreserved -gt 0) { exit 0 }
+    exit 91
+  }
   $cases = @(
     @{ name='valid'; lines=$good; raw=0; want='PASS' },
-    @{ name='missing'; lines=@($good[0..5]) + 'test result: ok. 6 passed'; raw=0; want='FAIL' },
+    @{ name='missing'; lines=@($good[0..5]) + 'test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out'; raw=0; want='FAIL' },
     @{ name='duplicate'; lines=$good + "test $($expectedTests[0]) ... ok"; raw=0; want='FAIL' },
-    @{ name='ignored'; lines=@($good[0..5]) + "test $($expectedTests[6]) ... ignored" + 'test result: ok. 6 passed'; raw=0; want='FAIL' },
+    @{ name='ignored'; lines=@($good[0..5]) + "test $($expectedTests[6]) ... ignored" + 'test result: ok. 6 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out'; raw=0; want='FAIL' },
     @{ name='skipped'; lines=$good + 'SKIP: unsafe control skipped'; raw=0; want='FAIL' },
-    @{ name='malformed'; lines=@($good[0..5]) + 'test bogus ... ???' + 'test result: ok. 6 passed'; raw=0; want='FAIL' },
+    @{ name='malformed'; lines=@($good[0..5]) + 'test bogus ... ???' + $goodSummary; raw=0; want='FAIL' },
     @{ name='incomplete'; lines=$good[0..6]; raw=0; want='FAIL' },
-    @{ name='raw-nonzero'; lines=$good; raw=1; want='FAIL' }
+    @{ name='raw-nonzero'; lines=$good; raw=1; want='FAIL' },
+    @{ name='contradictory-summary'; lines=$good + "test $($expectedTests[0]) ... FAILED"; raw=0; want='FAIL' },
+    @{ name='multiple-summaries'; lines=$good + $goodSummary; raw=0; want='FAIL' },
+    @{ name='truncated-summary'; lines=@($good[0..6]) + 'test result: ok. 7 passed; 0 failed; 0 ignored'; raw=0; want='FAIL' },
+    @{ name='summary-filtered'; lines=$good[0..6] + 'test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out'; raw=0; want='FAIL' }
   )
   foreach ($case in $cases) {
     $verdict = Evaluate-Acceptance $case.lines $case.raw $expectedTests
@@ -236,7 +285,11 @@ if ($preflightExit -ne 0) {
 }
 
 $exe = Join-Path $stage 'pr341_privileged_acceptance.exe'
-$process = Start-Process -FilePath $exe -ArgumentList @('--nocapture','--test-threads','1') -RedirectStandardOutput $testOut -RedirectStandardError $testErr -Wait -PassThru -NoNewWindow -ErrorAction Stop
+# Never inherit RUST_TEST_NOCAPTURE: explicit structured libtest arguments
+# decide the output format. --show-output preserves worker stdout/stderr under
+# libtest control instead of interleaving it into test result lines.
+$env:RUST_TEST_NOCAPTURE = $null
+$process = Start-Process -FilePath $exe -ArgumentList @('--format','pretty','--show-output','--test-threads','1') -RedirectStandardOutput $testOut -RedirectStandardError $testErr -Wait -PassThru -NoNewWindow -ErrorAction Stop
 $rawExit = $process.ExitCode
 $combined = @()
 if (Test-Path -LiteralPath $testOut) { $combined += Get-Content -LiteralPath $testOut }
@@ -261,6 +314,8 @@ $summary = [PSCustomObject]@{
   missing=$verdict.Missing; duplicates=$verdict.Duplicates; unexpected=$verdict.Unexpected
   failed=$verdict.Failed; ignored=$verdict.Ignored; skipped=$verdict.Skipped
   malformed=$verdict.Malformed; incomplete=$verdict.Incomplete
+  summary_count=$verdict.SummaryCount; summary_valid=$verdict.SummaryValid
+  summary_agrees=$verdict.SummaryAgrees
   status=$verdict.Semantic; evidence_dir=$evidenceDir
 }
 $summaryPath = Join-Path $evidenceDir 'summary.json'
