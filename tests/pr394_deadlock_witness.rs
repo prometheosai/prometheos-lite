@@ -1,16 +1,65 @@
-//! Regression for dispatch 395/396: synchronized contenders reach the barrier
-//! before acquiring the shared named mutex, and verification accounts for both
-//! contenders. Uses the production test-mutex mechanism only; no provisioning
-//! or ProgramData writes.
+//! Regression for dispatch 395/396/397: synchronized contenders reach the
+//! barrier before acquiring the shared test mutex, and verification accounts
+//! for both contenders without an unbounded join.
 #![cfg(windows)]
 
 use prometheos_lite::work::owner_registry::windows::acquire_test_mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
+struct ProcessWatchdog {
+    armed: Arc<AtomicBool>,
+    deadline: Instant,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ProcessWatchdog {
+    fn new(timeout: Duration) -> Self {
+        let armed = Arc::new(AtomicBool::new(true));
+        let flag = armed.clone();
+        let deadline = Instant::now() + timeout;
+        let join = std::thread::spawn(move || {
+            loop {
+                if !flag.load(Ordering::SeqCst) {
+                    return;
+                }
+                if Instant::now() >= deadline {
+                    eprintln!(
+                        "PR341_WATCHDOG_FAIL bounded process watchdog expired after {timeout:?}"
+                    );
+                    std::process::exit(101);
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+        Self {
+            armed,
+            deadline,
+            join: Some(join),
+        }
+    }
+
+    fn remaining(&self) -> Duration {
+        self.deadline
+            .checked_duration_since(Instant::now())
+            .unwrap_or(Duration::ZERO)
+    }
+}
+
+impl Drop for ProcessWatchdog {
+    fn drop(&mut self) {
+        self.armed.store(false, Ordering::SeqCst);
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
 #[test]
 fn barrier_before_mutex_completes_within_watchdog() {
+    let watchdog = ProcessWatchdog::new(Duration::from_secs(6));
     let name = format!("Local\\PR341-DEADLOCK-WITNESS-{}", std::process::id());
     let barrier = Arc::new(Barrier::new(2));
     let (tx, rx) = mpsc::channel::<Result<(), String>>();
@@ -36,15 +85,9 @@ fn barrier_before_mutex_completes_within_watchdog() {
     }
     drop(tx);
 
-    // Bounded watchdog shared by both acknowledgments. A timeout, a refusal or
-    // a panic is collected as FAIL instead of ending the test early.
-    let deadline = Instant::now() + Duration::from_secs(6);
     let mut failures = Vec::new();
     for index in 0..2 {
-        let remaining = deadline
-            .checked_duration_since(Instant::now())
-            .unwrap_or(Duration::ZERO);
-        match rx.recv_timeout(remaining) {
+        match rx.recv_timeout(watchdog.remaining()) {
             Ok(Ok(())) => {}
             Ok(Err(error)) => failures.push(format!("contender {index}: {error}")),
             Err(RecvTimeoutError::Timeout) => {
@@ -55,10 +98,13 @@ fn barrier_before_mutex_completes_within_watchdog() {
             }
         }
     }
-    // Successful verification never leaves a background thread unchecked.
-    for (index, handle) in handles.into_iter().enumerate() {
-        if handle.join().is_err() {
-            failures.push(format!("contender {index}: thread panicked"));
+    // Join only after complete success. On timeout/refusal this test fails
+    // immediately and never blocks on a possibly stuck worker thread.
+    if failures.is_empty() {
+        for (index, handle) in handles.into_iter().enumerate() {
+            if handle.join().is_err() {
+                failures.push(format!("contender {index}: thread panicked"));
+            }
         }
     }
 
