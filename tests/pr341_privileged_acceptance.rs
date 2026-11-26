@@ -488,6 +488,17 @@ impl OwnedRegistry {
         let no_test_objects = self.identity.is_none() && self.dir_identities.is_empty();
         let ancestry = ancestry_errors(&self.path, no_test_objects);
         if no_test_objects {
+            // The leaf itself must also be proven absent after a refused install.
+            match std::fs::symlink_metadata(&self.path) {
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Ok(_) => self
+                    .cleanup_errors
+                    .push(format!("unexplained leaf at {:?}; preserved", self.path)),
+                Err(error) => self.cleanup_errors.push(format!(
+                    "unexpected leaf metadata at {:?}: {error}",
+                    self.path
+                )),
+            }
             for dir in &self.absent_dirs {
                 match std::fs::symlink_metadata(dir) {
                     Err(error) if error.kind() == ErrorKind::NotFound => {}
@@ -532,7 +543,9 @@ impl OwnedRegistry {
                 self.path
             )),
         }
-        for (dir, identity) in self.dir_identities.iter().rev() {
+        // absent_dirs and dir_identities are recorded deepest-first. Removing
+        // in that order never asks Windows to delete a still-nonempty parent.
+        for (dir, identity) in self.dir_identities.iter() {
             if let Err(error) = delete_verified_path(dir, identity, false, true) {
                 self.cleanup_errors
                     .push(format!("ancestor deletion refused {dir:?}: {error}"));
@@ -540,17 +553,28 @@ impl OwnedRegistry {
         }
     }
 
-    fn residual(&self) -> Vec<PathBuf> {
-        std::iter::once(&self.path)
-            .chain(self.absent_dirs.iter())
-            .filter(|path| std::fs::symlink_metadata(path).is_ok())
-            .cloned()
-            .collect()
+    /// Report both surviving objects and paths whose metadata could not be
+    /// inspected. `symlink_metadata(...).is_ok()` alone would silently treat a
+    /// permission or I/O failure as absence, which is not fail-closed.
+    fn residual(&self) -> (Vec<PathBuf>, Vec<String>) {
+        let mut objects = Vec::new();
+        let mut errors = Vec::new();
+        for path in std::iter::once(&self.path).chain(self.absent_dirs.iter()) {
+            match std::fs::symlink_metadata(path) {
+                Ok(_) => objects.push(path.clone()),
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => {
+                    errors.push(format!("residual inspection failed for {path:?}: {error}"))
+                }
+            }
+        }
+        (objects, errors)
     }
 
     fn finish(mut self) {
         self.cleanup();
-        let residual = self.residual();
+        let (residual, inspection_errors) = self.residual();
+        self.cleanup_errors.extend(inspection_errors);
         for error in &self.cleanup_errors {
             eprintln!("PR341_CLEANUP_FAIL {error}");
         }
@@ -1067,6 +1091,58 @@ fn verify_final_document(owned: &OwnedRegistry, generation: u64, owner: &str, di
         "final canonical bytes must equal the accepted proposal"
     );
     assert_eq!(hex(Sha256::digest(&bytes).as_slice()), digest);
+}
+
+/// Local, nonprivileged regression for R2: test-owned nested directories must
+/// be removed deepest-first, and unowned contents must block removal.
+#[test]
+fn owned_nested_directories_are_removed_deepest_first() {
+    let base = std::env::temp_dir().join(format!("pr403-cleanup-{}", nonce()));
+    std::fs::create_dir(&base).expect("test-owned base");
+    let nested = base.join("a").join("b").join("c");
+    std::fs::create_dir_all(&nested).expect("test-owned nested directories");
+    let dirs = [nested.clone(), base.join("a").join("b"), base.join("a")];
+    let identities: Vec<_> = dirs
+        .iter()
+        .map(|dir| capture_identity(dir, true, false).expect("directory identity"))
+        .collect();
+    let leaf = nested.join("leaf.json");
+    std::fs::write(&leaf, b"owned").expect("test-owned leaf");
+    let leaf_identity = capture_identity(&leaf, false, false).expect("leaf identity");
+    delete_verified_path(&leaf, &leaf_identity, false, false).expect("leaf deleted");
+    for (dir, identity) in dirs.iter().zip(identities.iter()) {
+        delete_verified_path(dir, identity, false, true).expect("deepest-first deletion");
+    }
+    assert!(!base.join("a").exists(), "all test-owned ancestors removed");
+    assert!(base.exists(), "pre-existing base survives");
+    std::fs::remove_dir(&base).expect("remove test-owned base");
+
+    // Unowned content in an owned ancestor must block its removal and survive.
+    std::fs::create_dir(&base).expect("second test-owned base");
+    std::fs::create_dir_all(&nested).expect("second nested directories");
+    let second_identities: Vec<_> = dirs
+        .iter()
+        .map(|dir| capture_identity(dir, true, false).expect("directory identity"))
+        .collect();
+    std::fs::write(&leaf, b"owned").expect("second owned leaf");
+    let second_leaf = capture_identity(&leaf, false, false).expect("second leaf identity");
+    delete_verified_path(&leaf, &second_leaf, false, false).expect("second leaf deleted");
+    let unowned = dirs[1].join("unowned.txt");
+    std::fs::write(&unowned, b"not ours").expect("unowned content");
+    delete_verified_path(&dirs[0], &second_identities[0], false, true).expect("deepest removed");
+    assert!(
+        delete_verified_path(&dirs[1], &second_identities[1], false, true).is_err(),
+        "nonempty parent must not be deleted"
+    );
+    assert!(unowned.exists(), "unowned content must be preserved");
+    assert!(
+        dirs[1].exists(),
+        "parent holding unowned content must survive"
+    );
+    let _ = std::fs::remove_file(&unowned);
+    let _ = std::fs::remove_dir(&dirs[1]);
+    let _ = std::fs::remove_dir(&dirs[2]);
+    let _ = std::fs::remove_dir(&base);
 }
 
 #[test]
