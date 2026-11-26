@@ -344,8 +344,8 @@ pub mod windows {
         FILE_DELETE_CHILD, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_WRITE_ATTRIBUTES,
         FILE_WRITE_DATA, FILE_WRITE_EA, GENERIC_ALL, GENERIC_READ, GENERIC_WRITE, HANDLE,
         MAXIMUM_ALLOWED, OWNER_SECURITY_INFORMATION, PACL, PSID, READ_CONTROL, SID,
-        SecurityImpersonation, TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER, TokenElevation, TokenUser,
-        WRITE_DAC, WRITE_OWNER,
+        SecurityImpersonation, TOKEN_DUPLICATE, TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER,
+        TokenElevation, TokenUser, WRITE_DAC, WRITE_OWNER,
     };
 
     const INVALID_HANDLE_VALUE: HANDLE = -1isize as HANDLE;
@@ -1282,7 +1282,17 @@ pub mod windows {
             return Err(Refusal::ImpersonationDetected);
         }
         let mut token: HANDLE = ptr::null_mut();
-        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } != TRUE {
+        // DuplicateToken below needs TOKEN_DUPLICATE on this exact handle.
+        // Requesting only TOKEN_QUERY makes a genuinely elevated process fail
+        // with ERROR_ACCESS_DENIED at the membership check.
+        if unsafe {
+            OpenProcessToken(
+                GetCurrentProcess(),
+                TOKEN_QUERY | TOKEN_DUPLICATE,
+                &mut token,
+            )
+        } != TRUE
+        {
             return Err(Refusal::ElevatedAuthorityRequired);
         }
         let _guard = HandleGuard(token);
