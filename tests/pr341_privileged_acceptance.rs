@@ -192,9 +192,30 @@ fn expected_final_path(path: &Path) -> Result<PathBuf, String> {
     Ok(canonical_parent.join(name))
 }
 
+/// Normalize only unambiguous local drive paths: `C:\...` and its legitimate
+/// extended-length form `\\?\C:\...`. UNC, device, volume GUID, relative and
+/// drive-relative paths are deliberately not normalized and never compare equal.
+fn normalized_local_path(path: &Path) -> Option<String> {
+    let text = path.as_os_str().to_str()?;
+    let stripped = text.strip_prefix("\\\\?\\").unwrap_or(text);
+    // After the single allowed extended prefix, another UNC/device prefix is
+    // not a local drive path.
+    if stripped.starts_with("\\\\") || stripped.starts_with("//") {
+        return None;
+    }
+    let local = stripped.replace('/', "\\");
+    let bytes = local.as_bytes();
+    if bytes.len() < 3 || !bytes[0].is_ascii_alphabetic() || bytes[1] != b':' || bytes[2] != b'\\' {
+        return None;
+    }
+    Some(local.to_ascii_lowercase())
+}
+
 fn same_path(left: &Path, right: &Path) -> bool {
-    left.to_string_lossy()
-        .eq_ignore_ascii_case(&right.to_string_lossy())
+    match (normalized_local_path(left), normalized_local_path(right)) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
 }
 
 fn capture_identity(
