@@ -31,7 +31,7 @@ $mandatoryArtifacts = @(
   'pr397_provision_worker.exe',
   'pr402_security_diagnostic.exe',
   'run-pr341-acceptance-guest.ps1',
-  'preflight-v5.ps1',
+  'preflight-guest.ps1',
   'host-checkpoint-attestation.json',
   'source\owner_registry.rs',
   'source\pr341_privileged_acceptance.rs',
@@ -255,16 +255,26 @@ Write-Result 'PASS' 'evidence-dir' "attempt=$attemptId path=$evidenceDir"
 $startUtc = (Get-Date).ToUniversalTime().ToString('o')
 
 $diagOut = Join-Path $evidenceDir 'diagnostic.log'
+$diagStdout = Join-Path $evidenceDir 'diagnostic-stdout.log'
+$diagStderr = Join-Path $evidenceDir 'diagnostic-stderr.log'
 $preflightOut = Join-Path $evidenceDir 'preflight.log'
+$preflightStdout = Join-Path $evidenceDir 'preflight-stdout.log'
+$preflightStderr = Join-Path $evidenceDir 'preflight-stderr.log'
 $testOut = Join-Path $evidenceDir 'privileged-stdout.log'
 $testErr = Join-Path $evidenceDir 'privileged-stderr.log'
 $testLog = Join-Path $evidenceDir 'privileged-tests.log'
 
 $diagnostic = Join-Path $stage 'pr402_security_diagnostic.exe'
 $env:PR402_STRICT_DIAGNOSTIC = '1'
-& $diagnostic --nocapture --test-threads 1 2>&1 | Tee-Object -LiteralPath $diagOut -ErrorAction Stop
-$diagnosticExit = $LASTEXITCODE
+# Explicit subprocess capture: native stderr must never be promoted to a
+# terminating NativeCommandError, and the real child exit code is authoritative.
+$diagProc = Start-Process -FilePath $diagnostic -ArgumentList @('--format','pretty','--show-output','--test-threads','1') -RedirectStandardOutput $diagStdout -RedirectStandardError $diagStderr -Wait -PassThru -NoNewWindow -ErrorAction Stop
+$diagnosticExit = $diagProc.ExitCode
 Remove-Item Env:PR402_STRICT_DIAGNOSTIC -ErrorAction SilentlyContinue
+$diagCombined = @()
+if (Test-Path -LiteralPath $diagStdout) { $diagCombined += Get-Content -LiteralPath $diagStdout }
+if (Test-Path -LiteralPath $diagStderr) { $diagCombined += Get-Content -LiteralPath $diagStderr }
+$diagCombined | Set-Content -LiteralPath $diagOut -Encoding utf8 -ErrorAction Stop
 Write-Result $(if ($diagnosticExit -eq 0) { 'PASS' } else { 'FAIL' }) 'strict-diagnostic' "exit=$diagnosticExit evidence=$diagOut"
 if ($diagnosticExit -ne 0) {
   $summary = [PSCustomObject]@{ attempt=$attemptId; source_sha=$manifest.source_sha; package_version=$ExpectedPackageVersion; manifest_sha256=$manifestSha; start_utc=$startUtc; end_utc=(Get-Date).ToUniversalTime().ToString('o'); diagnostic_exit=$diagnosticExit; preflight_exit='NOT_RUN'; raw_acceptance_exit='NOT_RUN'; semantic_exit=$diagnosticExit; status='FAIL'; evidence_dir=$evidenceDir }
@@ -273,9 +283,13 @@ if ($diagnosticExit -ne 0) {
   exit $diagnosticExit
 }
 
-$preflight = Join-Path $stage 'preflight-v5.ps1'
-& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $preflight 2>&1 | Tee-Object -LiteralPath $preflightOut -ErrorAction Stop
-$preflightExit = $LASTEXITCODE
+$preflight = Join-Path $stage 'preflight-guest.ps1'
+$preflightProc = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',$preflight) -RedirectStandardOutput $preflightStdout -RedirectStandardError $preflightStderr -Wait -PassThru -NoNewWindow -ErrorAction Stop
+$preflightExit = $preflightProc.ExitCode
+$preflightCombined = @()
+if (Test-Path -LiteralPath $preflightStdout) { $preflightCombined += Get-Content -LiteralPath $preflightStdout }
+if (Test-Path -LiteralPath $preflightStderr) { $preflightCombined += Get-Content -LiteralPath $preflightStderr }
+$preflightCombined | Set-Content -LiteralPath $preflightOut -Encoding utf8 -ErrorAction Stop
 Write-Result $(if ($preflightExit -eq 0) { 'PASS' } else { 'FAIL' }) 'preflight' "exit=$preflightExit evidence=$preflightOut"
 if ($preflightExit -ne 0) {
   $summary = [PSCustomObject]@{ attempt=$attemptId; source_sha=$manifest.source_sha; package_version=$ExpectedPackageVersion; manifest_sha256=$manifestSha; start_utc=$startUtc; end_utc=(Get-Date).ToUniversalTime().ToString('o'); diagnostic_exit=$diagnosticExit; preflight_exit=$preflightExit; raw_acceptance_exit='NOT_RUN'; semantic_exit=$preflightExit; status='FAIL'; evidence_dir=$evidenceDir }

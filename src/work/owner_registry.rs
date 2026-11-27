@@ -339,16 +339,21 @@ pub mod windows {
     };
     use winapi::um::winnt::{
         ACCESS_ALLOWED_ACE, ACCESS_ALLOWED_ACE_TYPE, ACCESS_SYSTEM_SECURITY, ACE_HEADER,
-        ACL_SIZE_INFORMATION, AclSizeInformation, DACL_SECURITY_INFORMATION, DELETE,
-        FILE_ALL_ACCESS, FILE_APPEND_DATA, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
-        FILE_DELETE_CHILD, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_WRITE_ATTRIBUTES,
-        FILE_WRITE_DATA, FILE_WRITE_EA, GENERIC_ALL, GENERIC_READ, GENERIC_WRITE, HANDLE,
-        MAXIMUM_ALLOWED, OWNER_SECURITY_INFORMATION, PACL, PSID, READ_CONTROL, SID,
-        SecurityImpersonation, TOKEN_DUPLICATE, TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER,
-        TokenElevation, TokenUser, WRITE_DAC, WRITE_OWNER,
+        ACL_SIZE_INFORMATION, AclSizeInformation, CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION,
+        DELETE, FILE_ALL_ACCESS, FILE_APPEND_DATA, FILE_ATTRIBUTE_DIRECTORY,
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_DELETE_CHILD, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA, GENERIC_ALL, GENERIC_READ,
+        GENERIC_WRITE, HANDLE, INHERIT_ONLY_ACE, INHERITED_ACE, MAXIMUM_ALLOWED,
+        NO_PROPAGATE_INHERIT_ACE, OBJECT_INHERIT_ACE, OWNER_SECURITY_INFORMATION, PACL, PSID,
+        READ_CONTROL, SID, SecurityImpersonation, TOKEN_DUPLICATE, TOKEN_ELEVATION, TOKEN_QUERY,
+        TOKEN_USER, TokenElevation, TokenUser, WRITE_DAC, WRITE_OWNER,
     };
 
     const INVALID_HANDLE_VALUE: HANDLE = -1isize as HANDLE;
+    /// Native kernel object full access for a mutex: STANDARD_RIGHTS_REQUIRED
+    /// (0x000F0000) | SYNCHRONIZE (0x00100000) | MUTEX_MODIFY_STATE (0x0001).
+    /// The Windows kernel maps GENERIC_ALL to this value on mutex DACLs.
+    const MUTEX_ALL_ACCESS: DWORD = 0x001F0001;
     /// Upper bound on a TokenUser structure before it is treated as malformed.
     const MAX_TOKEN_BYTES: DWORD = 4096;
     /// Not exported by winapi 0.3; documented value of FILE_NAME_NORMALIZED.
@@ -524,6 +529,71 @@ pub mod windows {
         mask & GENERIC_ALL != 0 || mask & FILE_ALL_ACCESS == FILE_ALL_ACCESS
     }
 
+    fn has_mutex_full_control(mask: DWORD) -> bool {
+        mask & GENERIC_ALL != 0 || mask & MUTEX_ALL_ACCESS == MUTEX_ALL_ACCESS
+    }
+
+    /// Mutex/kernel-object DACL policy. File-specific rights are not applicable
+    /// to synchronization objects: Windows maps GENERIC_ALL on a mutex DACL to
+    /// MUTEX_ALL_ACCESS (0x001F0001). This validator accepts only that native
+    /// full-control form for trusted SIDs, and refuses every other effective
+    /// access, including SYNCHRONIZE alone, partial rights, unknown bits,
+    /// inheritance flags and unsupported ACE forms.
+    fn validate_mutex_acl(acl: PACL) -> RegistryResult<()> {
+        if acl.is_null() || unsafe { IsValidAcl(acl) } != TRUE {
+            return Err(Refusal::InvalidSecurityMetadata);
+        }
+        let mut info: ACL_SIZE_INFORMATION = unsafe { std::mem::zeroed() };
+        if unsafe {
+            GetAclInformation(
+                acl,
+                &mut info as *mut _ as LPVOID,
+                std::mem::size_of::<ACL_SIZE_INFORMATION>() as DWORD,
+                AclSizeInformation,
+            )
+        } != TRUE
+            || info.AceCount == 0
+        {
+            return Err(Refusal::InvalidSecurityMetadata);
+        }
+        const BAD_ACE_FLAGS: u8 = OBJECT_INHERIT_ACE
+            | CONTAINER_INHERIT_ACE
+            | NO_PROPAGATE_INHERIT_ACE
+            | INHERIT_ONLY_ACE
+            | INHERITED_ACE;
+        let known_bits = MUTEX_ALL_ACCESS | GENERIC_ALL;
+        let mut trusted_full = false;
+        for index in 0..info.AceCount {
+            let mut ace: LPVOID = ptr::null_mut();
+            if unsafe { GetAce(acl, index, &mut ace) } != TRUE || ace.is_null() {
+                return Err(Refusal::InvalidSecurityMetadata);
+            }
+            let header = unsafe { &*(ace as *const ACE_HEADER) };
+            if header.AceType != ACCESS_ALLOWED_ACE_TYPE
+                || (header.AceSize as usize) < std::mem::size_of::<ACCESS_ALLOWED_ACE>()
+                || header.AceFlags & BAD_ACE_FLAGS != 0
+            {
+                return Err(Refusal::InvalidSecurityMetadata);
+            }
+            let allowed = unsafe { &*(ace as *const ACCESS_ALLOWED_ACE) };
+            let sid = sid_to_string((&allowed.SidStart as *const DWORD) as *mut SID)?;
+            if !trusted_sid(&sid) {
+                // Every allow ACE in a kernel DACL grants effective access.
+                // Untrusted access (including SYNCHRONIZE) is refused.
+                return Err(Refusal::InvalidSecurityMetadata);
+            }
+            let mask = allowed.Mask;
+            if mask == 0 || mask & !known_bits != 0 || !has_mutex_full_control(mask) {
+                return Err(Refusal::InvalidSecurityMetadata);
+            }
+            trusted_full = true;
+        }
+        if !trusted_full {
+            return Err(Refusal::InvalidSecurityMetadata);
+        }
+        Ok(())
+    }
+
     fn validate_acl_inner(acl: PACL, mode: AclMode) -> RegistryResult<()> {
         if acl.is_null() || unsafe { IsValidAcl(acl) } != TRUE {
             return Err(Refusal::InvalidSecurityMetadata);
@@ -578,6 +648,12 @@ pub mod windows {
     /// Test seam for crafted ACLs (isolates DACL evaluation from file ownership).
     pub fn validate_acl_for_test(acl: PACL) -> RegistryResult<()> {
         validate_acl(acl)
+    }
+
+    /// Test seam for the production mutex DACL validator, used by the native
+    /// diagnostic and crafted ACL regressions. No parallel validator exists.
+    pub fn validate_mutex_acl_for_test(acl: PACL) -> RegistryResult<()> {
+        validate_mutex_acl(acl)
     }
 
     /// Read-only observation of an OS object's DACL: does it grant full control
@@ -726,7 +802,7 @@ pub mod windows {
         if !trusted_sid(&sid_to_string(owner as *mut SID)?) {
             return Err(Refusal::InvalidSecurityMetadata);
         }
-        validate_acl(dacl)
+        validate_mutex_acl(dacl)
     }
 
     /// Bind the opened handle to the exact trusted path: a junction or a
@@ -1440,6 +1516,12 @@ pub fn refuse_off_windows() -> Refusal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    use winapi::shared::minwindef::{DWORD, LPVOID, TRUE};
+    #[cfg(windows)]
+    use winapi::um::winbase::LocalFree;
+    #[cfg(windows)]
+    use winapi::um::winnt::{PACL, PSID};
 
     fn binding(sid: &str, owner: &str, revoked: bool, revision: u64) -> OwnerBinding {
         OwnerBinding {
@@ -1909,6 +1991,139 @@ mod tests {
         assert_eq!(
             windows::validate_acl_for_test(acl),
             Err(Refusal::InvalidSecurityMetadata)
+        );
+    }
+
+    #[cfg(windows)]
+    fn crafted_acl(entries: &[(&str, DWORD, bool)]) -> AclBuf {
+        use std::os::windows::ffi::OsStrExt;
+        use winapi::um::securitybaseapi::{AddAccessAllowedAce, AddAccessDeniedAce, InitializeAcl};
+        use winapi::um::winnt::{ACL_REVISION, PACL};
+        let revision = ACL_REVISION as u32;
+        let mut buf = AclBuf([0u8; 256]);
+        let acl: PACL = buf.0.as_mut_ptr() as *mut _;
+        assert_eq!(
+            unsafe { InitializeAcl(acl, buf.0.len() as u32, revision) },
+            TRUE
+        );
+        for (sid_text, mask, allow) in entries {
+            let wide: Vec<u16> = std::ffi::OsStr::new(sid_text)
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+            let mut sid: PSID = std::ptr::null_mut();
+            assert_eq!(
+                unsafe { winapi::shared::sddl::ConvertStringSidToSidW(wide.as_ptr(), &mut sid) },
+                TRUE
+            );
+            let added = if *allow {
+                unsafe { AddAccessAllowedAce(acl, revision, *mask, sid) }
+            } else {
+                unsafe { AddAccessDeniedAce(acl, revision, *mask, sid) }
+            };
+            assert_eq!(added, TRUE);
+            unsafe { LocalFree(sid) };
+        }
+        buf
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn mutex_acl_accepts_exact_observed_native_full_access() {
+        const MUTEX_FULL: DWORD = 0x001F0001;
+        let buf = crafted_acl(&[
+            (SID_SYSTEM, MUTEX_FULL, true),
+            (SID_ADMINISTRATORS, MUTEX_FULL, true),
+        ]);
+        let acl: PACL = buf.0.as_ptr() as *mut _;
+        assert_eq!(windows::validate_mutex_acl_for_test(acl), Ok(()));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn mutex_acl_negative_rights_matrix_fails_closed() {
+        const MUTEX_FULL: DWORD = 0x001F0001;
+        use winapi::um::winnt::{DELETE, GENERIC_ALL, WRITE_DAC, WRITE_OWNER};
+        let bad: &[(&str, DWORD)] = &[
+            (SID_EVERYONE, MUTEX_FULL),
+            (SID_EVERYONE, 0x0010_0000), // SYNCHRONIZE only
+            (SID_EVERYONE, 0x0000_0001), // MUTEX_MODIFY_STATE only
+            (SID_EVERYONE, WRITE_DAC),
+            (SID_EVERYONE, WRITE_OWNER),
+            (SID_EVERYONE, DELETE),
+            (SID_EVERYONE, GENERIC_ALL),
+            (SID_ADMINISTRATORS, 0x0000_0001),
+            (SID_ADMINISTRATORS, 0x0010_0000),
+            (SID_ADMINISTRATORS, MUTEX_FULL | 0x0000_0002),
+        ];
+        for (sid, mask) in bad {
+            let buf = crafted_acl(&[(*sid, *mask, true)]);
+            let acl: PACL = buf.0.as_ptr() as *mut _;
+            assert_eq!(
+                windows::validate_mutex_acl_for_test(acl),
+                Err(Refusal::InvalidSecurityMetadata),
+                "mutex ACL must refuse sid={sid} mask=0x{mask:08x}"
+            );
+        }
+
+        let buf = crafted_acl(&[
+            (SID_ADMINISTRATORS, MUTEX_FULL, true),
+            (SID_EVERYONE, MUTEX_FULL, false),
+        ]);
+        let acl: PACL = buf.0.as_ptr() as *mut _;
+        assert_eq!(
+            windows::validate_mutex_acl_for_test(acl),
+            Err(Refusal::InvalidSecurityMetadata)
+        );
+
+        let mut empty = AclBuf([0u8; 256]);
+        assert_eq!(
+            unsafe {
+                winapi::um::securitybaseapi::InitializeAcl(
+                    empty.0.as_mut_ptr() as *mut _,
+                    empty.0.len() as u32,
+                    winapi::um::winnt::ACL_REVISION as u32,
+                )
+            },
+            TRUE
+        );
+        assert_eq!(
+            windows::validate_mutex_acl_for_test(empty.0.as_ptr() as *mut _),
+            Err(Refusal::InvalidSecurityMetadata)
+        );
+        assert_eq!(
+            windows::validate_mutex_acl_for_test(std::ptr::null_mut()),
+            Err(Refusal::InvalidSecurityMetadata)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn mutex_inheritance_flag_is_refused() {
+        use winapi::um::securitybaseapi::GetAce;
+        use winapi::um::winnt::ACE_HEADER;
+        const MUTEX_FULL: DWORD = 0x001F0001;
+        let mut buf = crafted_acl(&[(SID_ADMINISTRATORS, MUTEX_FULL, true)]);
+        let acl: PACL = buf.0.as_mut_ptr() as *mut _;
+        let mut ace: LPVOID = std::ptr::null_mut();
+        assert_eq!(unsafe { GetAce(acl, 0, &mut ace) }, TRUE);
+        unsafe { (*(ace as *mut ACE_HEADER)).AceFlags = winapi::um::winnt::OBJECT_INHERIT_ACE };
+        assert_eq!(
+            windows::validate_mutex_acl_for_test(acl),
+            Err(Refusal::InvalidSecurityMetadata)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn file_policy_still_refuses_mutex_only_full_access() {
+        const MUTEX_FULL: DWORD = 0x001F0001;
+        let buf = crafted_acl(&[(SID_ADMINISTRATORS, MUTEX_FULL, true)]);
+        let acl: PACL = buf.0.as_ptr() as *mut _;
+        assert_eq!(
+            windows::validate_acl_for_test(acl),
+            Err(Refusal::InvalidSecurityMetadata),
+            "filesystem policy must remain unchanged"
         );
     }
 

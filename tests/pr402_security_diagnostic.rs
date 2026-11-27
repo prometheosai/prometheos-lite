@@ -5,7 +5,7 @@
 //! security stage and never converts a skip into success.
 #![cfg(windows)]
 
-use prometheos_lite::work::owner_registry::windows::validate_acl_for_test;
+use prometheos_lite::work::owner_registry::windows::validate_mutex_acl_for_test;
 use std::ffi::{OsStr, OsString};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -309,7 +309,7 @@ fn diagnose_native_security_stages() {
         );
         assert_eq!(header.AceType, ACCESS_ALLOWED_ACE_TYPE);
     }
-    let verdict = validate_acl_for_test(dacl);
+    let verdict = validate_mutex_acl_for_test(dacl);
     println!("MUTEX_DACL_VALIDATOR verdict={verdict:?}");
     assert!(
         verdict.is_ok(),
