@@ -298,10 +298,11 @@ pub type RegistryResult<T> = std::result::Result<T, Refusal>;
 pub mod windows {
     use super::*;
     use sha2::{Digest, Sha256};
+    use std::cell::RefCell;
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
     use std::ptr;
-    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
     use winapi::ctypes::c_void;
     use winapi::shared::minwindef::{BOOL, DWORD, FALSE, LPVOID, TRUE};
@@ -319,11 +320,11 @@ pub mod windows {
     use winapi::um::errhandlingapi::GetLastError;
     use winapi::um::fileapi::{
         BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateDirectoryW, CreateFileW, DeleteFileW,
-        FILE_RENAME_INFO, FlushFileBuffers, GetFileInformationByHandle, GetFileType,
-        GetFinalPathNameByHandleW, OPEN_EXISTING, ReadFile, SetFileInformationByHandle, WriteFile,
+        FlushFileBuffers, GetFileInformationByHandle, GetFileType, GetFinalPathNameByHandleW,
+        OPEN_EXISTING, ReadFile, WriteFile,
     };
     use winapi::um::handleapi::CloseHandle;
-    use winapi::um::minwinbase::{FILE_INFO_BY_HANDLE_CLASS, FileRenameInfo, SECURITY_ATTRIBUTES};
+    use winapi::um::minwinbase::SECURITY_ATTRIBUTES;
     use winapi::um::processthreadsapi::{
         GetCurrentProcess, GetCurrentThread, OpenProcessToken, OpenThreadToken,
     };
@@ -354,47 +355,36 @@ pub mod windows {
     /// (0x000F0000) | SYNCHRONIZE (0x00100000) | MUTEX_MODIFY_STATE (0x0001).
     /// The Windows kernel maps GENERIC_ALL to this value on mutex DACLs.
     const MUTEX_ALL_ACCESS: DWORD = 0x001F0001;
-    // Bounded native I/O evidence. No paths, bytes, tokens or registry contents
-    // are recorded: only operation/stage codes and immediate Win32 errors.
-    static LAST_IO_STAGE: AtomicU32 = AtomicU32::new(0);
-    static LAST_IO_ERROR: AtomicU32 = AtomicU32::new(0);
-    static TEMP_CREATED: AtomicBool = AtomicBool::new(false);
-    static PUBLICATION_ATTEMPTED: AtomicBool = AtomicBool::new(false);
-    static PUBLICATION_COMPLETED: AtomicBool = AtomicBool::new(false);
-    static VERIFICATION_COMPLETED: AtomicBool = AtomicBool::new(false);
-
     /// Operation codes: 0=none, 1=temp write/flush, 2=publication,
     /// 3=post-publication verification, 4=directory bootstrap.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     pub struct NativeIoDiagnostic {
         pub operation: u32,
         pub win32_error: u32,
+        pub ntstatus: u32,
         pub temp_created: bool,
         pub publication_attempted: bool,
         pub publication_completed: bool,
         pub verification_completed: bool,
     }
 
+    // Thread-local so concurrent attempts cannot mix diagnostic fields.
+    thread_local! {
+        static LAST_IO: RefCell<NativeIoDiagnostic> = RefCell::new(NativeIoDiagnostic::default());
+    }
+
     /// Read-only, last-operation native I/O evidence for receipts. No secrets
     /// or protected registry contents are exposed.
     pub fn last_native_io_diagnostic() -> NativeIoDiagnostic {
-        NativeIoDiagnostic {
-            operation: LAST_IO_STAGE.load(Ordering::SeqCst),
-            win32_error: LAST_IO_ERROR.load(Ordering::SeqCst),
-            temp_created: TEMP_CREATED.load(Ordering::SeqCst),
-            publication_attempted: PUBLICATION_ATTEMPTED.load(Ordering::SeqCst),
-            publication_completed: PUBLICATION_COMPLETED.load(Ordering::SeqCst),
-            verification_completed: VERIFICATION_COMPLETED.load(Ordering::SeqCst),
-        }
+        LAST_IO.with(|cell| *cell.borrow())
     }
 
     fn reset_io_diagnostic() {
-        LAST_IO_STAGE.store(0, Ordering::SeqCst);
-        LAST_IO_ERROR.store(0, Ordering::SeqCst);
-        TEMP_CREATED.store(false, Ordering::SeqCst);
-        PUBLICATION_ATTEMPTED.store(false, Ordering::SeqCst);
-        PUBLICATION_COMPLETED.store(false, Ordering::SeqCst);
-        VERIFICATION_COMPLETED.store(false, Ordering::SeqCst);
+        LAST_IO.with(|cell| *cell.borrow_mut() = NativeIoDiagnostic::default());
+    }
+
+    fn update_io_diagnostic<F: FnOnce(&mut NativeIoDiagnostic)>(update: F) {
+        LAST_IO.with(|cell| update(&mut cell.borrow_mut()));
     }
     /// Upper bound on a TokenUser structure before it is treated as malformed.
     const MAX_TOKEN_BYTES: DWORD = 4096;
@@ -410,6 +400,33 @@ pub mod windows {
     /// only, protected so no inherited personal-account ACE can slip in.
     const TRUSTED_FILE_SDDL: &str = "O:BAD:P(A;;GA;;;SY)(A;;GA;;;BA)";
     const TRUSTED_DIR_SDDL: &str = "O:BAD:P(A;OICI;GA;;;SY)(A;OICI;GA;;;BA)";
+    const FILE_RENAME_INFORMATION_CLASS: u32 = 10;
+
+    #[repr(C)]
+    struct IoStatusBlock {
+        status: i32,
+        information: usize,
+    }
+
+    #[repr(C)]
+    struct FileRenameInformation {
+        replace_if_exists: u8,
+        root_directory: HANDLE,
+        file_name_length: u32,
+        file_name: [u16; 1],
+    }
+
+    #[link(name = "ntdll")]
+    unsafe extern "system" {
+        fn NtSetInformationFile(
+            file_handle: HANDLE,
+            io_status_block: *mut IoStatusBlock,
+            file_information: *mut FileRenameInformation,
+            length: DWORD,
+            information_class: u32,
+        ) -> i32;
+        fn RtlNtStatusToDosError(status: i32) -> DWORD;
+    }
 
     struct HandleGuard(HANDLE);
     impl Drop for HandleGuard {
@@ -1306,8 +1323,10 @@ pub mod windows {
                     || written == 0
                 {
                     let code = unsafe { GetLastError() };
-                    LAST_IO_STAGE.store(1, Ordering::SeqCst);
-                    LAST_IO_ERROR.store(code, Ordering::SeqCst);
+                    update_io_diagnostic(|diag| {
+                        diag.operation = 1;
+                        diag.win32_error = code;
+                    });
                     cleanup_temp(&path, handle);
                     return Err(Refusal::IoFailure);
                 }
@@ -1315,60 +1334,74 @@ pub mod windows {
             }
             if unsafe { FlushFileBuffers(handle) } != TRUE {
                 let code = unsafe { GetLastError() };
-                LAST_IO_STAGE.store(1, Ordering::SeqCst);
-                LAST_IO_ERROR.store(code, Ordering::SeqCst);
+                update_io_diagnostic(|diag| {
+                    diag.operation = 1;
+                    diag.win32_error = code;
+                });
                 cleanup_temp(&path, handle);
                 return Err(Refusal::IoFailure);
             }
-            TEMP_CREATED.store(true, Ordering::SeqCst);
+            update_io_diagnostic(|diag| diag.temp_created = true);
             return Ok(TempFile { path, handle });
         }
         Err(Refusal::ConcurrentUpdate)
     }
 
-    /// Publish the verified temp file through its own handle. The destination
-    /// is the kernel-resolved absolute final path of the verified parent.
-    /// RootDirectory must be NULL with an absolute FileName: the relative
-    /// RootDirectory form fails ERROR_INVALID_PARAMETER (87) on the reviewed
-    /// Windows build, while the absolute form succeeds and performs no
-    /// untrusted path lookup.
-    fn publish_via_handle(destination: &str, temp_handle: HANDLE) -> RegistryResult<()> {
-        let name = wide(OsStr::new(destination));
-        let total = std::mem::size_of::<FILE_RENAME_INFO>() + name.len() * 2;
+    /// Publish the verified temp file through its own kernel handle. The
+    /// destination is a simple leaf name resolved by the kernel relative to the
+    /// SOURCE FILE'S OWN parent, with RootDirectory=NULL. No global pathname
+    /// lookup and no retained-path string participates in the write effect.
+    /// The native NtSetInformationFile(FileRenameInformation) form succeeds on
+    /// the reviewed Windows build where SetFileInformationByHandle returned
+    /// ERROR_INVALID_PARAMETER (87).
+    fn publish_via_handle(temp_handle: HANDLE) -> RegistryResult<()> {
+        let name = wide(OsStr::new(REGISTRY_FILE_NAME));
+        let total = std::mem::offset_of!(FileRenameInformation, file_name) + (name.len() - 1) * 2;
         let mut storage = vec![0u64; total.div_ceil(8)];
-        let info = storage.as_mut_ptr() as *mut FILE_RENAME_INFO;
+        let info = storage.as_mut_ptr() as *mut FileRenameInformation;
         unsafe {
-            (*info).ReplaceIfExists = TRUE;
-            (*info).RootDirectory = ptr::null_mut();
-            (*info).FileNameLength = ((name.len() - 1) * 2) as DWORD;
-            ptr::copy_nonoverlapping(name.as_ptr(), (*info).FileName.as_mut_ptr(), name.len());
+            (*info).replace_if_exists = TRUE as u8;
+            (*info).root_directory = ptr::null_mut();
+            (*info).file_name_length = ((name.len() - 1) * 2) as DWORD;
+            ptr::copy_nonoverlapping(name.as_ptr(), (*info).file_name.as_mut_ptr(), name.len());
         }
-        LAST_IO_STAGE.store(2, Ordering::SeqCst);
-        PUBLICATION_ATTEMPTED.store(true, Ordering::SeqCst);
-        if unsafe {
-            SetFileInformationByHandle(
+        let mut status_block = IoStatusBlock {
+            status: 0,
+            information: 0,
+        };
+        update_io_diagnostic(|diag| {
+            diag.operation = 2;
+            diag.publication_attempted = true;
+        });
+        let status = unsafe {
+            NtSetInformationFile(
                 temp_handle,
-                FileRenameInfo as FILE_INFO_BY_HANDLE_CLASS,
-                info as LPVOID,
+                &mut status_block,
+                info,
                 total as DWORD,
+                FILE_RENAME_INFORMATION_CLASS,
             )
-        } != TRUE
-        {
-            let code = unsafe { GetLastError() };
-            LAST_IO_ERROR.store(code, Ordering::SeqCst);
-            return Err(classify_win32_error(code));
+        };
+        if status < 0 {
+            // Capture the immediate mapped Win32 error before any other call.
+            let dos = unsafe { RtlNtStatusToDosError(status) };
+            update_io_diagnostic(|diag| {
+                diag.ntstatus = status as u32;
+                diag.win32_error = dos;
+            });
+            return Err(classify_win32_error(dos));
         }
-        PUBLICATION_COMPLETED.store(true, Ordering::SeqCst);
+        update_io_diagnostic(|diag| {
+            diag.ntstatus = status as u32;
+            diag.publication_completed = true;
+        });
         Ok(())
     }
 
     /// Test seam for the production publication implementation on a disposable
     /// user-owned fixture. No path rewriting or alternate rename is used.
-    pub fn publish_via_handle_for_test(
-        destination: &str,
-        temp_handle: HANDLE,
-    ) -> RegistryResult<()> {
-        publish_via_handle(destination, temp_handle)
+    pub fn publish_via_handle_for_test(temp_handle: HANDLE) -> RegistryResult<()> {
+        publish_via_handle(temp_handle)
     }
 
     /// Provision the registry under verified elevated authority.
@@ -1386,12 +1419,14 @@ pub mod windows {
     /// therefore NOT a fully transactional or crash-atomic multi-file update.
     ///
     /// PATH TRUST: the source is identified by its verified temp handle and the
-    /// destination name is resolved relative to the verified parent directory
-    /// HANDLE (FILE_RENAME_INFO.RootDirectory), so the final write effect has no
-    /// global pathname lookup to redirect it. Every ancestor is additionally
-    /// bound to its kernel-resolved final path and the admin/SYSTEM-only DACL
-    /// and shared mutex exclude unprivileged substitution.
+    /// simple destination leaf is resolved by the kernel relative to that
+    /// source object's own parent (NtSetInformationFile/FileRenameInformation
+    /// with RootDirectory=NULL). No global pathname is looked up for the write
+    /// effect. The verified parent handle is retained through publication, every
+    /// ancestor is bound to its kernel-resolved final path, and the
+    /// admin/SYSTEM-only DACL plus shared mutex exclude unprivileged substitution.
     pub fn provision_registry(path: &Path, proposed: &OwnerRegistry) -> RegistryResult<()> {
+        reset_io_diagnostic();
         require_provisioning_authority()?;
         let expected = expected_path(path)?;
         let bytes = canonical_json(proposed).map_err(|_| Refusal::InvalidRegistry)?;
@@ -1407,9 +1442,10 @@ pub mod windows {
         };
         enforce_monotonic_update(previous.as_ref(), proposed)
             .map_err(|_| Refusal::NonMonotonicUpdate)?;
-        reset_io_diagnostic();
         let parent = expected.parent().ok_or(Refusal::UntrustedLocation)?;
-        // Bind the parent directory itself to an OS handle before publishing.
+        // The verified parent handle is retained through publication. The
+        // destination leaf is resolved by the kernel relative to the source
+        // file's own parent, so no global pathname is used for the write effect.
         let dir_handle = open_verified(
             parent,
             parent,
@@ -1419,17 +1455,21 @@ pub mod windows {
             AclMode::Strict,
             ObjectKind::Directory,
         )?;
-        let dir_guard = HandleGuard(dir_handle);
-        // Derive the destination absolute name from the verified handle, then
-        // close that handle before publication: keeping it open with write
-        // access causes ERROR_SHARING_VIOLATION for the absolute rename.
+        let _dir_guard = HandleGuard(dir_handle);
         let parent_final = final_path_string(dir_handle)?;
-        let destination = format!("{}\\{}", parent_final, REGISTRY_FILE_NAME);
-        drop(dir_guard);
         let temp = write_temp(parent, &bytes)?;
+        // Prove the source object is located beneath the still-open verified
+        // parent before publication. The rename itself is relative to the
+        // source handle's kernel parent, so no pathname is used for the effect.
+        let temp_final = final_path_string(temp.handle)?;
+        let prefix = format!("{}\\", parent_final.trim_end_matches('\\'));
+        if !temp_final.starts_with(&prefix) {
+            drop(temp);
+            return Err(Refusal::UntrustedLocation);
+        }
         let temp_identity = file_identity(temp.handle)?;
         let temp_path = temp.path.clone();
-        if let Err(refusal) = publish_via_handle(&destination, temp.handle) {
+        if let Err(refusal) = publish_via_handle(temp.handle) {
             drop(temp);
             let _ = unsafe { DeleteFileW(wide(temp_path.as_os_str()).as_ptr()) };
             return Err(refusal);
@@ -1439,14 +1479,27 @@ pub mod windows {
             return Err(Refusal::IoFailure);
         }
         drop(temp);
-        // Re-open the installed file and prove it is the verified document
-        // before returning success.
-        LAST_IO_STAGE.store(3, Ordering::SeqCst);
+        // Re-open the installed file and prove it is the exact published object
+        // with the expected trusted bytes.
+        update_io_diagnostic(|diag| diag.operation = 3);
+        let installed_handle = open_raw(
+            &expected,
+            GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_DELETE,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )?;
+        let installed_identity = file_identity(installed_handle)?;
+        unsafe { CloseHandle(installed_handle) };
+        if installed_identity != temp_identity {
+            return Err(Refusal::IoFailure);
+        }
         let installed = load_via_handle(&expected)?;
         if canonical_json(&installed).map_err(|_| Refusal::InvalidRegistry)? != bytes {
             return Err(Refusal::IoFailure);
         }
-        VERIFICATION_COMPLETED.store(true, Ordering::SeqCst);
+        update_io_diagnostic(|diag| diag.verification_completed = true);
         Ok(())
     }
 
@@ -2236,12 +2289,10 @@ mod tests {
     fn production_publication_accepts_kernel_derived_absolute_name() {
         use std::os::windows::ffi::OsStrExt;
         use winapi::shared::minwindef::FALSE;
-        use winapi::um::fileapi::{
-            CREATE_NEW, CreateFileW, FlushFileBuffers, GetFinalPathNameByHandleW, WriteFile,
-        };
+        use winapi::um::fileapi::{CREATE_NEW, CreateFileW, FlushFileBuffers, WriteFile};
         use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
         use winapi::um::minwinbase::SECURITY_ATTRIBUTES;
-        use winapi::um::winbase::{FILE_FLAG_BACKUP_SEMANTICS, VOLUME_NAME_DOS};
+        use winapi::um::winbase::FILE_FLAG_BACKUP_SEMANTICS;
         use winapi::um::winnt::{
             DELETE, FILE_SHARE_DELETE, FILE_SHARE_READ, GENERIC_READ, GENERIC_WRITE, READ_CONTROL,
         };
@@ -2280,16 +2331,6 @@ mod tests {
             )
         };
         assert!(dir != INVALID_HANDLE_VALUE && !dir.is_null());
-        let mut buf = vec![0u16; 1024];
-        let len = unsafe {
-            GetFinalPathNameByHandleW(dir, buf.as_mut_ptr(), buf.len() as u32, VOLUME_NAME_DOS)
-        };
-        assert!(len > 0 && (len as usize) < buf.len());
-        let parent = unsafe {
-            String::from_utf16_lossy(std::slice::from_raw_parts(buf.as_ptr(), len as usize))
-        };
-        let destination = format!("{}\\registry.json", parent);
-        unsafe { CloseHandle(dir) };
 
         for (generation, existing) in [(1u64, false), (2u64, true)] {
             let dest_path = base.join("registry.json");
@@ -2324,13 +2365,11 @@ mod tests {
                 TRUE
             );
             assert_eq!(unsafe { FlushFileBuffers(temp) }, TRUE);
-            assert_eq!(
-                windows::publish_via_handle_for_test(&destination, temp),
-                Ok(())
-            );
+            assert_eq!(windows::publish_via_handle_for_test(temp), Ok(()));
             unsafe { CloseHandle(temp) };
             assert_eq!(std::fs::read(&dest_path).unwrap(), bytes);
         }
+        unsafe { CloseHandle(dir) };
         let diag = windows::last_native_io_diagnostic();
         assert!(diag.publication_attempted && diag.publication_completed);
         assert_eq!(diag.win32_error, 0);
@@ -2345,7 +2384,9 @@ mod tests {
     fn failed_publication_preserves_existing_destination_bytes() {
         use std::os::windows::ffi::OsStrExt;
         use winapi::shared::minwindef::FALSE;
-        use winapi::um::fileapi::{CREATE_NEW, CreateFileW, FlushFileBuffers, WriteFile};
+        use winapi::um::fileapi::{
+            CREATE_NEW, CreateFileW, FlushFileBuffers, OPEN_EXISTING, WriteFile,
+        };
         use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
         use winapi::um::minwinbase::SECURITY_ATTRIBUTES;
         use winapi::um::winbase::FILE_FLAG_BACKUP_SEMANTICS;
@@ -2405,15 +2446,31 @@ mod tests {
         );
         assert_eq!(unsafe { FlushFileBuffers(temp) }, TRUE);
 
-        let bad_destination = format!("{}\\missing\\registry.json", base.to_string_lossy());
+        // Hold the actual destination without FILE_SHARE_DELETE so publication
+        // against the existing document fails at the real destination.
+        let holder = unsafe {
+            CreateFileW(
+                wide(&destination).as_ptr(),
+                GENERIC_READ,
+                FILE_SHARE_READ,
+                std::ptr::null_mut(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS,
+                std::ptr::null_mut(),
+            )
+        };
+        assert!(holder != INVALID_HANDLE_VALUE && !holder.is_null());
         assert_eq!(
-            windows::publish_via_handle_for_test(&bad_destination, temp),
-            Err(Refusal::UntrustedLocation)
+            windows::publish_via_handle_for_test(temp),
+            Err(Refusal::AccessDenied)
         );
         let diag = windows::last_native_io_diagnostic();
         assert!(diag.publication_attempted && !diag.publication_completed);
-        assert_eq!(diag.win32_error, 3);
-        unsafe { CloseHandle(temp) };
+        assert_eq!(diag.win32_error, 5);
+        unsafe {
+            CloseHandle(temp);
+            CloseHandle(holder)
+        };
         assert_eq!(std::fs::read(&destination).unwrap(), old_bytes);
         let _ = std::fs::remove_file(&destination);
         let _ = std::fs::remove_file(&temp_path);

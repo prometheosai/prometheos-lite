@@ -6,9 +6,9 @@
 #![cfg(windows)]
 
 use prometheos_lite::work::owner_registry::windows::{
-    acquire_test_mutex, load_registry, provision_registry, reject_reparse,
-    require_provisioning_authority, resolve_owner, test_mutex_name, validate_file_security,
-    validate_registry_leaf, validate_registry_location,
+    acquire_test_mutex, last_native_io_diagnostic, load_registry, provision_registry,
+    reject_reparse, require_provisioning_authority, resolve_owner, test_mutex_name,
+    validate_file_security, validate_registry_leaf, validate_registry_location,
 };
 use prometheos_lite::work::owner_registry::{
     OWNER_REGISTRY_SCHEMA, OwnerBinding, OwnerRegistry, canonical_json, default_registry_path,
@@ -1157,7 +1157,12 @@ fn elevated_first_install_exact_bytes_and_trust() {
             1,
         )],
     );
-    provision_registry(&owned.path, &expected).expect("elevated first install must succeed");
+    provision_registry(&owned.path, &expected).unwrap_or_else(|error| {
+        panic!(
+            "elevated first install failed: {error:?} io={:?}",
+            last_native_io_diagnostic()
+        )
+    });
     owned.observe(&expected);
     let installed = load_registry(&owned.path).expect("installed registry must load");
     assert_eq!(installed, expected);
@@ -1186,7 +1191,12 @@ fn monotonic_update_and_permanent_revocation() {
             OwnedRegistry::binding(SID_B, "owner-b", false, 1),
         ],
     );
-    provision_registry(&owned.path, &first).unwrap();
+    provision_registry(&owned.path, &first).unwrap_or_else(|error| {
+        panic!(
+            "monotonic first install failed: {error:?} io={:?}",
+            last_native_io_diagnostic()
+        )
+    });
     owned.observe(&first);
     let second = owned.registry(
         2,
@@ -1195,7 +1205,12 @@ fn monotonic_update_and_permanent_revocation() {
             OwnedRegistry::binding(SID_B, "owner-b", true, 2),
         ],
     );
-    provision_registry(&owned.path, &second).unwrap();
+    provision_registry(&owned.path, &second).unwrap_or_else(|error| {
+        panic!(
+            "monotonic update failed: {error:?} io={:?}",
+            last_native_io_diagnostic()
+        )
+    });
     owned.observe(&second);
     assert_eq!(resolve_owner(&owned.path, SID_B).unwrap(), None);
     assert_eq!(
@@ -1308,8 +1323,12 @@ fn sequential_generation_progression_control() {
             generation,
             vec![OwnedRegistry::binding(SID_A, "pr341-sequential", false, 1)],
         );
-        provision_registry(&owned.path, &proposed)
-            .expect("legitimate 1->2->3 progression must succeed");
+        provision_registry(&owned.path, &proposed).unwrap_or_else(|error| {
+            panic!(
+                "sequential generation {generation} failed: {error:?} io={:?}",
+                last_native_io_diagnostic()
+            )
+        });
         owned.observe(&proposed);
     }
     let final_registry = load_registry(&owned.path).expect("final registry");

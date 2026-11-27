@@ -4,7 +4,9 @@
 //! environment inputs it performs no side effects.
 #![cfg(windows)]
 
-use prometheos_lite::work::owner_registry::windows::provision_registry;
+use prometheos_lite::work::owner_registry::windows::{
+    last_native_io_diagnostic, provision_registry,
+};
 use prometheos_lite::work::owner_registry::{
     OWNER_REGISTRY_SCHEMA, OwnerBinding, OwnerRegistry, canonical_json,
 };
@@ -171,7 +173,8 @@ fn provision_one_generation_from_worker_process() {
             &outcome_path,
             serde_json::json!({
                 "kind": "refused", "generation": generation, "owner": owner,
-                "refusal": format!("{refusal:?}")
+                "refusal": format!("{refusal:?}"),
+                "io_diagnostic": format!("{:?}", last_native_io_diagnostic())
             }),
             EXIT_REFUSED,
         ),
