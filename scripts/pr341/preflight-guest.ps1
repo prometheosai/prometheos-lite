@@ -2,6 +2,10 @@
 # Bounded, fail-closed, READ-ONLY guest preflight for PR341 Stage 1.
 # No process termination, no checkpoint operation, no protected-state mutation.
 # No dependency on historical V5 evidence directories or PID 4248 presence.
+param(
+  [string]$ExpectedLauncherPath,
+  [switch]$ProcessFilterOnly
+)
 $ErrorActionPreference = 'Stop'
 $root = 'C:\ProgramData'
 $registry = Join-Path $root 'PrometheOS\Lite\owner-registry\registry.json'
@@ -21,6 +25,43 @@ function Assert-PlainDirectory([string]$Path) {
   if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or -not $item.PSIsContainer) {
     Refuse "reparse or non-directory at $Path"
   }
+}
+
+function Test-AcceptanceProcesses {
+  if ([string]::IsNullOrWhiteSpace($ExpectedLauncherPath)) {
+    Refuse 'expected launcher path is required for process validation'
+  }
+  $expected = (Resolve-Path -LiteralPath $ExpectedLauncherPath -ErrorAction Stop).Path
+  $self = Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction Stop
+  if ($null -eq $self) { Refuse 'cannot identify current preflight process' }
+  $parentPid = [int]$self.ParentProcessId
+  $parent = Get-CimInstance Win32_Process -Filter "ProcessId=$parentPid" -ErrorAction Stop
+  if ($null -eq $parent) { Refuse 'cannot identify direct parent process' }
+  $parentCmd = [string]$parent.CommandLine
+  if ($parentCmd -notmatch 'run-pr341-acceptance-guest\.ps1' -or
+      $parentCmd -notmatch [regex]::Escape($expected)) {
+    Refuse "direct parent $parentPid is not the expected reviewed launcher at $expected"
+  }
+
+  $pattern = 'pr341_privileged_acceptance|pr402_security_diagnostic|pr397_provision_worker|pr394_deadlock_witness|run-pr341-acceptance-guest\.ps1|preflight-guest\.ps1'
+  $nativeNames = '^(pr341_privileged_acceptance|pr402_security_diagnostic|pr397_provision_worker|pr394_deadlock_witness)(\.exe)?$'
+  $procs = @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
+    $_.ProcessId -ne $PID -and $_.ProcessId -ne $parentPid -and
+    (([string]$_.CommandLine) -match $pattern -or ([string]$_.Name) -match $nativeNames)
+  })
+  if (@($procs | Where-Object { $_.ProcessId -eq 4248 }).Count -gt 0) {
+    Refuse 'historical PID 4248 still exists and matches acceptance tooling'
+  }
+  if ($procs.Count -gt 0) {
+    Refuse "competing acceptance tooling processes: $(($procs | ForEach-Object { $_.ProcessId }) -join ',')"
+  }
+  Write-Line 'PASS' 'process-state' "validated direct parent=$parentPid; no competing acceptance tooling"
+}
+
+if ($ProcessFilterOnly) {
+  Test-AcceptanceProcesses
+  Write-Line 'PASS' 'terminal' 'process-filter-only check complete; no process stopped'
+  exit 0
 }
 
 if ($env:OS -notmatch 'Windows_NT') { Refuse 'non-Windows environment' }
@@ -54,17 +95,7 @@ if (Test-Path -LiteralPath $evidenceRoot) {
 }
 Write-Line 'PASS' 'historical-evidence' 'existing evidence inspected read-only; nothing copied or deleted'
 
-$pattern = 'pr341_privileged_acceptance|pr402_security_diagnostic|pr397_provision_worker|pr394_deadlock_witness|run-pr341-acceptance-guest\.ps1|preflight-guest\.ps1'
-$procs = @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
-  $_.ProcessId -ne $PID -and (([string]$_.CommandLine) -match $pattern)
-})
-if (@($procs | Where-Object { $_.ProcessId -eq 4248 }).Count -gt 0) {
-  Refuse 'historical PID 4248 still exists and matches acceptance tooling'
-}
-if ($procs.Count -gt 0) {
-  Refuse "live acceptance tooling processes: $(($procs | ForEach-Object { $_.ProcessId }) -join ',')"
-}
-Write-Line 'PASS' 'process-state' 'no prior acceptance, diagnostic, witness, worker, launcher or preflight process remains'
+Test-AcceptanceProcesses
 
 Write-Line 'PASS' 'terminal' 'read-only preflight complete; no process stopped, no protected state changed, no checkpoint restored'
 exit 0

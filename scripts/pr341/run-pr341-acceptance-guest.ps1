@@ -284,7 +284,7 @@ if ($diagnosticExit -ne 0) {
 }
 
 $preflight = Join-Path $stage 'preflight-guest.ps1'
-$preflightProc = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',$preflight) -RedirectStandardOutput $preflightStdout -RedirectStandardError $preflightStderr -Wait -PassThru -NoNewWindow -ErrorAction Stop
+$preflightProc = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',$preflight,'-ExpectedLauncherPath',(Join-Path $stage 'run-pr341-acceptance-guest.ps1')) -RedirectStandardOutput $preflightStdout -RedirectStandardError $preflightStderr -Wait -PassThru -NoNewWindow -ErrorAction Stop
 $preflightExit = $preflightProc.ExitCode
 $preflightCombined = @()
 if (Test-Path -LiteralPath $preflightStdout) { $preflightCombined += Get-Content -LiteralPath $preflightStdout }
