@@ -321,7 +321,8 @@ pub mod windows {
     use winapi::um::fileapi::{
         BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateDirectoryW, CreateFileW,
         FILE_DISPOSITION_INFO, FlushFileBuffers, GetFileInformationByHandle, GetFileType,
-        GetFinalPathNameByHandleW, OPEN_EXISTING, ReadFile, SetFileInformationByHandle, WriteFile,
+        GetFinalPathNameByHandleW, OPEN_EXISTING, ReadFile, SetFileInformationByHandle,
+        SetFilePointerEx, WriteFile,
     };
     use winapi::um::handleapi::CloseHandle;
     use winapi::um::minwinbase::{
@@ -1026,6 +1027,20 @@ pub mod windows {
         ))
     }
 
+    /// Read the complete object from offset zero through a handle that may
+    /// already have been written to (and whose pointer is therefore at EOF).
+    pub(crate) fn read_all_from_start(handle: HANDLE) -> RegistryResult<Vec<u8>> {
+        if unsafe { SetFilePointerEx(handle, std::mem::zeroed(), ptr::null_mut(), 0) } != TRUE {
+            let code = unsafe { GetLastError() };
+            update_io_diagnostic(|diag| {
+                diag.operation = 3;
+                diag.win32_error = code;
+            });
+            return Err(classify_win32_error(code));
+        }
+        read_all(handle)
+    }
+
     fn read_all(handle: HANDLE) -> RegistryResult<Vec<u8>> {
         let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
         if unsafe { GetFileInformationByHandle(handle, &mut info) } != TRUE {
@@ -1310,9 +1325,6 @@ pub mod windows {
         Ok(handle)
     }
 
-    /// Mark an operation-owned temp file for deletion through its own verified
-    /// handle. No pathname lookup participates; an object that cannot be proven
-    /// owned or whose disposition fails is preserved, not deleted by path.
     /// Test seam returning a raw pinned directory handle. Caller closes once.
     pub fn open_directory_pin_for_test(path: &Path) -> RegistryResult<HANDLE> {
         let guard = open_directory_pin(path, AclMode::Strict, false)?;
@@ -1334,6 +1346,9 @@ pub mod windows {
         cleanup_temp(handle)
     }
 
+    /// Mark an operation-owned temp file for deletion through its own verified
+    /// handle. No pathname lookup participates; an object that cannot be proven
+    /// owned is preserved, not deleted by path. The caller closes the handle.
     fn cleanup_temp(handle: HANDLE) -> RegistryResult<()> {
         let mut info = FILE_DISPOSITION_INFO {
             DeleteFile: TRUE as u8,
@@ -1566,6 +1581,8 @@ pub mod windows {
             return Err(refusal);
         }
         // All installed verification uses the SAME verified source handle.
+        // The write loop left that handle's file pointer at EOF; rewind before
+        // reading the installed bytes back through it.
         update_io_diagnostic(|diag| diag.operation = 3);
         if file_identity(temp.handle)? != temp_identity {
             drop(temp);
@@ -1573,8 +1590,8 @@ pub mod windows {
         }
         validate_handle_security_inner(temp.handle, AclMode::Strict, ObjectKind::File)?;
         final_path_matches(temp.handle, &expected)?;
-        let installed =
-            parse_registry_bytes(&read_all(temp.handle)?).map_err(|_| Refusal::InvalidRegistry)?;
+        let installed = parse_registry_bytes(&read_all_from_start(temp.handle)?)
+            .map_err(|_| Refusal::InvalidRegistry)?;
         if canonical_json(&installed).map_err(|_| Refusal::InvalidRegistry)? != bytes {
             drop(temp);
             return Err(Refusal::IoFailure);
@@ -2366,6 +2383,33 @@ mod tests {
     }
 
     #[cfg(windows)]
+    /// The post-publication verification reads the installed bytes through the
+    /// same handle that wrote them. That handle's pointer is at EOF, so the
+    /// readback must rewind first; this regression pins that behavior in an
+    /// ordinary user-owned temp fixture without protected-state effects.
+    #[test]
+    #[cfg(windows)]
+    fn same_handle_verification_reads_from_start_after_write() {
+        use super::windows::{cleanup_temp_for_test, read_all_from_start, write_temp_for_test};
+        use std::time::{SystemTime, UNIX_EPOCH};
+        use winapi::um::handleapi::CloseHandle;
+
+        let base = std::env::temp_dir().join(format!(
+            "pr414-readback-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&base).unwrap();
+        let payload = b"deterministic-same-handle-readback";
+        let handle = write_temp_for_test(&base, payload).unwrap();
+        assert_eq!(read_all_from_start(handle).unwrap(), payload);
+        assert_eq!(cleanup_temp_for_test(handle), Ok(()));
+        unsafe { CloseHandle(handle) };
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
     #[test]
     fn production_publication_accepts_kernel_derived_absolute_name() {
         use std::os::windows::ffi::OsStrExt;
