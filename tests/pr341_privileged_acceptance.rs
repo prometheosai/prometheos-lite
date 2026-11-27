@@ -844,23 +844,34 @@ fn create_event(name: &str, manual_reset: bool) -> Result<EventHandle, String> {
     Ok(EventHandle(handle))
 }
 
+/// Bounded worker-outcome JSON parser shared by classification and diagnostic
+/// extraction. Both paths must refuse an oversized or malformed outcome file
+/// instead of reading it without a limit.
+fn read_bounded_worker_json(path: &Path) -> Value {
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.len() <= 16 * 1024 => std::fs::read_to_string(path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .unwrap_or(Value::Null),
+        _ => Value::Null,
+    }
+}
+
 fn classify_worker(
     label: &str,
     status: Option<ExitStatus>,
     timed_out: bool,
     outcome_path: &Path,
 ) -> WorkerResult {
+    let code = status.and_then(|status| status.code());
+    let parsed = if timed_out {
+        Value::Null
+    } else {
+        read_bounded_worker_json(outcome_path)
+    };
     let outcome = if timed_out {
         WorkerOutcome::Timeout
     } else {
-        let code = status.and_then(|status| status.code());
-        let parsed: Value = match std::fs::metadata(outcome_path) {
-            Ok(metadata) if metadata.len() <= 16 * 1024 => std::fs::read_to_string(outcome_path)
-                .ok()
-                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-                .unwrap_or(Value::Null),
-            _ => Value::Null,
-        };
         let kind = parsed.get("kind").and_then(Value::as_str).unwrap_or("");
         let owner = parsed
             .get("owner")
@@ -890,33 +901,19 @@ fn classify_worker(
             _ => WorkerOutcome::Crash(format!("exit={code:?} outcome={parsed}")),
         }
     };
-    let diagnostic = parsed_field(outcome_path, "io_diagnostic", timed_out, status);
+    let diagnostic = if timed_out || code != Some(WORKER_REFUSED) {
+        String::new()
+    } else {
+        parsed
+            .get("io_diagnostic")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
     WorkerResult {
         label: label.to_string(),
         outcome,
         diagnostic,
-    }
-}
-
-fn parsed_field(
-    outcome_path: &Path,
-    field: &str,
-    timed_out: bool,
-    status: Option<ExitStatus>,
-) -> String {
-    if timed_out || status.and_then(|s| s.code()) != Some(WORKER_REFUSED) {
-        return String::new();
-    }
-    match std::fs::read_to_string(outcome_path) {
-        Ok(text) => match serde_json::from_str::<Value>(&text) {
-            Ok(value) => value
-                .get(field)
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string(),
-            Err(_) => String::new(),
-        },
-        Err(_) => String::new(),
     }
 }
 

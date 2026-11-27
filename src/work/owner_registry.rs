@@ -2382,13 +2382,12 @@ mod tests {
         );
     }
 
-    #[cfg(windows)]
     /// The post-publication verification reads the installed bytes through the
     /// same handle that wrote them. That handle's pointer is at EOF, so the
     /// readback must rewind first; this regression pins that behavior in an
     /// ordinary user-owned temp fixture without protected-state effects.
-    #[test]
     #[cfg(windows)]
+    #[test]
     fn same_handle_verification_reads_from_start_after_write() {
         use super::windows::{cleanup_temp_for_test, read_all_from_start, write_temp_for_test};
         use std::time::{SystemTime, UNIX_EPOCH};
@@ -2410,6 +2409,7 @@ mod tests {
         std::fs::remove_dir_all(&base).unwrap();
     }
 
+    #[cfg(windows)]
     #[test]
     fn production_publication_accepts_kernel_derived_absolute_name() {
         use std::os::windows::ffi::OsStrExt;
