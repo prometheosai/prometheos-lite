@@ -799,6 +799,9 @@ enum WorkerOutcome {
 struct WorkerResult {
     label: String,
     outcome: WorkerOutcome,
+    /// Bounded native I/O diagnostic carried from the worker outcome file into
+    /// the final captured acceptance log. No protected bytes or secrets.
+    diagnostic: String,
 }
 
 fn provision_worker_executable() -> PathBuf {
@@ -887,9 +890,33 @@ fn classify_worker(
             _ => WorkerOutcome::Crash(format!("exit={code:?} outcome={parsed}")),
         }
     };
+    let diagnostic = parsed_field(outcome_path, "io_diagnostic", timed_out, status);
     WorkerResult {
         label: label.to_string(),
         outcome,
+        diagnostic,
+    }
+}
+
+fn parsed_field(
+    outcome_path: &Path,
+    field: &str,
+    timed_out: bool,
+    status: Option<ExitStatus>,
+) -> String {
+    if timed_out || status.and_then(|s| s.code()) != Some(WORKER_REFUSED) {
+        return String::new();
+    }
+    match std::fs::read_to_string(outcome_path) {
+        Ok(text) => match serde_json::from_str::<Value>(&text) {
+            Ok(value) => value
+                .get(field)
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            Err(_) => String::new(),
+        },
+        Err(_) => String::new(),
     }
 }
 
@@ -989,7 +1016,10 @@ fn run_worker_pair(registry: &Path, plans: &[WorkerPlan]) -> Vec<WorkerResult> {
                 timed_out[index],
                 &outcome_paths[index],
             );
-            println!("PR341_WORKER_RESULT {}: {:?}", plan.label, result.outcome);
+            println!(
+                "PR341_WORKER_RESULT {}: {:?} io={}",
+                plan.label, result.outcome, result.diagnostic
+            );
             result
         })
         .collect();
@@ -1015,7 +1045,10 @@ fn describe_results(results: &[WorkerResult]) -> String {
                 format!("{}:accepted(owner={owner},digest={digest})", result.label)
             }
             WorkerOutcome::Refused { owner, refusal } => {
-                format!("{}:refused(owner={owner},refusal={refusal})", result.label)
+                format!(
+                    "{}:refused(owner={owner},refusal={refusal},io={})",
+                    result.label, result.diagnostic
+                )
             }
             WorkerOutcome::ExecutionFailure(detail) => {
                 format!("{}:execution_failure({detail})", result.label)

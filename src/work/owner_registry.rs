@@ -319,12 +319,14 @@ pub mod windows {
     use winapi::um::aclapi::GetSecurityInfo;
     use winapi::um::errhandlingapi::GetLastError;
     use winapi::um::fileapi::{
-        BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateDirectoryW, CreateFileW, DeleteFileW,
-        FlushFileBuffers, GetFileInformationByHandle, GetFileType, GetFinalPathNameByHandleW,
-        OPEN_EXISTING, ReadFile, WriteFile,
+        BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateDirectoryW, CreateFileW,
+        FILE_DISPOSITION_INFO, FlushFileBuffers, GetFileInformationByHandle, GetFileType,
+        GetFinalPathNameByHandleW, OPEN_EXISTING, ReadFile, SetFileInformationByHandle, WriteFile,
     };
     use winapi::um::handleapi::CloseHandle;
-    use winapi::um::minwinbase::SECURITY_ATTRIBUTES;
+    use winapi::um::minwinbase::{
+        FILE_INFO_BY_HANDLE_CLASS, FileDispositionInfo, SECURITY_ATTRIBUTES,
+    };
     use winapi::um::processthreadsapi::{
         GetCurrentProcess, GetCurrentThread, OpenProcessToken, OpenThreadToken,
     };
@@ -472,7 +474,6 @@ pub mod windows {
     }
 
     struct TempFile {
-        path: PathBuf,
         handle: HANDLE,
     }
     impl Drop for TempFile {
@@ -1098,34 +1099,43 @@ pub mod windows {
         Ok(DescriptorGuard(descriptor))
     }
 
-    fn verify_root(root: &Path) -> RegistryResult<()> {
-        let handle = open_verified(
-            root,
-            root,
-            false,
-            false,
+    /// Open a directory pin that does not share DELETE: while this handle is
+    /// alive the directory object cannot be renamed or replaced by another
+    /// writer, including by a process using the same pathname.
+    fn open_directory_pin(
+        path: &Path,
+        mode: AclMode,
+        validate_security: bool,
+    ) -> RegistryResult<HandleGuard> {
+        let handle = open_raw(
+            path,
+            GENERIC_READ | READ_CONTROL,
+            FILE_SHARE_READ,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
             None,
-            AclMode::OsManagedRoot,
-            ObjectKind::Directory,
         )?;
-        let _guard = HandleGuard(handle);
-        Ok(())
+        if validate_security
+            && let Err(refusal) =
+                validate_handle_security_inner(handle, mode, ObjectKind::Directory)
+        {
+            unsafe { CloseHandle(handle) };
+            return Err(refusal);
+        }
+        if let Err(refusal) = final_path_matches(handle, path) {
+            unsafe { CloseHandle(handle) };
+            return Err(refusal);
+        }
+        Ok(HandleGuard(handle))
     }
 
-    fn verify_or_create_dir(dir: &Path, create: bool) -> RegistryResult<()> {
-        match open_verified(
-            dir,
-            dir,
-            false,
-            false,
-            None,
-            AclMode::Strict,
-            ObjectKind::Directory,
-        ) {
-            Ok(handle) => {
-                let _guard = HandleGuard(handle);
-                Ok(())
-            }
+    fn verify_root(root: &Path) -> RegistryResult<HandleGuard> {
+        open_directory_pin(root, AclMode::OsManagedRoot, true)
+    }
+
+    fn verify_or_create_dir(dir: &Path, create: bool) -> RegistryResult<HandleGuard> {
+        match open_directory_pin(dir, AclMode::Strict, true) {
+            Ok(guard) => Ok(guard),
             Err(Refusal::RegistryAbsent) if create => {
                 let descriptor = trusted_sd(true)?;
                 let mut sa = SECURITY_ATTRIBUTES {
@@ -1136,20 +1146,14 @@ pub mod windows {
                 if unsafe { CreateDirectoryW(wide(dir.as_os_str()).as_ptr(), &mut sa) } != TRUE {
                     let code = unsafe { GetLastError() };
                     if code != ERROR_ALREADY_EXISTS {
+                        update_io_diagnostic(|diag| {
+                            diag.operation = 4;
+                            diag.win32_error = code;
+                        });
                         return Err(classify_win32_error(code));
                     }
                 }
-                let handle = open_verified(
-                    dir,
-                    dir,
-                    false,
-                    false,
-                    None,
-                    AclMode::Strict,
-                    ObjectKind::Directory,
-                )?;
-                let _guard = HandleGuard(handle);
-                Ok(())
+                open_directory_pin(dir, AclMode::Strict, true)
             }
             Err(other) => Err(other),
         }
@@ -1185,10 +1189,10 @@ pub mod windows {
     /// trusted owner and DACL. Leaf absence is only accepted by the trusted
     /// first-install path, and an incorrectly created directory leaf is refused
     /// (never deleted or silently replaced).
-    fn verify_location_structure(path: &Path, create: bool) -> RegistryResult<()> {
+    fn verify_location_structure(path: &Path, create: bool) -> RegistryResult<Vec<HandleGuard>> {
         let expected = expected_path(path)?;
         let root = programdata_root().map_err(|_| Refusal::UntrustedLocation)?;
-        verify_root(&root)?;
+        let mut pins = vec![verify_root(&root)?];
         let relative = expected
             .strip_prefix(&root)
             .map_err(|_| Refusal::UntrustedLocation)?;
@@ -1196,9 +1200,9 @@ pub mod windows {
         let mut current = root.clone();
         for part in parent_parts {
             current = current.join(part);
-            verify_or_create_dir(&current, create)?;
+            pins.push(verify_or_create_dir(&current, create)?);
         }
-        Ok(())
+        Ok(pins)
     }
 
     /// One stable OS-backed mutex identity per registry path. No PID, timestamp
@@ -1276,12 +1280,98 @@ pub mod windows {
         Ok(TestMutexGuard { handle })
     }
 
-    fn cleanup_temp(path: &Path, handle: HANDLE) {
-        unsafe { CloseHandle(handle) };
-        let _ = unsafe { DeleteFileW(wide(path.as_os_str()).as_ptr()) };
+    /// Create the temp object through a handle that does not share DELETE, so
+    /// another writer cannot rename or replace it between validation and use.
+    fn open_temp_new(
+        path: &Path,
+        descriptor: *mut c_void,
+        validate_security: bool,
+    ) -> RegistryResult<HANDLE> {
+        let handle = open_raw(
+            path,
+            GENERIC_READ | READ_CONTROL | GENERIC_WRITE | DELETE,
+            FILE_SHARE_READ,
+            CREATE_NEW,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            Some(descriptor),
+        )?;
+        if validate_security
+            && let Err(refusal) =
+                validate_handle_security_inner(handle, AclMode::Strict, ObjectKind::File)
+        {
+            unsafe { CloseHandle(handle) };
+            return Err(refusal);
+        }
+        if let Err(refusal) = final_path_matches(handle, path) {
+            unsafe { CloseHandle(handle) };
+            return Err(refusal);
+        }
+        update_io_diagnostic(|diag| diag.temp_created = true);
+        Ok(handle)
+    }
+
+    /// Mark an operation-owned temp file for deletion through its own verified
+    /// handle. No pathname lookup participates; an object that cannot be proven
+    /// owned or whose disposition fails is preserved, not deleted by path.
+    /// Test seam returning a raw pinned directory handle. Caller closes once.
+    pub fn open_directory_pin_for_test(path: &Path) -> RegistryResult<HANDLE> {
+        let guard = open_directory_pin(path, AclMode::Strict, false)?;
+        let handle = guard.0;
+        std::mem::forget(guard);
+        Ok(handle)
+    }
+
+    /// Test seam returning a raw operation-owned temp handle. Caller closes once.
+    pub fn write_temp_for_test(parent: &Path, bytes: &[u8]) -> RegistryResult<HANDLE> {
+        let temp = write_temp_inner(parent, bytes, ptr::null_mut(), false)?;
+        let handle = temp.handle;
+        std::mem::forget(temp);
+        Ok(handle)
+    }
+
+    /// Test seam for handle-bound temp disposition. Caller closes once.
+    pub fn cleanup_temp_for_test(handle: HANDLE) -> RegistryResult<()> {
+        cleanup_temp(handle)
+    }
+
+    fn cleanup_temp(handle: HANDLE) -> RegistryResult<()> {
+        let mut info = FILE_DISPOSITION_INFO {
+            DeleteFile: TRUE as u8,
+        };
+        if unsafe {
+            SetFileInformationByHandle(
+                handle,
+                FileDispositionInfo as FILE_INFO_BY_HANDLE_CLASS,
+                &mut info as *mut _ as *mut c_void,
+                std::mem::size_of::<FILE_DISPOSITION_INFO>() as DWORD,
+            )
+        } != TRUE
+        {
+            let code = unsafe { GetLastError() };
+            update_io_diagnostic(|diag| {
+                diag.operation = 1;
+                diag.win32_error = code;
+            });
+            return Err(classify_win32_error(code));
+        }
+        // The caller owns and closes the handle exactly once.
+        Ok(())
     }
 
     fn write_temp(parent: &Path, bytes: &[u8]) -> RegistryResult<TempFile> {
+        let descriptor = trusted_sd(false)?;
+        write_temp_inner(parent, bytes, descriptor.0, true)
+    }
+
+    /// Same write/flush/identity path with a caller-supplied descriptor. The
+    /// production caller supplies the trusted SDDL; nonprivileged fixtures use
+    /// a default descriptor because a standard user cannot assign BA ownership.
+    fn write_temp_inner(
+        parent: &Path,
+        bytes: &[u8],
+        descriptor: *mut c_void,
+        validate_security: bool,
+    ) -> RegistryResult<TempFile> {
         for attempt in 0..TEMP_ATTEMPTS {
             let nanos = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -1294,24 +1384,16 @@ pub mod windows {
                 TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
             );
             let path = parent.join(name);
-            let descriptor = trusted_sd(false)?;
-            let handle = match open_verified(
-                &path,
-                &path,
-                true,
-                true,
-                Some(descriptor.0),
-                AclMode::Strict,
-                ObjectKind::File,
-            ) {
+            let handle = match open_temp_new(&path, descriptor, validate_security) {
                 Ok(handle) => handle,
                 Err(Refusal::ConcurrentUpdate) | Err(Refusal::RegistryAbsent) => continue,
                 Err(other) => return Err(other),
             };
             let mut written_total = 0usize;
+            let mut zero_progress = 0u8;
             while written_total < bytes.len() {
                 let mut written: DWORD = 0;
-                if unsafe {
+                let ok = unsafe {
                     WriteFile(
                         handle,
                         bytes[written_total..].as_ptr() as *const c_void,
@@ -1319,16 +1401,31 @@ pub mod windows {
                         &mut written,
                         ptr::null_mut(),
                     )
-                } != TRUE
-                    || written == 0
-                {
+                };
+                if ok != TRUE {
+                    // Only a failed native call has a meaningful last error;
+                    // a successful zero-byte write does not.
                     let code = unsafe { GetLastError() };
                     update_io_diagnostic(|diag| {
                         diag.operation = 1;
                         diag.win32_error = code;
                     });
-                    cleanup_temp(&path, handle);
+                    let _ = cleanup_temp(handle);
+                    unsafe { CloseHandle(handle) };
                     return Err(Refusal::IoFailure);
+                }
+                if written == 0 {
+                    zero_progress += 1;
+                    if zero_progress > 8 {
+                        update_io_diagnostic(|diag| {
+                            diag.operation = 1;
+                            diag.win32_error = 0;
+                        });
+                        let _ = cleanup_temp(handle);
+                        unsafe { CloseHandle(handle) };
+                        return Err(Refusal::IoFailure);
+                    }
+                    continue;
                 }
                 written_total += written as usize;
             }
@@ -1338,11 +1435,11 @@ pub mod windows {
                     diag.operation = 1;
                     diag.win32_error = code;
                 });
-                cleanup_temp(&path, handle);
+                let _ = cleanup_temp(handle);
+                unsafe { CloseHandle(handle) };
                 return Err(Refusal::IoFailure);
             }
-            update_io_diagnostic(|diag| diag.temp_created = true);
-            return Ok(TempFile { path, handle });
+            return Ok(TempFile { handle });
         }
         Err(Refusal::ConcurrentUpdate)
     }
@@ -1432,7 +1529,7 @@ pub mod windows {
         let bytes = canonical_json(proposed).map_err(|_| Refusal::InvalidRegistry)?;
         // The single shared mutex is acquired BEFORE any read/compare/write.
         let _lock = acquire_update_lock(&expected)?;
-        verify_location_structure(&expected, true)?;
+        let directory_pins = verify_location_structure(&expected, true)?;
         let previous = match load_via_handle(&expected) {
             Ok(registry) => Some(registry),
             Err(Refusal::RegistryAbsent) => None,
@@ -1443,68 +1540,52 @@ pub mod windows {
         enforce_monotonic_update(previous.as_ref(), proposed)
             .map_err(|_| Refusal::NonMonotonicUpdate)?;
         let parent = expected.parent().ok_or(Refusal::UntrustedLocation)?;
-        // The verified parent handle is retained through publication. The
-        // destination leaf is resolved by the kernel relative to the source
-        // file's own parent, so no global pathname is used for the write effect.
-        let dir_handle = open_verified(
-            parent,
-            parent,
-            true,
-            false,
-            None,
-            AclMode::Strict,
-            ObjectKind::Directory,
-        )?;
-        let _dir_guard = HandleGuard(dir_handle);
-        let parent_final = final_path_string(dir_handle)?;
+        // The directory pins from verify_location_structure are retained alive
+        // until this function returns. They do not share DELETE, so the pinned
+        // ancestors cannot be renamed or replaced while the temp is created,
+        // published and verified.
+        let parent_pin = directory_pins.last().ok_or(Refusal::UntrustedLocation)?;
+        let parent_final = final_path_string(parent_pin.0)?;
         let temp = write_temp(parent, &bytes)?;
-        // Prove the source object is located beneath the still-open verified
-        // parent before publication. The rename itself is relative to the
-        // source handle's kernel parent, so no pathname is used for the effect.
+        // Prove the source object belongs to the pinned parent before any
+        // publication effect. The native rename then resolves the leaf relative
+        // to that same source object's kernel parent.
         let temp_final = final_path_string(temp.handle)?;
         let prefix = format!("{}\\", parent_final.trim_end_matches('\\'));
         if !temp_final.starts_with(&prefix) {
+            let _ = cleanup_temp(temp.handle);
             drop(temp);
             return Err(Refusal::UntrustedLocation);
         }
         let temp_identity = file_identity(temp.handle)?;
-        let temp_path = temp.path.clone();
         if let Err(refusal) = publish_via_handle(temp.handle) {
+            // Handle-bound disposition of the proven owned temp object; no
+            // pathname deletion and no loss of the original refusal evidence.
+            let _ = cleanup_temp(temp.handle);
             drop(temp);
-            let _ = unsafe { DeleteFileW(wide(temp_path.as_os_str()).as_ptr()) };
             return Err(refusal);
         }
+        // All installed verification uses the SAME verified source handle.
+        update_io_diagnostic(|diag| diag.operation = 3);
         if file_identity(temp.handle)? != temp_identity {
             drop(temp);
             return Err(Refusal::IoFailure);
         }
-        drop(temp);
-        // Re-open the installed file and prove it is the exact published object
-        // with the expected trusted bytes.
-        update_io_diagnostic(|diag| diag.operation = 3);
-        let installed_handle = open_raw(
-            &expected,
-            GENERIC_READ,
-            FILE_SHARE_READ | FILE_SHARE_DELETE,
-            OPEN_EXISTING,
-            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-            None,
-        )?;
-        let installed_identity = file_identity(installed_handle)?;
-        unsafe { CloseHandle(installed_handle) };
-        if installed_identity != temp_identity {
-            return Err(Refusal::IoFailure);
-        }
-        let installed = load_via_handle(&expected)?;
+        validate_handle_security_inner(temp.handle, AclMode::Strict, ObjectKind::File)?;
+        final_path_matches(temp.handle, &expected)?;
+        let installed =
+            parse_registry_bytes(&read_all(temp.handle)?).map_err(|_| Refusal::InvalidRegistry)?;
         if canonical_json(&installed).map_err(|_| Refusal::InvalidRegistry)? != bytes {
+            drop(temp);
             return Err(Refusal::IoFailure);
         }
         update_io_diagnostic(|diag| diag.verification_completed = true);
+        drop(temp);
         Ok(())
     }
 
     pub fn load_registry(path: &Path) -> RegistryResult<OwnerRegistry> {
-        verify_location_structure(path, false)?;
+        let _directory_pins = verify_location_structure(path, false)?;
         load_via_handle(path)
     }
 
@@ -1673,7 +1754,7 @@ pub mod windows {
     /// Verify the exact protected location and the full security of the file
     /// installed there. No directory is created on this read-only path.
     pub fn validate_registry_location(path: &Path) -> RegistryResult<()> {
-        verify_location_structure(path, false)?;
+        let _directory_pins = verify_location_structure(path, false)?;
         validate_registry_leaf(path)
     }
 }
