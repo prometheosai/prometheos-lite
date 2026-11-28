@@ -54,7 +54,9 @@ use std::process::Command;
 #[cfg(windows)]
 use std::ptr;
 
-use serde_json::{Value, json};
+use serde_json::Value;
+#[cfg(windows)]
+use serde_json::json;
 #[cfg(windows)]
 use winapi::shared::minwindef::TRUE;
 #[cfg(windows)]

@@ -532,10 +532,8 @@ impl LiteFailureCase {
         {
             defects.push("source.repositoryRevision must be a bare revision".to_string());
         }
-        for (label, fixture) in [("source.repositoryFixture", &self.source.repository_fixture)] {
-            if let Err(message) = check_fixture_path(fixture) {
-                defects.push(format!("{label}: {message}"));
-            }
+        if let Err(message) = check_fixture_path(&self.source.repository_fixture) {
+            defects.push(format!("source.repositoryFixture: {message}"));
         }
         for (label, value) in [
             ("source.harnessId", &self.source.harness_id),
