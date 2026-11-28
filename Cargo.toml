@@ -61,7 +61,11 @@ libc = "0.2"
 # "winbase" adds GetUserNameW: the OS-authenticated session identity used to
 # verify the human principal behind a gate decision (#131 F1). Same crate,
 # no new dependency — one more API surface of the already-vendored winapi.
-winapi = { version = "0.3", features = ["fileapi", "minwinbase", "jobapi2", "processthreadsapi", "winnt", "handleapi", "tlhelp32", "winbase"] }
+# Issue #340 adds aclapi/accctrl/securitybaseapi/sddl/winerror to the SAME
+# already-vendored MIT-licensed winapi 0.3 crate: Windows token elevation and
+# SID checks, and file/ancestor owner+DACL verification for the trusted owner
+# registry. No new crate, no new license, Cargo.lock dependency set unchanged.
+winapi = { version = "0.3", features = ["fileapi", "minwinbase", "jobapi2", "processthreadsapi", "winnt", "handleapi", "tlhelp32", "winbase", "aclapi", "accctrl", "securitybaseapi", "sddl", "winerror", "shlobj", "knownfolders", "combaseapi", "errhandlingapi", "synchapi"] }
 
 [dev-dependencies]
 tempfile = "3"

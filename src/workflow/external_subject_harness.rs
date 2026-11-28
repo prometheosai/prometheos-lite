@@ -1220,13 +1220,20 @@ mod bounded_writer_tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         let payload = json!({"jsonrpc": "2.0", "id": "blk-2", "method": "initialize", "params": { "pad": "a".repeat(1_000_000) }});
         let err = std::thread::scope(|scope| {
+            // Keep the non-Sync writer and send_line on this owning thread.
+            // Only the cancellation notifier is spawned; it owns a cloned Arc
+            // of the AtomicBool, so no writer reference crosses threads.
             let cancel_clone = Arc::clone(&cancel);
-            let handle =
-                scope.spawn(|| super::send_line(&writer, &payload, deadline, &cancel_clone));
-            // Let the writer reach the blocked write, then cancel.
-            std::thread::sleep(Duration::from_millis(50));
-            cancel.store(true, Ordering::SeqCst);
-            handle.join().expect("send_line thread joins")
+            let notifier = scope.spawn(move || {
+                // Let the writer reach the blocked write, then cancel.
+                std::thread::sleep(Duration::from_millis(50));
+                cancel_clone.store(true, Ordering::SeqCst);
+            });
+
+            let result = super::send_line(&writer, &payload, deadline, &cancel);
+
+            notifier.join().expect("cancellation thread joins");
+            result
         });
         assert_eq!(
             err.expect_err("cancelled during a blocked write").status,
